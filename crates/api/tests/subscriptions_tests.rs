@@ -4297,6 +4297,173 @@ async fn test_fixed_house_of_stake_renewal_refreshes_expired_local_period() {
     assert_eq!(mock.received_requests().await.unwrap().len(), 2);
 }
 
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_expired_house_of_stake_reconcile_failure_is_backed_off() {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "starter": {
+                "providers": { "house-of-stake": { "price_id": "price_hos_starter" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 5_000_000_000_i64 }
+            }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_expired_rpc_backoff.testnet@near";
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&json!({
+            "email": near_email,
+            "name": "HoS Expired RPC Backoff",
+            "oauth_provider": "near"
+        }))
+        .await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(
+        &db,
+        near_email,
+        "price_hos_starter",
+        false,
+    )
+    .await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET current_period_end = $2 WHERE user_id = $1",
+            &[&user.id, &(Utc::now() - Duration::days(1))],
+        )
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        let response = server
+            .get("/v1/credits")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            )
+            .await;
+        assert_eq!(response.status_code(), 200, "{}", response.text());
+    }
+
+    assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+    let status: String = client
+        .query_one(
+            "SELECT status FROM subscriptions WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .unwrap()
+        .get("status");
+    assert_eq!(
+        status, "active",
+        "an RPC failure must not mutate chain state"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_expired_house_of_stake_skipped_reconcile_is_canceled() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_staking_contract_id: Some(String::new()),
+        ..Default::default()
+    })
+    .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "starter": {
+                "providers": { "house-of-stake": { "price_id": "price_hos_starter" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 5_000_000_000_i64 }
+            }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_expired_skipped_sync.testnet@near";
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&json!({
+            "email": near_email,
+            "name": "HoS Expired Skipped Sync",
+            "oauth_provider": "near"
+        }))
+        .await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(
+        &db,
+        near_email,
+        "price_hos_starter",
+        false,
+    )
+    .await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET current_period_end = $2 WHERE user_id = $1",
+            &[&user.id, &(Utc::now() - Duration::days(1))],
+        )
+        .await
+        .unwrap();
+
+    let response = server
+        .get("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+
+    let status: String = client
+        .query_one(
+            "SELECT status FROM subscriptions WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .unwrap()
+        .get("status");
+    assert_eq!(status, "canceled");
+}
+
 #[test]
 fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     let o = ChangePlanOutcome::NearStakingChangePlan {

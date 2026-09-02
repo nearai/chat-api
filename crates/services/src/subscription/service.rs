@@ -994,20 +994,64 @@ impl SubscriptionServiceImpl {
             // A HoS renewal keeps the same subscription id and advances its period on chain.
             // Reconcile before treating the locally persisted period as final; otherwise the
             // first entitlement check after renewal permanently marks a live row canceled.
-            match self.reconcile_near_staking_from_rpc(user_id).await {
-                Ok(_) => {
-                    active_subscriptions = self
-                        .subscription_repo
-                        .get_active_subscriptions(user_id)
-                        .await
-                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        user_id = %user_id.0,
-                        error = %err,
-                        "HoS reconcile failed after the persisted period ended"
-                    );
+            let retry_suppressed = self
+                .house_of_stake_rpc_failure_cache
+                .read()
+                .await
+                .get(&user_id)
+                .is_some_and(|cached| {
+                    cached.failed_at.elapsed().as_secs() < HOUSE_OF_STAKE_RPC_FAILURE_TTL_SECS
+                });
+            if !retry_suppressed {
+                match self.reconcile_near_staking_from_rpc(user_id).await {
+                    Ok(summary) if summary.skipped => {
+                        let mut db_client = self
+                            .db_pool
+                            .get()
+                            .await
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                        let txn = db_client
+                            .transaction()
+                            .await
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                        for sub in active_subscriptions.iter().filter(|s| {
+                            s.provider == "house-of-stake" && s.current_period_end <= now
+                        }) {
+                            self.subscription_repo
+                                .upsert_subscription_authoritative(
+                                    &txn,
+                                    Self::canceled_house_of_stake_history_row(sub.clone(), now),
+                                )
+                                .await
+                                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                        }
+                        txn.commit()
+                            .await
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                        self.invalidate_credit_limit_cache(user_id).await;
+                        active_subscriptions.retain(|s| {
+                            s.provider != "house-of-stake" || s.current_period_end > now
+                        });
+                    }
+                    Ok(_) => {
+                        active_subscriptions = self
+                            .subscription_repo
+                            .get_active_subscriptions(user_id)
+                            .await
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                    }
+                    Err(_) => {
+                        self.house_of_stake_rpc_failure_cache.write().await.insert(
+                            user_id,
+                            CachedHouseOfStakeRpcFailure {
+                                failed_at: Instant::now(),
+                            },
+                        );
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            "HoS reconcile failed after the persisted period ended"
+                        );
+                    }
                 }
             }
         }
