@@ -6295,8 +6295,9 @@ async fn test_expired_house_of_stake_reconcile_does_not_cancel_from_partial_prob
         .unwrap();
     assert_eq!(row.get::<_, String>("status"), "active");
     assert_eq!(
-        row.get::<_, chrono::DateTime<Utc>>("current_period_end"),
-        expired_end
+        row.get::<_, chrono::DateTime<Utc>>("current_period_end")
+            .timestamp_micros(),
+        expired_end.timestamp_micros()
     );
     assert_eq!(mock.received_requests().await.unwrap().len(), 2);
 }
