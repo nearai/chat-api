@@ -147,9 +147,7 @@ mod tests {
     use super::*;
 
     fn test_key() -> [u8; 32] {
-        let mut key = [0; 32];
-        OsRng.fill_bytes(&mut key);
-        key
+        Aes256Gcm::generate_key(OsRng).into()
     }
 
     #[test]
