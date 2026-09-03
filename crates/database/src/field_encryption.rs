@@ -146,9 +146,15 @@ pub fn search_token(key: &[u8; 32], domain: &str, value: &str) -> Result<Vec<u8>
 mod tests {
     use super::*;
 
+    fn test_key() -> [u8; 32] {
+        let mut key = [0; 32];
+        OsRng.fill_bytes(&mut key);
+        key
+    }
+
     #[test]
     fn envelope_round_trips_and_authenticates_context() {
-        let key = [7; 32];
+        let key = test_key();
         let id = Uuid::new_v4();
         let encoded = encrypt(&key, "test-v1", "files", "filename", id, "private.txt").unwrap();
         assert!(!encoded.contains("private.txt"));
@@ -170,7 +176,7 @@ mod tests {
 
     #[test]
     fn plaintext_and_marker_shaped_user_data_remain_readable() {
-        let key = [7; 32];
+        let key = test_key();
         let id = Uuid::new_v4();
         for value in ["legacy", r#"{"__near_db_encrypted":true,"user":"value"}"#] {
             assert_eq!(
@@ -183,7 +189,7 @@ mod tests {
 
     #[test]
     fn search_tokens_are_stable_and_domain_separated() {
-        let key = [9; 32];
+        let key = test_key();
         let a = search_token(&key, "files.provider_id", "file-1").unwrap();
         assert_eq!(
             a,

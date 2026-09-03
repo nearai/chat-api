@@ -24,8 +24,8 @@ be logged.
    disabled, and deploy dual-read support.
 2. Confirm all old replicas have drained.
 3. Set `DB_ENCRYPTION_WRITE_ENABLED=true` and deploy again.
-4. Call `POST /v1/admin/database-encryption/scan` with an empty scope. A limited
-   scan is diagnostic only; require `totals.complete=true` for a release gate.
+4. Call `POST /v1/admin/database-encryption/scan` with an empty scope. Treat the
+   capped scan as diagnostic; it is not the release gate for large tables.
 5. Create explicit-scope dry-run jobs, then execute jobs in small batches. Poll
    `GET /v1/admin/database-encryption/jobs/{job_id}`. Jobs resume from durable
 cursors after restart and can be cancelled at a transaction boundary.

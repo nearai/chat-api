@@ -271,7 +271,7 @@ async fn counts(
                 continue;
             };
             match serde_json::from_str::<Value>(&raw) {
-                Ok(value) if value[database::field_encryption::MARKER] == true => {
+                Ok(value) if database::field_encryption::is_envelope(&value) => {
                     let id: Uuid = row.get(0);
                     if database::field_encryption::decrypt(
                         &config.key,
@@ -460,7 +460,7 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
             let raw: Option<String> = row.get(1);
             let Some(raw) = raw else { continue };
             match serde_json::from_str::<Value>(&raw) {
-                Ok(value) if value[database::field_encryption::MARKER] == true => {
+                Ok(value) if database::field_encryption::is_envelope(&value) => {
                     if database::field_encryption::decrypt(
                         &config.key,
                         &config.key_id,
