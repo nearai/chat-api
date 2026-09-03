@@ -581,10 +581,9 @@ async fn update_conversation(
     request: Request,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "update_conversation called for user_id={}, session_id={}, conversation_id={}",
+        "update_conversation called for user_id={}, session_id={}",
         user.user_id,
-        user.session_id,
-        conversation_id
+        user.session_id
     );
 
     // Validate user has access to the conversation
@@ -727,9 +726,8 @@ async fn get_conversation(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, Response> {
     tracing::info!(
-        "get_conversation called for user_id={:?}, conversation_id={}",
-        user.as_ref().map(|u| u.user_id),
-        conversation_id
+        "get_conversation called for user_id={:?}",
+        user.as_ref().map(|u| u.user_id)
     );
 
     // Check user access OR public share access
@@ -771,11 +769,7 @@ async fn delete_conversation(
     Extension(user): Extension<AuthenticatedUser>,
     Path(conversation_id): Path<String>,
 ) -> Result<Response, Response> {
-    tracing::info!(
-        "delete_conversation called for user_id={}, conversation_id={}",
-        user.user_id,
-        conversation_id
-    );
+    tracing::info!("delete_conversation called for user_id={}", user.user_id);
 
     validate_owner_conversation(&state, &user, &conversation_id).await?;
 
@@ -1544,9 +1538,8 @@ async fn list_conversation_items(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "list_conversation_items called for user_id={:?}, conversation_id={}",
-        user.as_ref().map(|u| u.user_id),
-        conversation_id
+        "list_conversation_items called for user_id={:?}",
+        user.as_ref().map(|u| u.user_id)
     );
 
     // Check user access OR public share access
@@ -1618,10 +1611,9 @@ async fn pin_conversation(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "pin_conversation called for user_id={}, session_id={}, conversation_id={}",
+        "pin_conversation called for user_id={}, session_id={}",
         user.user_id,
-        user.session_id,
-        conversation_id
+        user.session_id
     );
 
     validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
@@ -1690,10 +1682,9 @@ async fn unpin_conversation(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "unpin_conversation called for user_id={}, session_id={}, conversation_id={}",
+        "unpin_conversation called for user_id={}, session_id={}",
         user.user_id,
-        user.session_id,
-        conversation_id
+        user.session_id
     );
 
     validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
@@ -1762,10 +1753,9 @@ async fn archive_conversation(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "archive_conversation called for user_id={}, session_id={}, conversation_id={}",
+        "archive_conversation called for user_id={}, session_id={}",
         user.user_id,
-        user.session_id,
-        conversation_id
+        user.session_id
     );
 
     validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
@@ -1834,10 +1824,9 @@ async fn unarchive_conversation(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "unarchive_conversation called for user_id={}, session_id={}, conversation_id={}",
+        "unarchive_conversation called for user_id={}, session_id={}",
         user.user_id,
-        user.session_id,
-        conversation_id
+        user.session_id
     );
 
     validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
@@ -1906,10 +1895,9 @@ async fn clone_conversation(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "clone_conversation called for user_id={}, session_id={}, conversation_id={}",
+        "clone_conversation called for user_id={}, session_id={}",
         user.user_id,
-        user.session_id,
-        conversation_id
+        user.session_id
     );
 
     // Validate user has access to the source conversation OR it's publicly shared
@@ -2119,11 +2107,7 @@ async fn get_file(
     validate_proxy_path_segment(&file_id)
         .map_err(|_| invalid_proxy_path_segment_response("file_id"))?;
 
-    tracing::info!(
-        "get_file called for user_id={}, file_id={}",
-        user.user_id,
-        file_id
-    );
+    tracing::info!("get_file called for user_id={}", user.user_id);
 
     let file = state
         .file_service
@@ -2173,11 +2157,7 @@ async fn delete_file(
     validate_proxy_path_segment(&file_id)
         .map_err(|_| invalid_proxy_path_segment_response("file_id"))?;
 
-    tracing::info!(
-        "delete_file called for user_id={}, file_id={}",
-        user.user_id,
-        file_id
-    );
+    tracing::info!("delete_file called for user_id={}", user.user_id);
 
     // Delete from DB and OpenAI
     let deleted = state
@@ -2232,11 +2212,7 @@ async fn get_file_content(
     Path(file_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
-    tracing::info!(
-        "get_file_content called for user_id={}, file_id={}",
-        user.user_id,
-        file_id
-    );
+    tracing::info!("get_file_content called for user_id={}", user.user_id);
 
     validate_user_file(&state, &user, &file_id).await?;
 
@@ -4777,8 +4753,7 @@ async fn track_conversation_from_request(
     if let Ok(req) = serde_json::from_slice::<ResponseRequest>(body) {
         if let Some(conversation_id) = req.conversation {
             tracing::info!(
-                "Found conversation_id={} in /responses request for user_id={}, tracking...",
-                conversation_id,
+                "Found conversation in /responses request for user_id={}, tracking...",
                 user_id
             );
 
@@ -4972,11 +4947,7 @@ async fn fetch_conversation_from_proxy(
 
     let decompressed_body = decompress_if_encoded(body_bytes.clone(), &proxy_response.headers)
         .unwrap_or_else(|e| {
-            tracing::warn!(
-                "Failed to decompress conversation response body for conversation_id={}: {}",
-                conversation_id,
-                e
-            );
+            tracing::warn!("Failed to decompress conversation response body: {}", e);
             body_bytes.clone()
         });
 
