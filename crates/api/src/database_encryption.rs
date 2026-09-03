@@ -149,10 +149,10 @@ const APPROVED: &[(&str, &str, &str)] = &[
     ("database_encryption_jobs", "cancel_requested_at", "Operational timestamp"),
 ];
 
-const DEFERRED_TABLES: &[(&str, &str)] = &[
+const ENCRYPTION_REQUIRED_TABLES: &[(&str, &str)] = &[
     (
         "users",
-        "Account/profile data; whole-table encryption design deferred",
+        "Account/profile data requires a repository-aware encryption design",
     ),
     (
         "oauth_accounts",
@@ -242,7 +242,7 @@ const DEFERRED_TABLES: &[(&str, &str)] = &[
 
 #[derive(Default)]
 struct Inventory {
-    deferred_confidential: Vec<Value>,
+    encryption_required: Vec<Value>,
     legacy_confidential: Vec<Value>,
     unclassified: Vec<Value>,
 }
@@ -266,10 +266,10 @@ fn classification(table: &str, column: &str) -> Option<(&'static str, &'static s
             "Legacy conversation data must be removed or encrypted before migration",
         ));
     }
-    DEFERRED_TABLES
+    ENCRYPTION_REQUIRED_TABLES
         .iter()
         .find(|(known_table, _)| *known_table == table)
-        .map(|(_, reason)| ("deferred_confidential", *reason))
+        .map(|(_, reason)| ("encryption_required", *reason))
 }
 
 async fn inventory(state: &AppState) -> anyhow::Result<Inventory> {
@@ -281,10 +281,10 @@ async fn inventory(state: &AppState) -> anyhow::Result<Inventory> {
         let column: String = row.get(1);
         let data_type: String = row.get(2);
         let (kind, reason) = classification(&table, &column)
-            .unwrap_or(("unclassified", "No registry entry or deferred table policy"));
+            .unwrap_or(("unclassified", "No registry entry or whole-table policy"));
         let entry = json!({"table":table,"column":column,"data_type":data_type,"classification":kind,"reason":reason});
         match kind {
-            "deferred_confidential" => inventory.deferred_confidential.push(entry),
+            "encryption_required" => inventory.encryption_required.push(entry),
             "legacy_confidential" => inventory.legacy_confidential.push(entry),
             "unclassified" => inventory.unclassified.push(entry),
             _ => {}
@@ -466,7 +466,7 @@ pub async fn scan(
         "complete": counts.iter().all(|c| c.complete),
     });
     Ok(Json(
-        json!({"run_id":Uuid::new_v4(),"status":"completed","fields":counts,"totals":totals,"approved_plaintext":if req.include_approved_plaintext { json!(APPROVED.iter().map(|(table,column,reason)|json!({"table":table,"column":column,"classification":"approved_plaintext","reason":reason})).collect::<Vec<_>>()) } else { json!([]) },"deferred_confidential":inventory.deferred_confidential,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified}),
+        json!({"run_id":Uuid::new_v4(),"status":"completed","fields":counts,"totals":totals,"approved_plaintext":if req.include_approved_plaintext { json!(APPROVED.iter().map(|(table,column,reason)|json!({"table":table,"column":column,"classification":"approved_plaintext","reason":reason})).collect::<Vec<_>>()) } else { json!([]) },"encryption_required":inventory.encryption_required,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified}),
     ))
 }
 
@@ -680,9 +680,10 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
     let pass = mode != "verify"
         || plaintext == 0
             && invalid == 0
+            && inventory.encryption_required.is_empty()
             && inventory.unclassified.is_empty()
             && inventory.legacy_confidential.is_empty();
-    client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"deferred_confidential":inventory.deferred_confidential,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
+    client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"encryption_required":inventory.encryption_required,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
     Ok(())
 }
 
@@ -841,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn broader_confidential_tables_are_deferred_not_approved() {
+    fn broader_confidential_tables_require_encryption() {
         for table in [
             "users",
             "oauth_tokens",
@@ -851,7 +852,7 @@ mod tests {
             "agent_instances",
         ] {
             let (kind, reason) = classification(table, "representative_column").unwrap();
-            assert_eq!(kind, "deferred_confidential");
+            assert_eq!(kind, "encryption_required");
             assert!(!reason.is_empty());
         }
         assert!(classification("new_unreviewed_table", "payload").is_none());
