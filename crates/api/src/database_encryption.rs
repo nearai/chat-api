@@ -112,33 +112,185 @@ const APPROVED: &[(&str, &str, &str)] = &[
     ("database_encryption_jobs", "progress", "Aggregate migration counts"),
     ("database_encryption_jobs", "last_error_class", "Redacted error class"),
     ("database_encryption_jobs", "last_error_message", "Redacted error class only"),
+    ("conversations", "created_at", "Operational timestamp"),
+    ("conversations", "updated_at", "Operational timestamp"),
+    ("files", "bytes", "Operational size counter"),
+    ("files", "file_created_at", "Provider timestamp"),
+    ("files", "file_expires_at", "Provider timestamp"),
+    ("files", "created_at", "Operational timestamp"),
+    ("files", "updated_at", "Operational timestamp"),
+    ("files", "encryption_id", "Internal encryption context UUID"),
+    ("conversation_share_groups", "id", "Internal relationship UUID"),
+    ("conversation_share_groups", "owner_user_id", "Required relationship key"),
+    ("conversation_share_groups", "created_at", "Operational timestamp"),
+    ("conversation_share_groups", "updated_at", "Operational timestamp"),
+    ("conversation_share_groups", "name_search_token", "Non-reversible keyed lookup token"),
+    ("conversation_share_group_members", "id", "Internal relationship UUID"),
+    ("conversation_share_group_members", "group_id", "Required relationship key"),
+    ("conversation_share_group_members", "created_at", "Operational timestamp"),
+    ("conversation_share_group_members", "member_value_search_token", "Non-reversible keyed lookup token"),
+    ("conversation_shares", "id", "Internal relationship UUID"),
+    ("conversation_shares", "owner_user_id", "Required relationship key"),
+    ("conversation_shares", "group_id", "Required relationship key"),
+    ("conversation_shares", "created_at", "Operational timestamp"),
+    ("conversation_shares", "updated_at", "Operational timestamp"),
+    ("conversation_shares", "recipient_value_search_token", "Non-reversible keyed lookup token"),
+    ("conversation_shares", "org_domain_search_token", "Non-reversible keyed lookup token"),
+    ("user_activity_log", "id", "Internal event UUID"),
+    ("user_activity_log", "user_id", "Required relationship key"),
+    ("user_activity_log", "created_at", "Operational timestamp"),
+    ("database_encryption_jobs", "id", "Internal job UUID"),
+    ("database_encryption_jobs", "batch_size", "Operational batch limit"),
+    ("database_encryption_jobs", "max_rows", "Operational row limit"),
+    ("database_encryption_jobs", "admin_actor", "Administrative audit relationship"),
+    ("database_encryption_jobs", "created_at", "Operational timestamp"),
+    ("database_encryption_jobs", "started_at", "Operational timestamp"),
+    ("database_encryption_jobs", "completed_at", "Operational timestamp"),
+    ("database_encryption_jobs", "cancel_requested_at", "Operational timestamp"),
 ];
 
-async fn unclassified(state: &AppState) -> anyhow::Result<Vec<Value>> {
+const DEFERRED_TABLES: &[(&str, &str)] = &[
+    (
+        "users",
+        "Account/profile data; whole-table encryption design deferred",
+    ),
+    (
+        "oauth_accounts",
+        "OAuth identity data; lookup and uniqueness redesign required",
+    ),
+    (
+        "oauth_tokens",
+        "OAuth credentials; credential lifecycle redesign required",
+    ),
+    (
+        "oauth_states",
+        "Authentication state; lookup and expiry redesign required",
+    ),
+    (
+        "sessions",
+        "Authentication session data; lookup and expiry redesign required",
+    ),
+    (
+        "user_settings",
+        "User profile/settings data outside Stage I",
+    ),
+    (
+        "app_config",
+        "Application secrets/configuration outside Stage I",
+    ),
+    (
+        "near_used_nonces",
+        "Authentication replay-protection data outside Stage I",
+    ),
+    ("user_bans", "Account enforcement data outside Stage I"),
+    (
+        "models",
+        "Administrative model configuration outside Stage I",
+    ),
+    (
+        "system_configs",
+        "Administrative system configuration outside Stage I",
+    ),
+    ("user_usage_event", "Usage and billing data outside Stage I"),
+    ("stripe_customers", "Billing identity data outside Stage I"),
+    ("subscriptions", "Billing/subscription data outside Stage I"),
+    ("payment_webhooks", "Billing webhook data outside Stage I"),
+    (
+        "agent_instances",
+        "Agent identity and credential data outside Stage I",
+    ),
+    (
+        "agent_api_keys",
+        "Agent credential metadata outside Stage I",
+    ),
+    (
+        "agent_usage_log",
+        "Agent usage/billing data outside Stage I",
+    ),
+    ("agent_balance", "Agent billing aggregates outside Stage I"),
+    (
+        "agent_instance_status_history",
+        "Agent audit data outside Stage I",
+    ),
+    ("user_credits", "Billing/credit data outside Stage I"),
+    (
+        "credit_transactions",
+        "Billing transaction data outside Stage I",
+    ),
+    (
+        "user_passkey_credentials",
+        "Passkey credentials outside Stage I",
+    ),
+    (
+        "email_verification_challenges",
+        "Authentication challenge data outside Stage I",
+    ),
+    (
+        "user_account_deletions",
+        "Account deletion state outside Stage I",
+    ),
+    ("aml_risk_reports", "AML report data outside Stage I"),
+    (
+        "aml_account_allowlist",
+        "AML allowlist data outside Stage I",
+    ),
+    (
+        "house_of_stake_credit_entitlement_snapshots",
+        "Billing entitlement data outside Stage I",
+    ),
+];
+
+#[derive(Default)]
+struct Inventory {
+    deferred_confidential: Vec<Value>,
+    legacy_confidential: Vec<Value>,
+    unclassified: Vec<Value>,
+}
+
+fn classification(table: &str, column: &str) -> Option<(&'static str, &'static str)> {
+    if FIELDS
+        .iter()
+        .any(|field| field.table == table && field.column == column)
+    {
+        return Some(("encrypt", "Stage I confidential field"));
+    }
+    if let Some((_, _, reason)) = APPROVED
+        .iter()
+        .find(|(known_table, known_column, _)| *known_table == table && *known_column == column)
+    {
+        return Some(("approved_plaintext", reason));
+    }
+    if table == "response_authors" || (table == "conversations" && column == "title") {
+        return Some((
+            "legacy_confidential",
+            "Legacy conversation data must be removed or encrypted before migration",
+        ));
+    }
+    DEFERRED_TABLES
+        .iter()
+        .find(|(known_table, _)| *known_table == table)
+        .map(|(_, reason)| ("deferred_confidential", *reason))
+}
+
+async fn inventory(state: &AppState) -> anyhow::Result<Inventory> {
     let client = state.db_pool.get().await?;
-    let tables = vec![
-        "conversations",
-        "files",
-        "conversation_share_groups",
-        "conversation_share_group_members",
-        "conversation_shares",
-        "user_activity_log",
-        "response_authors",
-        "database_encryption_jobs",
-    ];
-    let rows = client.query("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=ANY($1) AND data_type IN ('text','character varying','json','jsonb') ORDER BY table_name,column_name", &[&tables]).await?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|row| {
-            let table: String = row.get(0);
-            let column: String = row.get(1);
-            let known = FIELDS
-                .iter()
-                .any(|field| field.table == table && field.column == column)
-                || APPROVED.iter().any(|(t, c, _)| *t == table && *c == column);
-            (!known).then(|| json!({"table":table,"column":column,"classification":"unclassified"}))
-        })
-        .collect())
+    let rows = client.query("SELECT columns.table_name,columns.column_name,columns.data_type FROM information_schema.columns columns JOIN information_schema.tables tables USING(table_schema,table_name) WHERE columns.table_schema='public' AND tables.table_type='BASE TABLE' AND columns.table_name <> 'refinery_schema_history' ORDER BY columns.table_name,columns.ordinal_position", &[]).await?;
+    let mut inventory = Inventory::default();
+    for row in rows {
+        let table: String = row.get(0);
+        let column: String = row.get(1);
+        let data_type: String = row.get(2);
+        let (kind, reason) = classification(&table, &column)
+            .unwrap_or(("unclassified", "No registry entry or deferred table policy"));
+        let entry = json!({"table":table,"column":column,"data_type":data_type,"classification":kind,"reason":reason});
+        match kind {
+            "deferred_confidential" => inventory.deferred_confidential.push(entry),
+            "legacy_confidential" => inventory.legacy_confidential.push(entry),
+            "unclassified" => inventory.unclassified.push(entry),
+            _ => {}
+        }
+    }
+    Ok(inventory)
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -304,7 +456,7 @@ pub async fn scan(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let fields = selected(&req.scope)?;
     let counts = counts(&state, &fields, req.limit).await.map_err(internal)?;
-    let unclassified = unclassified(&state).await.map_err(internal)?;
+    let inventory = inventory(&state).await.map_err(internal)?;
     let totals = json!({
         "plaintext": counts.iter().map(|c| c.plaintext).sum::<i64>(),
         "encrypted": counts.iter().map(|c| c.encrypted).sum::<i64>(),
@@ -314,7 +466,7 @@ pub async fn scan(
         "complete": counts.iter().all(|c| c.complete),
     });
     Ok(Json(
-        json!({"run_id":Uuid::new_v4(),"status":"completed","fields":counts,"totals":totals,"approved_plaintext":if req.include_approved_plaintext { json!(APPROVED.iter().map(|(table,column,reason)|json!({"table":table,"column":column,"classification":"approved_plaintext","reason":reason})).collect::<Vec<_>>()) } else { json!([]) },"unclassified":unclassified}),
+        json!({"run_id":Uuid::new_v4(),"status":"completed","fields":counts,"totals":totals,"approved_plaintext":if req.include_approved_plaintext { json!(APPROVED.iter().map(|(table,column,reason)|json!({"table":table,"column":column,"classification":"approved_plaintext","reason":reason})).collect::<Vec<_>>()) } else { json!([]) },"deferred_confidential":inventory.deferred_confidential,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified}),
     ))
 }
 
@@ -520,13 +672,17 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
         tx.execute("UPDATE database_encryption_jobs SET progress=$2,cursor=$3 WHERE id=$1",&[&id,&json!({"processed":processed,"encrypted":encrypted,"plaintext":plaintext,"invalid_envelopes":invalid}),&json!({"field_index":field_index,"after_id":after})]).await?;
         tx.commit().await?;
     }
-    let unclassified = if mode == "verify" {
-        unclassified(state).await?
+    let inventory = if mode == "verify" {
+        inventory(state).await?
     } else {
-        Vec::new()
+        Inventory::default()
     };
-    let pass = mode != "verify" || plaintext == 0 && invalid == 0 && unclassified.is_empty();
-    client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"unclassified":unclassified})]).await?;
+    let pass = mode != "verify"
+        || plaintext == 0
+            && invalid == 0
+            && inventory.unclassified.is_empty()
+            && inventory.legacy_confidential.is_empty();
+    client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"deferred_confidential":inventory.deferred_confidential,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
     Ok(())
 }
 
@@ -682,5 +838,22 @@ mod tests {
             .any(|(table, column, reason)| *table == "files"
                 && *column == "id"
                 && reason.contains("follow-up")));
+    }
+
+    #[test]
+    fn broader_confidential_tables_are_deferred_not_approved() {
+        for table in [
+            "users",
+            "oauth_tokens",
+            "subscriptions",
+            "aml_risk_reports",
+            "user_passkey_credentials",
+            "agent_instances",
+        ] {
+            let (kind, reason) = classification(table, "representative_column").unwrap();
+            assert_eq!(kind, "deferred_confidential");
+            assert!(!reason.is_empty());
+        }
+        assert!(classification("new_unreviewed_table", "payload").is_none());
     }
 }

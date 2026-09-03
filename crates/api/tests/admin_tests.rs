@@ -31,6 +31,13 @@ async fn database_encryption_scan_and_write_gate_are_admin_only_and_safe() {
     assert_eq!(scan.status_code(), 200);
     let body: serde_json::Value = scan.json();
     assert_eq!(body["status"], "completed");
+    assert_eq!(body["unclassified"], json!([]), "{body}");
+    assert_eq!(body["legacy_confidential"], json!([]), "{body}");
+    assert!(body["deferred_confidential"]
+        .as_array()
+        .is_some_and(|fields| fields.iter().any(|field| field["table"] == "users"
+            && field["column"] == "email"
+            && field["classification"] == "deferred_confidential")));
     assert!(body["fields"]
         .as_array()
         .is_some_and(|fields| fields.iter().all(|field| field.get("sample").is_none())));

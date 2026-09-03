@@ -74,6 +74,23 @@ File content is not stored in this database; verify object-storage encryption
 separately. Legacy `conversations.title` and the dropped `response_authors` table
 must be confirmed absent in every deployed database and backup.
 
+## Whole-database classification
+
+The inventory enumerates every column in every application base table, across
+all PostgreSQL data types. Stage I encrypted fields and approved operational
+columns are registered individually. Account/profile, OAuth/session, billing,
+AML, passkey, agent, configuration, deletion, and broader usage tables are
+reported field-by-field as `deferred_confidential`; they are never silently
+treated as approved plaintext. New tables outside these policies and new
+columns in the individually classified Stage I tables are `unclassified` and
+fail verification. A deployed legacy `conversations.title` column or
+`response_authors` table is reported as `legacy_confidential` and also fails
+verification.
+
+Deferred fields do not fail this conversation/file Stage I release gate. They
+require repository-aware follow-up designs for lookup tokens, uniqueness,
+foreign keys, retention, and credential lifecycle before encryption.
+
 ## Temporary plaintext exceptions
 
 `conversations.id` and `files.id` remain protocol-facing provider identifiers
