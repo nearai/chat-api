@@ -1,6 +1,7 @@
 # Conversation and file database encryption
 
-This runbook covers the Stage I confidential fields tracked by issue #394.
+This runbook covers the whole-database confidential-field migration initiated by
+issue #394 before database access leaves the CVM/TEE boundary.
 
 ## Key configuration
 
@@ -77,12 +78,12 @@ must be confirmed absent in every deployed database and backup.
 ## Whole-database classification
 
 The inventory enumerates every column in every application base table, across
-all PostgreSQL data types. Stage I encrypted fields and approved operational
+all PostgreSQL data types. Implemented encrypted fields and approved operational
 columns are registered individually. Account/profile, OAuth/session, billing,
 AML, passkey, agent, configuration, deletion, and broader usage tables are
 reported field-by-field as `encryption_required`; they are never silently
 treated as approved plaintext. New tables outside these policies and new
-columns in the individually classified Stage I tables are `unclassified` and
+columns in the individually classified encryption tables are `unclassified` and
 fail verification. A deployed legacy `conversations.title` column or
 `response_authors` table is reported as `legacy_confidential` and also fails
 verification.
@@ -91,11 +92,9 @@ verification.
 repository-aware designs for lookup tokens, uniqueness, foreign keys,
 retention, and credential lifecycle are implemented and verified.
 
-## Temporary plaintext exceptions
+## Approved operational plaintext
 
-`conversations.id` and `files.id` remain protocol-facing provider identifiers
-and primary keys during Stage I. Their owner is the chat-api team. They must be
-migrated to internal UUID primary keys plus encrypted provider IDs and keyed
-lookup tokens before adopting a broader correlation-hiding threat model. User
-relationship IDs, timestamps, status/permission enums, counters, sizes, and
-file purpose remain approved operational plaintext.
+Internal relationship UUIDs, timestamps, status/permission enums, booleans,
+counters, sizes, non-reversible hashes/MACs, and file purpose remain approved
+operational plaintext. Provider conversation and file identifiers are sensitive
+and must migrate to encrypted values with keyed lookup tokens.

@@ -92,26 +92,75 @@ const FIELDS: &[Field] = &[
 ];
 
 const APPROVED: &[(&str, &str, &str)] = &[
-    ("conversations", "id", "Temporary Stage I exception: protocol-facing provider ID remains the primary key; owner chat-api, follow-up required before broader correlation-hiding target"),
-    ("files", "id", "Temporary Stage I exception: protocol-facing provider ID remains the primary key; owner chat-api, follow-up required before broader correlation-hiding target"),
     ("conversations", "user_id", "Required relationship key"),
     ("files", "user_id", "Required relationship key"),
     ("files", "purpose", "Queryable protocol enum"),
-    ("conversation_share_group_members", "member_type", "Queryable recipient-type enum"),
-    ("conversation_shares", "conversation_id", "Relationship to approved Stage I provider conversation identifier"),
-    ("conversation_shares", "share_type", "Queryable sharing enum"),
-    ("conversation_shares", "permission", "Queryable permission enum"),
-    ("conversation_shares", "recipient_type", "Queryable recipient-type enum"),
-    ("user_activity_log", "activity_type", "Queryable analytics event enum"),
-    ("user_activity_log", "auth_method", "Queryable authentication-method enum"),
-    ("database_encryption_jobs", "mode", "Operational migration state"),
-    ("database_encryption_jobs", "status", "Operational migration state"),
+    (
+        "conversation_share_group_members",
+        "member_type",
+        "Queryable recipient-type enum",
+    ),
+    (
+        "conversation_shares",
+        "share_type",
+        "Queryable sharing enum",
+    ),
+    (
+        "conversation_shares",
+        "permission",
+        "Queryable permission enum",
+    ),
+    (
+        "conversation_shares",
+        "recipient_type",
+        "Queryable recipient-type enum",
+    ),
+    (
+        "user_activity_log",
+        "activity_type",
+        "Queryable analytics event enum",
+    ),
+    (
+        "user_activity_log",
+        "auth_method",
+        "Queryable authentication-method enum",
+    ),
+    (
+        "database_encryption_jobs",
+        "mode",
+        "Operational migration state",
+    ),
+    (
+        "database_encryption_jobs",
+        "status",
+        "Operational migration state",
+    ),
     ("database_encryption_jobs", "scope", "Field names only"),
-    ("database_encryption_jobs", "actions", "Operational migration state"),
-    ("database_encryption_jobs", "cursor", "Internal UUID cursor only"),
-    ("database_encryption_jobs", "progress", "Aggregate migration counts"),
-    ("database_encryption_jobs", "last_error_class", "Redacted error class"),
-    ("database_encryption_jobs", "last_error_message", "Redacted error class only"),
+    (
+        "database_encryption_jobs",
+        "actions",
+        "Operational migration state",
+    ),
+    (
+        "database_encryption_jobs",
+        "cursor",
+        "Internal UUID cursor only",
+    ),
+    (
+        "database_encryption_jobs",
+        "progress",
+        "Aggregate migration counts",
+    ),
+    (
+        "database_encryption_jobs",
+        "last_error_class",
+        "Redacted error class",
+    ),
+    (
+        "database_encryption_jobs",
+        "last_error_message",
+        "Redacted error class only",
+    ),
     ("conversations", "created_at", "Operational timestamp"),
     ("conversations", "updated_at", "Operational timestamp"),
     ("files", "bytes", "Operational size counter"),
@@ -120,124 +169,398 @@ const APPROVED: &[(&str, &str, &str)] = &[
     ("files", "created_at", "Operational timestamp"),
     ("files", "updated_at", "Operational timestamp"),
     ("files", "encryption_id", "Internal encryption context UUID"),
-    ("conversation_share_groups", "id", "Internal relationship UUID"),
-    ("conversation_share_groups", "owner_user_id", "Required relationship key"),
-    ("conversation_share_groups", "created_at", "Operational timestamp"),
-    ("conversation_share_groups", "updated_at", "Operational timestamp"),
-    ("conversation_share_groups", "name_search_token", "Non-reversible keyed lookup token"),
-    ("conversation_share_group_members", "id", "Internal relationship UUID"),
-    ("conversation_share_group_members", "group_id", "Required relationship key"),
-    ("conversation_share_group_members", "created_at", "Operational timestamp"),
-    ("conversation_share_group_members", "member_value_search_token", "Non-reversible keyed lookup token"),
+    (
+        "conversation_share_groups",
+        "id",
+        "Internal relationship UUID",
+    ),
+    (
+        "conversation_share_groups",
+        "owner_user_id",
+        "Required relationship key",
+    ),
+    (
+        "conversation_share_groups",
+        "created_at",
+        "Operational timestamp",
+    ),
+    (
+        "conversation_share_groups",
+        "updated_at",
+        "Operational timestamp",
+    ),
+    (
+        "conversation_share_groups",
+        "name_search_token",
+        "Non-reversible keyed lookup token",
+    ),
+    (
+        "conversation_share_group_members",
+        "id",
+        "Internal relationship UUID",
+    ),
+    (
+        "conversation_share_group_members",
+        "group_id",
+        "Required relationship key",
+    ),
+    (
+        "conversation_share_group_members",
+        "created_at",
+        "Operational timestamp",
+    ),
+    (
+        "conversation_share_group_members",
+        "member_value_search_token",
+        "Non-reversible keyed lookup token",
+    ),
     ("conversation_shares", "id", "Internal relationship UUID"),
-    ("conversation_shares", "owner_user_id", "Required relationship key"),
-    ("conversation_shares", "group_id", "Required relationship key"),
+    (
+        "conversation_shares",
+        "owner_user_id",
+        "Required relationship key",
+    ),
+    (
+        "conversation_shares",
+        "group_id",
+        "Required relationship key",
+    ),
     ("conversation_shares", "created_at", "Operational timestamp"),
     ("conversation_shares", "updated_at", "Operational timestamp"),
-    ("conversation_shares", "recipient_value_search_token", "Non-reversible keyed lookup token"),
-    ("conversation_shares", "org_domain_search_token", "Non-reversible keyed lookup token"),
+    (
+        "conversation_shares",
+        "recipient_value_search_token",
+        "Non-reversible keyed lookup token",
+    ),
+    (
+        "conversation_shares",
+        "org_domain_search_token",
+        "Non-reversible keyed lookup token",
+    ),
     ("user_activity_log", "id", "Internal event UUID"),
     ("user_activity_log", "user_id", "Required relationship key"),
     ("user_activity_log", "created_at", "Operational timestamp"),
     ("database_encryption_jobs", "id", "Internal job UUID"),
-    ("database_encryption_jobs", "batch_size", "Operational batch limit"),
-    ("database_encryption_jobs", "max_rows", "Operational row limit"),
-    ("database_encryption_jobs", "admin_actor", "Administrative audit relationship"),
-    ("database_encryption_jobs", "created_at", "Operational timestamp"),
-    ("database_encryption_jobs", "started_at", "Operational timestamp"),
-    ("database_encryption_jobs", "completed_at", "Operational timestamp"),
-    ("database_encryption_jobs", "cancel_requested_at", "Operational timestamp"),
+    (
+        "database_encryption_jobs",
+        "batch_size",
+        "Operational batch limit",
+    ),
+    (
+        "database_encryption_jobs",
+        "max_rows",
+        "Operational row limit",
+    ),
+    (
+        "database_encryption_jobs",
+        "admin_actor",
+        "Administrative audit relationship",
+    ),
+    (
+        "database_encryption_jobs",
+        "created_at",
+        "Operational timestamp",
+    ),
+    (
+        "database_encryption_jobs",
+        "started_at",
+        "Operational timestamp",
+    ),
+    (
+        "database_encryption_jobs",
+        "completed_at",
+        "Operational timestamp",
+    ),
+    (
+        "database_encryption_jobs",
+        "cancel_requested_at",
+        "Operational timestamp",
+    ),
 ];
 
-const ENCRYPTION_REQUIRED_TABLES: &[(&str, &str)] = &[
+const SENSITIVE_FIELDS: &[(&str, &str, &str)] = &[
+    (
+        "conversations",
+        "id",
+        "External conversation identifier; migrate to encrypted value and keyed token",
+    ),
+    (
+        "files",
+        "id",
+        "External file identifier; migrate to encrypted value and keyed token",
+    ),
+    (
+        "conversation_shares",
+        "conversation_id",
+        "External conversation identifier; replace with internal relationship UUID",
+    ),
     (
         "users",
-        "Account/profile data requires a repository-aware encryption design",
+        "email",
+        "PII and equality lookup; encrypt with keyed token",
     ),
+    ("users", "name", "User profile PII"),
+    ("users", "avatar_url", "User profile URL"),
     (
         "oauth_accounts",
-        "OAuth identity data; lookup and uniqueness redesign required",
+        "provider_user_id",
+        "External identity; encrypt with keyed token",
     ),
+    ("oauth_tokens", "access_token", "OAuth credential"),
+    ("oauth_tokens", "refresh_token", "OAuth credential"),
     (
-        "oauth_tokens",
-        "OAuth credentials; credential lifecycle redesign required",
+        "oauth_states",
+        "state",
+        "Authentication secret; replace lookup with keyed token",
     ),
     (
         "oauth_states",
-        "Authentication state; lookup and expiry redesign required",
+        "redirect_uri",
+        "User-controlled authentication URL",
     ),
     (
-        "sessions",
-        "Authentication session data; lookup and expiry redesign required",
+        "oauth_states",
+        "frontend_callback",
+        "User-controlled callback URL",
     ),
-    (
-        "user_settings",
-        "User profile/settings data outside Stage I",
-    ),
+    ("user_settings", "content", "Arbitrary user settings JSON"),
     (
         "app_config",
-        "Application secrets/configuration outside Stage I",
+        "value",
+        "Application configuration may contain secrets",
     ),
-    (
-        "near_used_nonces",
-        "Authentication replay-protection data outside Stage I",
-    ),
-    ("user_bans", "Account enforcement data outside Stage I"),
+    ("user_bans", "reason", "Free-form account enforcement data"),
     (
         "models",
-        "Administrative model configuration outside Stage I",
+        "settings",
+        "Arbitrary administrative configuration JSON",
     ),
     (
         "system_configs",
-        "Administrative system configuration outside Stage I",
-    ),
-    ("user_usage_event", "Usage and billing data outside Stage I"),
-    ("stripe_customers", "Billing identity data outside Stage I"),
-    ("subscriptions", "Billing/subscription data outside Stage I"),
-    ("payment_webhooks", "Billing webhook data outside Stage I"),
-    (
-        "agent_instances",
-        "Agent identity and credential data outside Stage I",
+        "value",
+        "Arbitrary administrative configuration JSON",
     ),
     (
-        "agent_api_keys",
-        "Agent credential metadata outside Stage I",
+        "user_usage_event",
+        "details",
+        "Arbitrary usage metadata JSON",
     ),
     (
-        "agent_usage_log",
-        "Agent usage/billing data outside Stage I",
-    ),
-    ("agent_balance", "Agent billing aggregates outside Stage I"),
-    (
-        "agent_instance_status_history",
-        "Agent audit data outside Stage I",
-    ),
-    ("user_credits", "Billing/credit data outside Stage I"),
-    (
-        "credit_transactions",
-        "Billing transaction data outside Stage I",
+        "stripe_customers",
+        "customer_id",
+        "External billing identity; encrypt with keyed token",
     ),
     (
-        "user_passkey_credentials",
-        "Passkey credentials outside Stage I",
+        "subscriptions",
+        "subscription_id",
+        "External billing identifier; encrypt with keyed token",
     ),
     (
-        "email_verification_challenges",
-        "Authentication challenge data outside Stage I",
-    ),
-    (
-        "user_account_deletions",
-        "Account deletion state outside Stage I",
-    ),
-    ("aml_risk_reports", "AML report data outside Stage I"),
-    (
-        "aml_account_allowlist",
-        "AML allowlist data outside Stage I",
+        "subscriptions",
+        "customer_id",
+        "External billing identity; encrypt with keyed token",
     ),
     (
         "house_of_stake_credit_entitlement_snapshots",
-        "Billing entitlement data outside Stage I",
+        "subscription_id",
+        "External billing identifier; replace with internal relationship key",
     ),
+    (
+        "credit_transactions",
+        "reference_id",
+        "External billing transaction identifier",
+    ),
+    (
+        "payment_webhooks",
+        "event_id",
+        "External billing event identifier; encrypt with keyed token",
+    ),
+    ("payment_webhooks", "payload", "Raw billing webhook payload"),
+    (
+        "agent_instances",
+        "instance_id",
+        "External agent identifier; encrypt with keyed token",
+    ),
+    ("agent_instances", "name", "User-provided agent name"),
+    (
+        "agent_instances",
+        "public_ssh_key",
+        "User credential material",
+    ),
+    ("agent_instances", "instance_url", "Private service URL"),
+    ("agent_instances", "instance_token", "Agent credential"),
+    ("agent_instances", "dashboard_url", "Private dashboard URL"),
+    (
+        "agent_instances",
+        "agent_api_base_url",
+        "Private service URL",
+    ),
+    (
+        "agent_instances",
+        "auth_session_token",
+        "Agent session credential",
+    ),
+    ("agent_api_keys", "name", "User-provided credential label"),
+    (
+        "agent_instance_status_history",
+        "change_reason",
+        "Free-form audit text",
+    ),
+    (
+        "user_passkey_credentials",
+        "auth_secret",
+        "Passkey credential",
+    ),
+    (
+        "user_passkey_credentials",
+        "backup_passphrase",
+        "Passkey recovery credential",
+    ),
+    (
+        "email_verification_challenges",
+        "email",
+        "PII and equality lookup; encrypt with keyed token",
+    ),
+    ("email_verification_challenges", "ip_address", "Network PII"),
+    (
+        "email_verification_challenges",
+        "provider_message_id",
+        "External message identifier",
+    ),
+    (
+        "user_account_deletions",
+        "last_error",
+        "Free-form error text may contain PII",
+    ),
+    (
+        "user_account_deletions",
+        "progress",
+        "Arbitrary deletion workflow JSON",
+    ),
+    (
+        "aml_risk_reports",
+        "account_id",
+        "Financial account identity; encrypt with keyed token",
+    ),
+    (
+        "aml_risk_reports",
+        "provider_report_id",
+        "External AML report identifier",
+    ),
+    (
+        "aml_risk_reports",
+        "reason",
+        "Sensitive AML decision detail",
+    ),
+    ("aml_risk_reports", "result", "Raw AML provider result"),
+    (
+        "aml_account_allowlist",
+        "account_id",
+        "Financial account identity; encrypt with keyed token",
+    ),
+    (
+        "aml_account_allowlist",
+        "reason",
+        "Sensitive AML allowlist rationale",
+    ),
+];
+
+const APPROVED_TEXT_FIELDS: &[(&str, &str)] = &[
+    ("agent_api_keys", "key_hash"),
+    ("agent_instances", "type"),
+    ("agent_instances", "status"),
+    ("agent_usage_log", "model_id"),
+    ("agent_usage_log", "request_type"),
+    ("agent_instance_status_history", "old_status"),
+    ("agent_instance_status_history", "new_status"),
+    ("aml_risk_reports", "flow"),
+    ("aml_risk_reports", "provider"),
+    ("aml_risk_reports", "address_type"),
+    ("aml_risk_reports", "risk_level"),
+    ("aml_risk_reports", "active_source"),
+    ("app_config", "key"),
+    ("credit_transactions", "type"),
+    ("email_verification_challenges", "code_mac"),
+    ("email_verification_challenges", "status"),
+    (
+        "house_of_stake_credit_entitlement_snapshots",
+        "credited_stake_yocto",
+    ),
+    (
+        "house_of_stake_credit_entitlement_snapshots",
+        "last_observed_stake_yocto",
+    ),
+    ("models", "model_id"),
+    ("near_used_nonces", "nonce_hex"),
+    ("oauth_accounts", "provider"),
+    ("oauth_states", "provider"),
+    ("oauth_tokens", "provider"),
+    ("payment_webhooks", "provider"),
+    ("sessions", "token_hash"),
+    ("subscriptions", "provider"),
+    ("subscriptions", "price_id"),
+    ("subscriptions", "status"),
+    ("subscriptions", "pending_downgrade_target_price_id"),
+    ("subscriptions", "pending_downgrade_from_price_id"),
+    ("subscriptions", "pending_downgrade_status"),
+    ("system_configs", "key"),
+    ("user_account_deletions", "status"),
+    ("user_bans", "ban_type"),
+    ("user_usage_event", "metric_key"),
+    ("user_usage_event", "model_id"),
+];
+
+const STRUCTURAL_TYPES: &[&str] = &[
+    "uuid",
+    "smallint",
+    "integer",
+    "bigint",
+    "numeric",
+    "real",
+    "double precision",
+    "boolean",
+    "timestamp with time zone",
+    "timestamp without time zone",
+    "date",
+    "bytea",
+];
+
+const CLASSIFIED_TABLES: &[&str] = &[
+    "agent_api_keys",
+    "agent_balance",
+    "agent_instance_status_history",
+    "agent_instances",
+    "agent_usage_log",
+    "aml_account_allowlist",
+    "aml_risk_reports",
+    "app_config",
+    "conversation_share_group_members",
+    "conversation_share_groups",
+    "conversation_shares",
+    "conversations",
+    "credit_transactions",
+    "database_encryption_jobs",
+    "email_verification_challenges",
+    "files",
+    "house_of_stake_credit_entitlement_snapshots",
+    "models",
+    "near_used_nonces",
+    "oauth_accounts",
+    "oauth_states",
+    "oauth_tokens",
+    "payment_webhooks",
+    "sessions",
+    "stripe_customers",
+    "subscriptions",
+    "system_configs",
+    "user_account_deletions",
+    "user_activity_log",
+    "user_bans",
+    "user_credits",
+    "user_passkey_credentials",
+    "user_settings",
+    "user_usage_event",
+    "users",
 ];
 
 #[derive(Default)]
@@ -247,7 +570,11 @@ struct Inventory {
     unclassified: Vec<Value>,
 }
 
-fn classification(table: &str, column: &str) -> Option<(&'static str, &'static str)> {
+fn classification(
+    table: &str,
+    column: &str,
+    data_type: &str,
+) -> Option<(&'static str, &'static str)> {
     if FIELDS
         .iter()
         .any(|field| field.table == table && field.column == column)
@@ -266,10 +593,25 @@ fn classification(table: &str, column: &str) -> Option<(&'static str, &'static s
             "Legacy conversation data must be removed or encrypted before migration",
         ));
     }
-    ENCRYPTION_REQUIRED_TABLES
+    if let Some((_, _, reason)) = SENSITIVE_FIELDS
         .iter()
-        .find(|(known_table, _)| *known_table == table)
-        .map(|(_, reason)| ("encryption_required", *reason))
+        .find(|(known_table, known_column, _)| *known_table == table && *known_column == column)
+    {
+        return Some(("encryption_required", *reason));
+    }
+    if APPROVED_TEXT_FIELDS
+        .iter()
+        .any(|(known_table, known_column)| *known_table == table && *known_column == column)
+    {
+        return Some((
+            "approved_plaintext",
+            "Reviewed enum, identifier, hash, or numeric text",
+        ));
+    }
+    (CLASSIFIED_TABLES.contains(&table) && STRUCTURAL_TYPES.contains(&data_type)).then_some((
+        "approved_plaintext",
+        "Reviewed structural or operational value",
+    ))
 }
 
 async fn inventory(state: &AppState) -> anyhow::Result<Inventory> {
@@ -280,8 +622,10 @@ async fn inventory(state: &AppState) -> anyhow::Result<Inventory> {
         let table: String = row.get(0);
         let column: String = row.get(1);
         let data_type: String = row.get(2);
-        let (kind, reason) = classification(&table, &column)
-            .unwrap_or(("unclassified", "No registry entry or whole-table policy"));
+        let (kind, reason) = classification(&table, &column, &data_type).unwrap_or((
+            "unclassified",
+            "No explicit sensitive or plaintext classification",
+        ));
         let entry = json!({"table":table,"column":column,"data_type":data_type,"classification":kind,"reason":reason});
         match kind {
             "encryption_required" => inventory.encryption_required.push(entry),
@@ -828,33 +1172,31 @@ mod tests {
     }
 
     #[test]
-    fn provider_identifier_exceptions_are_explicit() {
-        assert!(APPROVED
-            .iter()
-            .any(|(table, column, reason)| *table == "conversations"
-                && *column == "id"
-                && reason.contains("follow-up")));
-        assert!(APPROVED
-            .iter()
-            .any(|(table, column, reason)| *table == "files"
-                && *column == "id"
-                && reason.contains("follow-up")));
+    fn provider_identifiers_require_encryption() {
+        for (table, column) in [("conversations", "id"), ("files", "id")] {
+            assert_eq!(
+                classification(table, column, "character varying")
+                    .unwrap()
+                    .0,
+                "encryption_required"
+            );
+        }
     }
 
     #[test]
     fn broader_confidential_tables_require_encryption() {
-        for table in [
-            "users",
-            "oauth_tokens",
-            "subscriptions",
-            "aml_risk_reports",
-            "user_passkey_credentials",
-            "agent_instances",
+        for (table, column) in [
+            ("users", "email"),
+            ("oauth_tokens", "access_token"),
+            ("subscriptions", "customer_id"),
+            ("aml_risk_reports", "result"),
+            ("user_passkey_credentials", "auth_secret"),
+            ("agent_instances", "instance_token"),
         ] {
-            let (kind, reason) = classification(table, "representative_column").unwrap();
+            let (kind, reason) = classification(table, column, "character varying").unwrap();
             assert_eq!(kind, "encryption_required");
             assert!(!reason.is_empty());
         }
-        assert!(classification("new_unreviewed_table", "payload").is_none());
+        assert!(classification("new_unreviewed_table", "payload", "jsonb").is_none());
     }
 }
