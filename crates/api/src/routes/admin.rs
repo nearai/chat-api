@@ -3543,6 +3543,26 @@ pub async fn admin_patch_instance(
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/database-encryption/scan",
+            post(crate::database_encryption::scan),
+        )
+        .route(
+            "/database-encryption/jobs",
+            post(crate::database_encryption::create_job),
+        )
+        .route(
+            "/database-encryption/jobs/{id}",
+            get(crate::database_encryption::get_job),
+        )
+        .route(
+            "/database-encryption/jobs/{id}/cancel",
+            post(crate::database_encryption::cancel_job),
+        )
+        .route(
+            "/database-encryption/verify",
+            post(crate::database_encryption::verify),
+        )
         .route("/users", get(list_users))
         .route("/users/{user_id}/activity", get(get_user_activity))
         .route(

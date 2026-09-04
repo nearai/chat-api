@@ -21,6 +21,57 @@ impl PostgresAnalyticsRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
+
+    fn encode_metadata(
+        &self,
+        id: uuid::Uuid,
+        metadata: Option<serde_json::Value>,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let Some(value) = metadata else {
+            return Ok(None);
+        };
+        let Some(config) = self
+            .pool
+            .field_encryption()
+            .filter(|config| config.write_enabled)
+        else {
+            return Ok(Some(value));
+        };
+        let encoded = crate::field_encryption::encrypt(
+            &config.key,
+            &config.key_id,
+            "user_activity_log",
+            "metadata",
+            id,
+            &serde_json::to_string(&value)?,
+        )?;
+        Ok(Some(serde_json::from_str(&encoded)?))
+    }
+
+    fn decode_metadata(
+        &self,
+        id: uuid::Uuid,
+        metadata: Option<serde_json::Value>,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let Some(value) = metadata else {
+            return Ok(None);
+        };
+        let Some(config) = self.pool.field_encryption() else {
+            return Ok(Some(value));
+        };
+        if !crate::field_encryption::is_envelope(&value) {
+            return Ok(Some(value));
+        }
+        let decoded = crate::field_encryption::decrypt(
+            &config.key,
+            &config.key_id,
+            "user_activity_log",
+            "metadata",
+            id,
+            &serde_json::to_string(&value)?,
+        )?;
+        Ok(Some(serde_json::from_str(&decoded)?))
+    }
 }
 
 #[async_trait]
@@ -30,18 +81,21 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
 
         let activity_type = request.activity_type.as_str();
         let auth_method = request.auth_method.map(|m| m.as_str().to_string());
+        let id = uuid::Uuid::new_v4();
+        let metadata = self.encode_metadata(id, request.metadata)?;
 
         client
             .execute(
                 r#"
-                INSERT INTO user_activity_log (user_id, activity_type, auth_method, metadata)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO user_activity_log (id, user_id, activity_type, auth_method, metadata)
+                VALUES ($1, $2, $3, $4, $5)
                 "#,
                 &[
+                    &id,
                     &request.user_id,
                     &activity_type,
                     &auth_method,
-                    &request.metadata,
+                    &metadata,
                 ],
             )
             .await?;
@@ -65,6 +119,8 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
 
         let client = self.pool.get().await?;
         let activity_type = request.activity_type.as_str();
+        let id = uuid::Uuid::new_v4();
+        let metadata = self.encode_metadata(id, request.metadata)?;
 
         // Use a single query to atomically:
         // 1. Count activities in the sliding window
@@ -87,8 +143,8 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                     SELECT (SELECT cnt FROM current_count) < $4 as allowed
                 ),
                 inserted AS (
-                    INSERT INTO user_activity_log (user_id, activity_type, metadata, created_at)
-                    SELECT $1, $2, $5, NOW()
+                    INSERT INTO user_activity_log (id, user_id, activity_type, metadata, created_at)
+                    SELECT $5, $1, $2, $6, NOW()
                     WHERE (SELECT allowed FROM can_insert) = true
                     RETURNING id
                 )
@@ -102,7 +158,8 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                     &activity_type,
                     &request.window_duration.num_seconds(),
                     &(request.limit as i64),
-                    &request.metadata,
+                    &id,
+                    &metadata,
                 ],
             )
             .await?;
@@ -356,17 +413,19 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
             )
             .await?;
 
-        Ok(rows
-            .iter()
-            .map(|row| ActivityLogEntry {
-                id: row.get(0),
-                user_id: row.get(1),
-                activity_type: row.get(2),
-                auth_method: row.get(3),
-                metadata: row.get(4),
-                created_at: row.get(5),
+        rows.iter()
+            .map(|row| {
+                let id = row.get(0);
+                Ok(ActivityLogEntry {
+                    id,
+                    user_id: row.get(1),
+                    activity_type: row.get(2),
+                    auth_method: row.get(3),
+                    metadata: self.decode_metadata(id, row.get(4))?,
+                    created_at: row.get(5),
+                })
             })
-            .collect())
+            .collect()
     }
 
     async fn get_top_active_users(

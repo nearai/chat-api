@@ -17,6 +17,70 @@ impl PostgresConversationShareRepository {
         Self { pool }
     }
 
+    fn encode(
+        &self,
+        table: &str,
+        column: &str,
+        id: Uuid,
+        value: &str,
+    ) -> Result<String, ConversationError> {
+        match self.pool.field_encryption() {
+            Some(config) if config.write_enabled => crate::field_encryption::encrypt(
+                &config.key,
+                &config.key_id,
+                table,
+                column,
+                id,
+                value,
+            )
+            .map_err(|e| ConversationError::DatabaseError(e.to_string())),
+            _ => Ok(value.to_string()),
+        }
+    }
+
+    fn decode(
+        &self,
+        table: &str,
+        column: &str,
+        id: Uuid,
+        value: String,
+    ) -> Result<String, ConversationError> {
+        match self.pool.field_encryption() {
+            Some(config) => crate::field_encryption::decrypt_if_encrypted(
+                &config.key,
+                &config.key_id,
+                table,
+                column,
+                id,
+                value,
+            )
+            .map_err(|e| ConversationError::DatabaseError(e.to_string())),
+            None => Ok(value),
+        }
+    }
+
+    fn token(&self, domain: &str, value: &str) -> Result<Option<Vec<u8>>, ConversationError> {
+        self.pool
+            .field_encryption()
+            .map(|config| {
+                crate::field_encryption::search_token(
+                    &config.key,
+                    domain,
+                    &value.trim().to_lowercase(),
+                )
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))
+            })
+            .transpose()
+    }
+
+    fn org_domain(value: &str) -> String {
+        value
+            .trim()
+            .trim_start_matches('%')
+            .trim_start_matches('@')
+            .to_lowercase()
+    }
+
     fn map_permission(value: &str) -> Result<SharePermission, ConversationError> {
         match value {
             "read" => Ok(SharePermission::Read),
@@ -49,26 +113,33 @@ impl PostgresConversationShareRepository {
         }
     }
 
-    fn map_share_row(row: &tokio_postgres::Row) -> Result<ConversationShare, ConversationError> {
+    fn map_share_row(
+        &self,
+        row: &tokio_postgres::Row,
+    ) -> Result<ConversationShare, ConversationError> {
+        let id: Uuid = row.get("id");
         let recipient_kind: Option<String> = row.get("recipient_type");
         let recipient_value: Option<String> = row.get("recipient_value");
         let recipient = match (recipient_kind, recipient_value) {
             (Some(kind), Some(value)) => Some(ShareRecipient {
                 kind: Self::map_recipient_kind(&kind)?,
-                value,
+                value: self.decode("conversation_shares", "recipient_value", id, value)?,
             }),
             _ => None,
         };
 
         Ok(ConversationShare {
-            id: row.get("id"),
+            id,
             conversation_id: row.get("conversation_id"),
             owner_user_id: row.get("owner_user_id"),
             share_type: Self::map_share_type(row.get("share_type"))?,
             permission: Self::map_permission(row.get("permission"))?,
             recipient,
             group_id: row.get("group_id"),
-            org_email_pattern: row.get("org_email_pattern"),
+            org_email_pattern: row
+                .get::<_, Option<String>>("org_email_pattern")
+                .map(|value| self.decode("conversation_shares", "org_email_pattern", id, value))
+                .transpose()?,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })
@@ -90,7 +161,7 @@ impl PostgresConversationShareRepository {
 
         let rows = client
             .query(
-                "SELECT group_id, member_type, member_value
+                "SELECT id, group_id, member_type, member_value
                  FROM conversation_share_group_members
                  WHERE group_id = ANY($1)",
                 &[&group_ids],
@@ -101,9 +172,15 @@ impl PostgresConversationShareRepository {
         let mut members: HashMap<Uuid, Vec<ShareRecipient>> = HashMap::new();
 
         for row in rows {
+            let id: Uuid = row.get("id");
             let group_id: Uuid = row.get("group_id");
             let kind = Self::map_recipient_kind(row.get("member_type"))?;
-            let value: String = row.get("member_value");
+            let value = self.decode(
+                "conversation_share_group_members",
+                "member_value",
+                id,
+                row.get("member_value"),
+            )?;
             members
                 .entry(group_id)
                 .or_default()
@@ -113,15 +190,20 @@ impl PostgresConversationShareRepository {
         Ok(members)
     }
 
-    fn to_share_group(row: &tokio_postgres::Row, members: Vec<ShareRecipient>) -> ShareGroup {
-        ShareGroup {
-            id: row.get("id"),
+    fn to_share_group(
+        &self,
+        row: &tokio_postgres::Row,
+        members: Vec<ShareRecipient>,
+    ) -> Result<ShareGroup, ConversationError> {
+        let id: Uuid = row.get("id");
+        Ok(ShareGroup {
+            id,
             owner_user_id: row.get("owner_user_id"),
-            name: row.get("name"),
+            name: self.decode("conversation_share_groups", "name", id, row.get("name"))?,
             members,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
-        }
+        })
     }
 }
 
@@ -144,25 +226,37 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
+        let group_id = Uuid::new_v4();
+        let stored_name = self.encode("conversation_share_groups", "name", group_id, name)?;
+        let name_token = self.token("conversation_share_groups.name", name)?;
         let row = transaction
             .query_one(
-                "INSERT INTO conversation_share_groups (owner_user_id, name)
-                 VALUES ($1, $2)
+                "INSERT INTO conversation_share_groups (id, owner_user_id, name, name_search_token)
+                 VALUES ($1, $2, $3, $4)
                  RETURNING id, owner_user_id, name, created_at, updated_at",
-                &[&owner_user_id.0, &name],
+                &[&group_id, &owner_user_id.0, &stored_name, &name_token],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let group_id: Uuid = row.get("id");
-
         for member in members {
+            let member_id = Uuid::new_v4();
+            let stored_value = self.encode(
+                "conversation_share_group_members",
+                "member_value",
+                member_id,
+                &member.value,
+            )?;
+            let value_token = self.token(
+                "conversation_share_group_members.member_value",
+                &member.value,
+            )?;
             transaction
                 .execute(
-                    "INSERT INTO conversation_share_group_members (group_id, member_type, member_value)
-                     VALUES ($1, $2, $3)
-                     ON CONFLICT (group_id, member_type, member_value) DO NOTHING",
-                    &[&group_id, &member.kind.as_str(), &member.value],
+                    "INSERT INTO conversation_share_group_members (id, group_id, member_type, member_value, member_value_search_token)
+                     VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT (group_id, member_type, member_value_search_token) WHERE member_value_search_token IS NOT NULL DO NOTHING",
+                    &[&member_id, &group_id, &member.kind.as_str(), &stored_value, &value_token],
                 )
                 .await
                 .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
@@ -173,7 +267,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        Ok(Self::to_share_group(&row, members.to_vec()))
+        self.to_share_group(&row, members.to_vec())
     }
 
     async fn list_groups(
@@ -191,7 +285,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                 "SELECT id, owner_user_id, name, created_at, updated_at
                  FROM conversation_share_groups
                  WHERE owner_user_id = $1
-                 ORDER BY name",
+                 ORDER BY created_at, id",
                 &[&owner_user_id.0],
             )
             .await
@@ -204,9 +298,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .iter()
             .map(|row| {
                 let id: Uuid = row.get("id");
-                Self::to_share_group(row, members.get(&id).cloned().unwrap_or_default())
+                self.to_share_group(row, members.get(&id).cloned().unwrap_or_default())
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         Ok(groups)
     }
@@ -236,6 +330,15 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .iter()
             .map(|m| m.value.to_lowercase())
             .collect();
+        let member_tokens: Vec<Option<Vec<u8>>> = member_identifiers
+            .iter()
+            .map(|member| {
+                self.token(
+                    "conversation_share_group_members.member_value",
+                    &member.value,
+                )
+            })
+            .collect::<Result<_, _>>()?;
 
         // Use parameterized query with UNNEST to safely match (type, value) pairs
         // This avoids dynamic SQL construction while maintaining correct pairing semantics
@@ -244,11 +347,12 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                 "SELECT DISTINCT g.id, g.owner_user_id, g.name, g.created_at, g.updated_at
                  FROM conversation_share_groups g
                  JOIN conversation_share_group_members m ON g.id = m.group_id
-                 JOIN UNNEST($1::text[], $2::text[]) AS search(member_type, member_value)
+                 JOIN UNNEST($1::text[], $2::text[], $3::bytea[]) AS search(member_type, member_value, member_token)
                    ON m.member_type = search.member_type
-                   AND LOWER(m.member_value) = search.member_value
-                 ORDER BY g.name",
-                &[&member_types, &member_values_lower],
+                   AND (m.member_value_search_token = search.member_token OR
+                        (m.member_value_search_token IS NULL AND LOWER(m.member_value) = search.member_value))
+                 ORDER BY g.created_at, g.id",
+                &[&member_types, &member_values_lower, &member_tokens],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
@@ -260,9 +364,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .iter()
             .map(|row| {
                 let id: Uuid = row.get("id");
-                Self::to_share_group(row, members.get(&id).cloned().unwrap_or_default())
+                self.to_share_group(row, members.get(&id).cloned().unwrap_or_default())
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         Ok(groups)
     }
@@ -293,7 +397,8 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         };
 
         let members = self.load_group_members(&[group_id]).await?;
-        let group = Self::to_share_group(&row, members.get(&group_id).cloned().unwrap_or_default());
+        let group =
+            self.to_share_group(&row, members.get(&group_id).cloned().unwrap_or_default())?;
         Ok(Some(group))
     }
 
@@ -315,13 +420,20 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
+        let stored_name = name
+            .map(|value| self.encode("conversation_share_groups", "name", group_id, value))
+            .transpose()?;
+        let name_token = name
+            .map(|value| self.token("conversation_share_groups.name", value))
+            .transpose()?
+            .flatten();
         let row = transaction
             .query_opt(
                 "UPDATE conversation_share_groups
-                 SET name = COALESCE($1, name), updated_at = NOW()
-                 WHERE owner_user_id = $2 AND id = $3
+                 SET name = COALESCE($1, name), name_search_token = COALESCE($2, name_search_token), updated_at = NOW()
+                 WHERE owner_user_id = $3 AND id = $4
                  RETURNING id, owner_user_id, name, created_at, updated_at",
-                &[&name, &owner_user_id.0, &group_id],
+                &[&stored_name, &name_token, &owner_user_id.0, &group_id],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
@@ -340,12 +452,23 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                 .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
             for member in members {
+                let member_id = Uuid::new_v4();
+                let stored_value = self.encode(
+                    "conversation_share_group_members",
+                    "member_value",
+                    member_id,
+                    &member.value,
+                )?;
+                let value_token = self.token(
+                    "conversation_share_group_members.member_value",
+                    &member.value,
+                )?;
                 transaction
                     .execute(
-                        "INSERT INTO conversation_share_group_members (group_id, member_type, member_value)
-                         VALUES ($1, $2, $3)
-                         ON CONFLICT (group_id, member_type, member_value) DO NOTHING",
-                        &[&group_id, &member.kind.as_str(), &member.value],
+                        "INSERT INTO conversation_share_group_members (id, group_id, member_type, member_value, member_value_search_token)
+                         VALUES ($1, $2, $3, $4, $5)
+                         ON CONFLICT (group_id, member_type, member_value_search_token) WHERE member_value_search_token IS NOT NULL DO NOTHING",
+                        &[&member_id, &group_id, &member.kind.as_str(), &stored_value, &value_token],
                     )
                     .await
                     .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
@@ -364,7 +487,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             members_map.get(&group_id).cloned().unwrap_or_default()
         };
 
-        Ok(Self::to_share_group(&row, members))
+        self.to_share_group(&row, members)
     }
 
     async fn delete_group(
@@ -433,6 +556,43 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
+        let share_id = Uuid::new_v4();
+        let recipient_value = share
+            .recipient
+            .as_ref()
+            .map(|recipient| {
+                self.encode(
+                    "conversation_shares",
+                    "recipient_value",
+                    share_id,
+                    &recipient.value,
+                )
+            })
+            .transpose()?;
+        let recipient_token = share
+            .recipient
+            .as_ref()
+            .map(|recipient| self.token("conversation_shares.recipient_value", &recipient.value))
+            .transpose()?
+            .flatten();
+        let org_email_pattern = share
+            .org_email_pattern
+            .as_ref()
+            .map(|pattern| {
+                self.encode(
+                    "conversation_shares",
+                    "org_email_pattern",
+                    share_id,
+                    pattern,
+                )
+            })
+            .transpose()?;
+        let org_domain_token = share
+            .org_email_pattern
+            .as_ref()
+            .map(|pattern| self.token("conversation_shares.org_domain", &Self::org_domain(pattern)))
+            .transpose()?
+            .flatten();
         // Use ON CONFLICT to update existing shares based on share type
         let query = match share.share_type {
             ShareType::Direct => {
@@ -444,11 +604,11 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      recipient_type,
                      recipient_value,
                      group_id,
-                     org_email_pattern
+                     org_email_pattern, id, recipient_value_search_token, org_domain_search_token
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (conversation_id, recipient_type, recipient_value)
-                     WHERE share_type = 'direct'
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 ON CONFLICT (conversation_id, recipient_type, recipient_value_search_token)
+                     WHERE share_type = 'direct' AND recipient_value_search_token IS NOT NULL
                  DO UPDATE SET
                      permission = EXCLUDED.permission,
                      updated_at = NOW()
@@ -465,9 +625,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      recipient_type,
                      recipient_value,
                      group_id,
-                     org_email_pattern
+                     org_email_pattern, id, recipient_value_search_token, org_domain_search_token
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                  ON CONFLICT (conversation_id, group_id)
                      WHERE share_type = 'group'
                  DO UPDATE SET
@@ -486,11 +646,11 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      recipient_type,
                      recipient_value,
                      group_id,
-                     org_email_pattern
+                     org_email_pattern, id, recipient_value_search_token, org_domain_search_token
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (conversation_id, org_email_pattern)
-                     WHERE share_type = 'organization'
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 ON CONFLICT (conversation_id, org_domain_search_token)
+                     WHERE share_type = 'organization' AND org_domain_search_token IS NOT NULL
                  DO UPDATE SET
                      permission = EXCLUDED.permission,
                      updated_at = NOW()
@@ -507,9 +667,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      recipient_type,
                      recipient_value,
                      group_id,
-                     org_email_pattern
+                     org_email_pattern, id, recipient_value_search_token, org_domain_search_token
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                  ON CONFLICT (conversation_id)
                      WHERE share_type = 'public'
                  DO UPDATE SET
@@ -533,18 +693,18 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                         .recipient
                         .as_ref()
                         .map(|recipient| recipient.kind.as_str()),
-                    &share
-                        .recipient
-                        .as_ref()
-                        .map(|recipient| recipient.value.as_str()),
+                    &recipient_value,
                     &share.group_id,
-                    &share.org_email_pattern,
+                    &org_email_pattern,
+                    &share_id,
+                    &recipient_token,
+                    &org_domain_token,
                 ],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        Self::map_share_row(&row)
+        self.map_share_row(&row)
     }
 
     /// Create multiple shares atomically (all succeed or all fail).
@@ -571,6 +731,47 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         let mut results = Vec::with_capacity(shares.len());
 
         for share in shares {
+            let share_id = Uuid::new_v4();
+            let recipient_value = share
+                .recipient
+                .as_ref()
+                .map(|recipient| {
+                    self.encode(
+                        "conversation_shares",
+                        "recipient_value",
+                        share_id,
+                        &recipient.value,
+                    )
+                })
+                .transpose()?;
+            let recipient_token = share
+                .recipient
+                .as_ref()
+                .map(|recipient| {
+                    self.token("conversation_shares.recipient_value", &recipient.value)
+                })
+                .transpose()?
+                .flatten();
+            let org_email_pattern = share
+                .org_email_pattern
+                .as_ref()
+                .map(|pattern| {
+                    self.encode(
+                        "conversation_shares",
+                        "org_email_pattern",
+                        share_id,
+                        pattern,
+                    )
+                })
+                .transpose()?;
+            let org_domain_token = share
+                .org_email_pattern
+                .as_ref()
+                .map(|pattern| {
+                    self.token("conversation_shares.org_domain", &Self::org_domain(pattern))
+                })
+                .transpose()?
+                .flatten();
             // Use ON CONFLICT to update existing shares based on share type
             let query = match share.share_type {
                 ShareType::Direct => {
@@ -582,11 +783,11 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                          recipient_type,
                          recipient_value,
                          group_id,
-                         org_email_pattern
+                         org_email_pattern, id, recipient_value_search_token, org_domain_search_token
                      )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                     ON CONFLICT (conversation_id, recipient_type, recipient_value)
-                         WHERE share_type = 'direct'
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                     ON CONFLICT (conversation_id, recipient_type, recipient_value_search_token)
+                         WHERE share_type = 'direct' AND recipient_value_search_token IS NOT NULL
                      DO UPDATE SET
                          permission = EXCLUDED.permission,
                          updated_at = NOW()
@@ -603,9 +804,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                          recipient_type,
                          recipient_value,
                          group_id,
-                         org_email_pattern
+                         org_email_pattern, id, recipient_value_search_token, org_domain_search_token
                      )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                      ON CONFLICT (conversation_id, group_id)
                          WHERE share_type = 'group'
                      DO UPDATE SET
@@ -624,11 +825,11 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                          recipient_type,
                          recipient_value,
                          group_id,
-                         org_email_pattern
+                         org_email_pattern, id, recipient_value_search_token, org_domain_search_token
                      )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                     ON CONFLICT (conversation_id, org_email_pattern)
-                         WHERE share_type = 'organization'
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                     ON CONFLICT (conversation_id, org_domain_search_token)
+                         WHERE share_type = 'organization' AND org_domain_search_token IS NOT NULL
                      DO UPDATE SET
                          permission = EXCLUDED.permission,
                          updated_at = NOW()
@@ -645,9 +846,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                          recipient_type,
                          recipient_value,
                          group_id,
-                         org_email_pattern
+                         org_email_pattern, id, recipient_value_search_token, org_domain_search_token
                      )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                      ON CONFLICT (conversation_id)
                          WHERE share_type = 'public'
                      DO UPDATE SET
@@ -671,18 +872,18 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                             .recipient
                             .as_ref()
                             .map(|recipient| recipient.kind.as_str()),
-                        &share
-                            .recipient
-                            .as_ref()
-                            .map(|recipient| recipient.value.as_str()),
+                        &recipient_value,
                         &share.group_id,
-                        &share.org_email_pattern,
+                        &org_email_pattern,
+                        &share_id,
+                        &recipient_token,
+                        &org_domain_token,
                     ],
                 )
                 .await
                 .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-            results.push(Self::map_share_row(&row)?);
+            results.push(self.map_share_row(&row)?);
         }
 
         transaction
@@ -718,7 +919,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
         rows.iter()
-            .map(Self::map_share_row)
+            .map(|row| self.map_share_row(row))
             .collect::<Result<Vec<_>, _>>()
     }
 
@@ -762,6 +963,22 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
+        let email_token = self.token("conversation_shares.recipient_value", email)?;
+        let group_email_token =
+            self.token("conversation_share_group_members.member_value", email)?;
+        let near_tokens: Vec<Option<Vec<u8>>> = near_accounts
+            .iter()
+            .map(|value| self.token("conversation_shares.recipient_value", value))
+            .collect::<Result<_, _>>()?;
+        let group_near_tokens: Vec<Option<Vec<u8>>> = near_accounts
+            .iter()
+            .map(|value| self.token("conversation_share_group_members.member_value", value))
+            .collect::<Result<_, _>>()?;
+        let org_token = email
+            .split_once('@')
+            .map(|(_, domain)| self.token("conversation_shares.org_domain", domain))
+            .transpose()?
+            .flatten();
         let row = client
             .query_opt(
                 "SELECT permission FROM (
@@ -770,9 +987,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE conversation_id = $1
                        AND share_type = 'direct'
                        AND (
-                            (recipient_type = 'email' AND recipient_value = $2)
+                            (recipient_type = 'email' AND (recipient_value_search_token = $4 OR (recipient_value_search_token IS NULL AND LOWER(recipient_value) = LOWER($2))))
                             OR
-                            (recipient_type = 'near' AND recipient_value = ANY($3))
+                            (recipient_type = 'near' AND (recipient_value_search_token = ANY($5) OR (recipient_value_search_token IS NULL AND recipient_value = ANY($3))))
                        )
                      UNION ALL
                      SELECT cs.permission
@@ -782,20 +999,20 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE cs.conversation_id = $1
                        AND cs.share_type = 'group'
                        AND (
-                            (cgm.member_type = 'email' AND cgm.member_value = $2)
+                            (cgm.member_type = 'email' AND (cgm.member_value_search_token = $6 OR (cgm.member_value_search_token IS NULL AND LOWER(cgm.member_value) = LOWER($2))))
                             OR
-                            (cgm.member_type = 'near' AND cgm.member_value = ANY($3))
+                            (cgm.member_type = 'near' AND (cgm.member_value_search_token = ANY($7) OR (cgm.member_value_search_token IS NULL AND cgm.member_value = ANY($3))))
                        )
                      UNION ALL
                      SELECT permission
                      FROM conversation_shares
                      WHERE conversation_id = $1
                        AND share_type = 'organization'
-                       AND $2 ILIKE org_email_pattern
+                       AND (org_domain_search_token = $8 OR (org_domain_search_token IS NULL AND $2 ILIKE org_email_pattern))
                  ) perms
                  ORDER BY CASE WHEN permission = 'write' THEN 0 ELSE 1 END
                  LIMIT 1",
-                &[&conversation_id, &email, &near_accounts],
+                &[&conversation_id, &email, &near_accounts, &email_token, &near_tokens, &group_email_token, &group_near_tokens, &org_token],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
@@ -833,7 +1050,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
         match row {
-            Some(row) => Ok(Some(Self::map_share_row(&row)?)),
+            Some(row) => Ok(Some(self.map_share_row(&row)?)),
             None => Ok(None),
         }
     }
@@ -850,6 +1067,22 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
+        let email_token = self.token("conversation_shares.recipient_value", email)?;
+        let group_email_token =
+            self.token("conversation_share_group_members.member_value", email)?;
+        let near_tokens: Vec<Option<Vec<u8>>> = near_accounts
+            .iter()
+            .map(|value| self.token("conversation_shares.recipient_value", value))
+            .collect::<Result<_, _>>()?;
+        let group_near_tokens: Vec<Option<Vec<u8>>> = near_accounts
+            .iter()
+            .map(|value| self.token("conversation_share_group_members.member_value", value))
+            .collect::<Result<_, _>>()?;
+        let org_token = email
+            .split_once('@')
+            .map(|(_, domain)| self.token("conversation_shares.org_domain", domain))
+            .transpose()?
+            .flatten();
         // Query to find all conversations shared with the user via direct shares,
         // group memberships, or organization patterns. We take the highest permission
         // (write > read) for each conversation. Excludes conversations owned by the user.
@@ -863,9 +1096,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE share_type = 'direct'
                        AND owner_user_id != $3
                        AND (
-                            (recipient_type = 'email' AND recipient_value = $1)
+                            (recipient_type = 'email' AND (recipient_value_search_token = $4 OR (recipient_value_search_token IS NULL AND LOWER(recipient_value) = LOWER($1))))
                             OR
-                            (recipient_type = 'near' AND recipient_value = ANY($2))
+                            (recipient_type = 'near' AND (recipient_value_search_token = ANY($5) OR (recipient_value_search_token IS NULL AND recipient_value = ANY($2))))
                        )
                      UNION ALL
                      -- Group shares where user is a member (exclude own)
@@ -876,9 +1109,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE cs.share_type = 'group'
                        AND cs.owner_user_id != $3
                        AND (
-                            (cgm.member_type = 'email' AND cgm.member_value = $1)
+                            (cgm.member_type = 'email' AND (cgm.member_value_search_token = $6 OR (cgm.member_value_search_token IS NULL AND LOWER(cgm.member_value) = LOWER($1))))
                             OR
-                            (cgm.member_type = 'near' AND cgm.member_value = ANY($2))
+                            (cgm.member_type = 'near' AND (cgm.member_value_search_token = ANY($7) OR (cgm.member_value_search_token IS NULL AND cgm.member_value = ANY($2))))
                        )
                      UNION ALL
                      -- Organization shares matching email pattern (exclude own)
@@ -886,11 +1119,11 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      FROM conversation_shares
                      WHERE share_type = 'organization'
                        AND owner_user_id != $3
-                       AND $1 ILIKE org_email_pattern
+                       AND (org_domain_search_token = $8 OR (org_domain_search_token IS NULL AND $1 ILIKE org_email_pattern))
                  ) shares
                  GROUP BY conversation_id
                  ORDER BY conversation_id",
-                &[&email, &near_accounts, &user_id.0],
+                &[&email, &near_accounts, &user_id.0, &email_token, &near_tokens, &group_email_token, &group_near_tokens, &org_token],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;

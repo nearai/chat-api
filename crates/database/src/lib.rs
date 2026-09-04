@@ -1,5 +1,6 @@
 pub mod cluster_manager;
 pub mod encryption;
+pub mod field_encryption;
 pub mod migrations;
 pub mod patroni_discovery;
 pub mod pool;

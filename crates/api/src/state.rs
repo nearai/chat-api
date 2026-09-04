@@ -42,6 +42,7 @@ pub type SystemConfigsCache = Arc<RwLock<Option<SystemConfigsCacheEntry>>>;
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
+    pub db_pool: database::DbPool,
     pub oauth_service: Arc<dyn services::auth::ports::OAuthService>,
     pub email_auth_service: Arc<dyn services::auth::ports::EmailAuthService>,
     pub email_auth_trusted_proxy_count: usize,

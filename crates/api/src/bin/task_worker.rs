@@ -490,6 +490,17 @@ async fn main() -> anyhow::Result<()> {
     let db = database::Database::from_config(&config.database)
         .await
         .context("failed to connect database for task worker")?;
+    if config.database_encryption.key.is_empty() {
+        anyhow::bail!("DB_ENCRYPTION_KEY or DB_ENCRYPTION_KEY_FILE is required");
+    }
+    let key = database::field_encryption::parse_key(&config.database_encryption.key)?;
+    database::field_encryption::validate_key_id(&config.database_encryption.key_id)?;
+    db.pool()
+        .set_field_encryption(services::db_pool::FieldEncryptionConfig {
+            key,
+            key_id: config.database_encryption.key_id.clone(),
+            write_enabled: config.database_encryption.write_enabled,
+        });
 
     let system_configs_service = Arc::new(
         services::system_configs::service::SystemConfigsServiceImpl::new(

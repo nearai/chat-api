@@ -879,6 +879,7 @@ impl Default for LoggingConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub database: DatabaseConfig,
+    pub database_encryption: DatabaseEncryptionConfig,
     pub oauth: OAuthConfig,
     pub email_auth: EmailAuthConfig,
     pub server: ServerConfig,
@@ -901,6 +902,7 @@ impl Config {
     pub fn from_env() -> Self {
         Self {
             database: DatabaseConfig::default(),
+            database_encryption: DatabaseEncryptionConfig::default(),
             oauth: OAuthConfig::default(),
             email_auth: EmailAuthConfig::default(),
             server: ServerConfig::default(),
@@ -919,10 +921,66 @@ impl Config {
     }
 }
 
+#[derive(Clone, Deserialize)]
+pub struct DatabaseEncryptionConfig {
+    /// Dedicated AES-256 key for confidential database fields. Empty disables
+    /// database field encryption and its admin endpoints.
+    pub key: String,
+    pub key_id: String,
+    /// Enables encrypted repository writes and execute-mode backfills.
+    pub write_enabled: bool,
+}
+
+impl fmt::Debug for DatabaseEncryptionConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DatabaseEncryptionConfig")
+            .field("key", &"[REDACTED]")
+            .field("key_id", &self.key_id)
+            .field("write_enabled", &self.write_enabled)
+            .finish()
+    }
+}
+
+impl Default for DatabaseEncryptionConfig {
+    fn default() -> Self {
+        let key = if let Ok(path) = std::env::var("DB_ENCRYPTION_KEY_FILE") {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("Failed to read DB_ENCRYPTION_KEY_FILE at {path}: {e}"))
+                .trim()
+                .to_string()
+        } else {
+            std::env::var("DB_ENCRYPTION_KEY").unwrap_or_default()
+        };
+        Self {
+            key,
+            key_id: std::env::var("DB_ENCRYPTION_KEY_ID").unwrap_or_else(|_| "db-v1".to_string()),
+            write_enabled: std::env::var("DB_ENCRYPTION_WRITE_ENABLED")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(false),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn database_encryption_defaults_safe_and_redacts_key() {
+        std::env::set_var("DB_ENCRYPTION_KEY", "super-secret-test-value");
+        std::env::remove_var("DB_ENCRYPTION_KEY_FILE");
+        std::env::remove_var("DB_ENCRYPTION_WRITE_ENABLED");
+        let config = DatabaseEncryptionConfig::default();
+        assert!(!config.write_enabled);
+        assert_eq!(config.key_id, "db-v1");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("super-secret-test-value"));
+        std::env::remove_var("DB_ENCRYPTION_KEY");
+    }
 
     #[test]
     #[serial]

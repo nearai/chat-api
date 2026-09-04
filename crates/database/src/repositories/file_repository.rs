@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use services::file::ports::{FileData, FileError, FileRepository};
 use services::UserId;
 use tokio_postgres::Row;
+use uuid::Uuid;
 
 pub struct PostgresFileRepository {
     pool: DbPool,
@@ -12,16 +13,53 @@ impl PostgresFileRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
+
+    fn encode_filename(&self, id: Uuid, value: &str) -> Result<String, FileError> {
+        match self.pool.field_encryption() {
+            Some(config) if config.write_enabled => crate::field_encryption::encrypt(
+                &config.key,
+                &config.key_id,
+                "files",
+                "filename",
+                id,
+                value,
+            )
+            .map_err(|e| FileError::DatabaseError(e.to_string())),
+            _ => Ok(value.to_string()),
+        }
+    }
+
+    fn decode_filename(&self, id: Uuid, value: String) -> Result<String, FileError> {
+        match self.pool.field_encryption() {
+            Some(config) => crate::field_encryption::decrypt_if_encrypted(
+                &config.key,
+                &config.key_id,
+                "files",
+                "filename",
+                id,
+                value,
+            )
+            .map_err(|e| FileError::DatabaseError(e.to_string())),
+            None => Ok(value),
+        }
+    }
+
+    fn raw_to_file_data(&self, row: &Row) -> Result<FileData, FileError> {
+        Ok(FileData {
+            id: row.get("id"),
+            bytes: row.get("bytes"),
+            created_at: row.get("file_created_at"),
+            expires_at: row.get("file_expires_at"),
+            filename: self.decode_filename(row.get("encryption_id"), row.get("filename"))?,
+            purpose: row.get("purpose"),
+        })
+    }
 }
 
 #[async_trait]
 impl FileRepository for PostgresFileRepository {
     async fn upsert_file(&self, file: &FileData, user_id: UserId) -> Result<(), FileError> {
-        tracing::debug!(
-            "Repository: Upserting file - file_id={}, user_id={}",
-            file.id,
-            user_id
-        );
+        tracing::debug!("Repository: Upserting file for user_id={}", user_id);
 
         let client = self
             .pool
@@ -29,10 +67,17 @@ impl FileRepository for PostgresFileRepository {
             .await
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
+        let encryption_id = client
+            .query_opt("SELECT encryption_id FROM files WHERE id=$1", &[&file.id])
+            .await
+            .map_err(|e| FileError::DatabaseError(e.to_string()))?
+            .map(|row| row.get(0))
+            .unwrap_or_else(Uuid::new_v4);
+        let filename = self.encode_filename(encryption_id, &file.filename)?;
         client
             .execute(
-                "INSERT INTO files (id, user_id, bytes, file_created_at, file_expires_at, filename, purpose)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO files (id, encryption_id, user_id, bytes, file_created_at, file_expires_at, filename, purpose)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  ON CONFLICT (id) 
                  DO UPDATE SET 
                      user_id = EXCLUDED.user_id,
@@ -44,32 +89,25 @@ impl FileRepository for PostgresFileRepository {
                      updated_at = NOW()",
                 &[
                     &file.id,
+                    &encryption_id,
                     &user_id.0,
                     &file.bytes,
                     &file.created_at,
                     &file.expires_at,
-                    &file.filename,
+                    &filename,
                     &file.purpose,
                 ],
             )
             .await
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
-        tracing::debug!(
-            "Repository: File upserted - file_id={}, user_id={}",
-            file.id,
-            user_id
-        );
+        tracing::debug!("Repository: File upserted for user_id={}", user_id);
 
         Ok(())
     }
 
     async fn get_file(&self, file_id: &str, user_id: UserId) -> Result<FileData, FileError> {
-        tracing::debug!(
-            "Repository: Getting file - file_id={}, user_id={}",
-            file_id,
-            user_id
-        );
+        tracing::debug!("Repository: Getting file for user_id={}", user_id);
 
         let client = self
             .pool
@@ -79,7 +117,7 @@ impl FileRepository for PostgresFileRepository {
 
         let row = client
             .query_opt(
-                "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
+                "SELECT id, encryption_id, bytes, file_created_at, file_expires_at, filename, purpose
                  FROM files 
                  WHERE id = $1 AND user_id = $2",
                 &[&file_id, &user_id.0],
@@ -88,7 +126,7 @@ impl FileRepository for PostgresFileRepository {
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
         match row {
-            Some(r) => Ok(raw_to_file_data(&r)),
+            Some(r) => self.raw_to_file_data(&r),
             None => Err(FileError::NotFound),
         }
     }
@@ -131,7 +169,7 @@ impl FileRepository for PostgresFileRepository {
             // With cursor
             let op = if order == "asc" { ">" } else { "<" };
             let sql = format!(
-                "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
+                "SELECT id, encryption_id, bytes, file_created_at, file_expires_at, filename, purpose
                  FROM files
                  WHERE user_id = $1
                    AND ($2::text IS NULL OR purpose = $2)
@@ -152,7 +190,7 @@ impl FileRepository for PostgresFileRepository {
         } else {
             // Without cursor
             let sql = format!(
-                "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
+                "SELECT id, encryption_id, bytes, file_created_at, file_expires_at, filename, purpose
                  FROM files
                  WHERE user_id = $1
                    AND ($2::text IS NULL OR purpose = $2)
@@ -164,7 +202,10 @@ impl FileRepository for PostgresFileRepository {
         }
         .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
-        let files: Vec<FileData> = rows.iter().map(raw_to_file_data).collect();
+        let files: Vec<FileData> = rows
+            .iter()
+            .map(|row| self.raw_to_file_data(row))
+            .collect::<Result<_, _>>()?;
 
         tracing::debug!(
             "Repository: Found {} file(s) with pagination for user_id={}",
@@ -217,16 +258,5 @@ impl FileRepository for PostgresFileRepository {
         } else {
             Ok(())
         }
-    }
-}
-
-fn raw_to_file_data(row: &Row) -> FileData {
-    FileData {
-        id: row.get("id"),
-        bytes: row.get("bytes"),
-        created_at: row.get("file_created_at"),
-        expires_at: row.get("file_expires_at"),
-        filename: row.get("filename"),
-        purpose: row.get("purpose"),
     }
 }

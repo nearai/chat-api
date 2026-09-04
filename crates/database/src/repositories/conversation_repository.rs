@@ -20,11 +20,7 @@ impl ConversationRepository for PostgresConversationRepository {
         conversation_id: &str,
         user_id: UserId,
     ) -> Result<(), ConversationError> {
-        tracing::debug!(
-            "Repository: Upserting conversation - conversation_id={}, user_id={}",
-            conversation_id,
-            user_id
-        );
+        tracing::debug!("Repository: Upserting conversation for user_id={}", user_id);
 
         let client = self
             .pool
@@ -43,11 +39,7 @@ impl ConversationRepository for PostgresConversationRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        tracing::debug!(
-            "Repository: Conversation upserted - conversation_id={}, user_id={}",
-            conversation_id,
-            user_id
-        );
+        tracing::debug!("Repository: Conversation upserted for user_id={}", user_id);
 
         Ok(())
     }
