@@ -89,6 +89,70 @@ const FIELDS: &[Field] = &[
         reason: "Conversation/file activity metadata",
         token: None,
     },
+    Field {
+        table: "oauth_tokens",
+        column: "access_token",
+        id_column: "id",
+        kind: Kind::Text,
+        reason: "OAuth access credential",
+        token: None,
+    },
+    Field {
+        table: "oauth_tokens",
+        column: "refresh_token",
+        id_column: "id",
+        kind: Kind::Text,
+        reason: "OAuth refresh credential",
+        token: None,
+    },
+    Field {
+        table: "agent_instances",
+        column: "instance_token",
+        id_column: "id",
+        kind: Kind::Text,
+        reason: "Agent credential",
+        token: None,
+    },
+    Field {
+        table: "agent_instances",
+        column: "auth_session_token",
+        id_column: "id",
+        kind: Kind::Text,
+        reason: "Agent session credential",
+        token: None,
+    },
+    Field {
+        table: "agent_instances",
+        column: "instance_url",
+        id_column: "id",
+        kind: Kind::Text,
+        reason: "Private agent service URL",
+        token: None,
+    },
+    Field {
+        table: "agent_instances",
+        column: "dashboard_url",
+        id_column: "id",
+        kind: Kind::Text,
+        reason: "Private agent dashboard URL",
+        token: None,
+    },
+    Field {
+        table: "user_passkey_credentials",
+        column: "auth_secret",
+        id_column: "user_id",
+        kind: Kind::Text,
+        reason: "Passkey credential",
+        token: None,
+    },
+    Field {
+        table: "user_passkey_credentials",
+        column: "backup_passphrase",
+        id_column: "user_id",
+        kind: Kind::Text,
+        reason: "Passkey recovery credential",
+        token: None,
+    },
 ];
 
 const APPROVED: &[(&str, &str, &str)] = &[
@@ -306,8 +370,6 @@ const SENSITIVE_FIELDS: &[(&str, &str, &str)] = &[
         "provider_user_id",
         "External identity; encrypt with keyed token",
     ),
-    ("oauth_tokens", "access_token", "OAuth credential"),
-    ("oauth_tokens", "refresh_token", "OAuth credential"),
     (
         "oauth_states",
         "state",
@@ -387,34 +449,16 @@ const SENSITIVE_FIELDS: &[(&str, &str, &str)] = &[
         "public_ssh_key",
         "User credential material",
     ),
-    ("agent_instances", "instance_url", "Private service URL"),
-    ("agent_instances", "instance_token", "Agent credential"),
-    ("agent_instances", "dashboard_url", "Private dashboard URL"),
     (
         "agent_instances",
         "agent_api_base_url",
         "Private service URL",
-    ),
-    (
-        "agent_instances",
-        "auth_session_token",
-        "Agent session credential",
     ),
     ("agent_api_keys", "name", "User-provided credential label"),
     (
         "agent_instance_status_history",
         "change_reason",
         "Free-form audit text",
-    ),
-    (
-        "user_passkey_credentials",
-        "auth_secret",
-        "Passkey credential",
-    ),
-    (
-        "user_passkey_credentials",
-        "backup_passphrase",
-        "Passkey recovery credential",
     ),
     (
         "email_verification_challenges",
@@ -1145,6 +1189,14 @@ mod tests {
             ("conversation_shares", "recipient_value"),
             ("conversation_shares", "org_email_pattern"),
             ("user_activity_log", "metadata"),
+            ("oauth_tokens", "access_token"),
+            ("oauth_tokens", "refresh_token"),
+            ("agent_instances", "instance_token"),
+            ("agent_instances", "auth_session_token"),
+            ("agent_instances", "instance_url"),
+            ("agent_instances", "dashboard_url"),
+            ("user_passkey_credentials", "auth_secret"),
+            ("user_passkey_credentials", "backup_passphrase"),
         ] {
             assert!(FIELDS
                 .iter()
@@ -1196,11 +1248,8 @@ mod tests {
     fn broader_confidential_tables_require_encryption() {
         for (table, column) in [
             ("users", "email"),
-            ("oauth_tokens", "access_token"),
             ("subscriptions", "customer_id"),
             ("aml_risk_reports", "result"),
-            ("user_passkey_credentials", "auth_secret"),
-            ("agent_instances", "instance_token"),
         ] {
             let (kind, reason) = classification(table, column, "character varying").unwrap();
             assert_eq!(kind, "encryption_required");
