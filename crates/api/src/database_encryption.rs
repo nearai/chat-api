@@ -107,14 +107,6 @@ const FIELDS: &[Field] = &[
     },
     Field {
         table: "agent_instances",
-        column: "instance_token",
-        id_column: "id",
-        kind: Kind::Text,
-        reason: "Agent credential",
-        token: None,
-    },
-    Field {
-        table: "agent_instances",
         column: "auth_session_token",
         id_column: "id",
         kind: Kind::Text,
@@ -137,25 +129,24 @@ const FIELDS: &[Field] = &[
         reason: "Private agent dashboard URL",
         token: None,
     },
-    Field {
-        table: "user_passkey_credentials",
-        column: "auth_secret",
-        id_column: "user_id",
-        kind: Kind::Text,
-        reason: "Passkey credential",
-        token: None,
-    },
-    Field {
-        table: "user_passkey_credentials",
-        column: "backup_passphrase",
-        id_column: "user_id",
-        kind: Kind::Text,
-        reason: "Passkey recovery credential",
-        token: None,
-    },
 ];
 
 const APPROVED: &[(&str, &str, &str)] = &[
+    (
+        "agent_instances",
+        "instance_token",
+        "Ciphertext managed by the legacy application encryption layer",
+    ),
+    (
+        "user_passkey_credentials",
+        "auth_secret",
+        "Ciphertext managed by the legacy application encryption layer",
+    ),
+    (
+        "user_passkey_credentials",
+        "backup_passphrase",
+        "Ciphertext managed by the legacy application encryption layer",
+    ),
     (
         "conversations",
         "id",
@@ -1191,12 +1182,9 @@ mod tests {
             ("user_activity_log", "metadata"),
             ("oauth_tokens", "access_token"),
             ("oauth_tokens", "refresh_token"),
-            ("agent_instances", "instance_token"),
             ("agent_instances", "auth_session_token"),
             ("agent_instances", "instance_url"),
             ("agent_instances", "dashboard_url"),
-            ("user_passkey_credentials", "auth_secret"),
-            ("user_passkey_credentials", "backup_passphrase"),
         ] {
             assert!(FIELDS
                 .iter()
@@ -1241,6 +1229,22 @@ mod tests {
                 .any(|(known_table, known_column, reason)| *known_table == table
                     && *known_column == column
                     && reason.contains("identifier")));
+        }
+    }
+
+    #[test]
+    fn legacy_application_cipher_fields_are_not_double_encrypted() {
+        for (table, column) in [
+            ("agent_instances", "instance_token"),
+            ("user_passkey_credentials", "auth_secret"),
+            ("user_passkey_credentials", "backup_passphrase"),
+        ] {
+            let (kind, reason) = classification(table, column, "text").unwrap();
+            assert_eq!(kind, "approved_plaintext");
+            assert!(reason.contains("legacy application encryption"));
+            assert!(!FIELDS
+                .iter()
+                .any(|field| field.table == table && field.column == column));
         }
     }
 
