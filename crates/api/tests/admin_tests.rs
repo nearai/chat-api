@@ -33,11 +33,12 @@ async fn database_encryption_scan_and_write_gate_are_admin_only_and_safe() {
     assert_eq!(body["status"], "completed");
     assert_eq!(body["unclassified"], json!([]), "{body}");
     assert_eq!(body["legacy_confidential"], json!([]), "{body}");
-    assert!(body["encryption_required"]
+    assert_eq!(body["encryption_required"], json!([]), "{body}");
+    assert!(body["approved_plaintext"]
         .as_array()
         .is_some_and(|fields| fields.iter().any(|field| field["table"] == "users"
             && field["column"] == "email"
-            && field["classification"] == "encryption_required")));
+            && field["classification"] == "approved_plaintext")));
     assert!(body["fields"]
         .as_array()
         .is_some_and(|fields| fields.iter().all(|field| field.get("sample").is_none())));

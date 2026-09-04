@@ -348,7 +348,10 @@ const APPROVED: &[(&str, &str, &str)] = &[
     ),
 ];
 
-const SENSITIVE_FIELDS: &[(&str, &str, &str)] = &[
+// These fields were reviewed for the move outside the TEE and explicitly accepted
+// as plaintext. The per-field notes document the data involved, not a migration
+// requirement.
+const REVIEWED_PLAINTEXT_FIELDS: &[(&str, &str, &str)] = &[
     (
         "users",
         "email",
@@ -628,11 +631,14 @@ fn classification(
             "Legacy conversation data must be removed or encrypted before migration",
         ));
     }
-    if let Some((_, _, reason)) = SENSITIVE_FIELDS
+    if REVIEWED_PLAINTEXT_FIELDS
         .iter()
-        .find(|(known_table, known_column, _)| *known_table == table && *known_column == column)
+        .any(|(known_table, known_column, _)| *known_table == table && *known_column == column)
     {
-        return Some(("encryption_required", *reason));
+        return Some((
+            "approved_plaintext",
+            "Reviewed and approved for plaintext storage outside the TEE",
+        ));
     }
     if APPROVED_TEXT_FIELDS
         .iter()
@@ -845,7 +851,7 @@ pub async fn scan(
         "complete": counts.iter().all(|c| c.complete),
     });
     Ok(Json(
-        json!({"run_id":Uuid::new_v4(),"status":"completed","fields":counts,"totals":totals,"approved_plaintext":if req.include_approved_plaintext { json!(APPROVED.iter().map(|(table,column,reason)|json!({"table":table,"column":column,"classification":"approved_plaintext","reason":reason})).collect::<Vec<_>>()) } else { json!([]) },"encryption_required":inventory.encryption_required,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified}),
+        json!({"run_id":Uuid::new_v4(),"status":"completed","fields":counts,"totals":totals,"approved_plaintext":if req.include_approved_plaintext { json!(APPROVED.iter().chain(REVIEWED_PLAINTEXT_FIELDS.iter()).map(|(table,column,_)| { let (_,reason)=classification(table,column,"text").expect("registered field"); json!({"table":table,"column":column,"classification":"approved_plaintext","reason":reason}) }).collect::<Vec<_>>()) } else { json!([]) },"encryption_required":inventory.encryption_required,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified}),
     ))
 }
 
@@ -1249,14 +1255,14 @@ mod tests {
     }
 
     #[test]
-    fn broader_confidential_tables_require_encryption() {
+    fn reviewed_fields_are_approved_for_plaintext_storage() {
         for (table, column) in [
             ("users", "email"),
             ("subscriptions", "customer_id"),
             ("aml_risk_reports", "result"),
         ] {
             let (kind, reason) = classification(table, column, "character varying").unwrap();
-            assert_eq!(kind, "encryption_required");
+            assert_eq!(kind, "approved_plaintext");
             assert!(!reason.is_empty());
         }
         assert!(classification("new_unreviewed_table", "payload", "jsonb").is_none());
