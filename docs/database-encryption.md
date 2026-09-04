@@ -96,5 +96,9 @@ retention, and credential lifecycle are implemented and verified.
 
 Internal relationship UUIDs, timestamps, status/permission enums, booleans,
 counters, sizes, non-reversible hashes/MACs, and file purpose remain approved
-operational plaintext. Provider conversation and file identifiers are sensitive
-and must migrate to encrypted values with keyed lookup tokens.
+operational plaintext. Opaque provider conversation/file IDs and the associated
+share relationship also remain plaintext: they are protocol-facing primary and
+foreign keys, authorization is enforced independently of possessing an ID, and
+an internal-key migration would provide limited protection while relationship
+structure remains visible. They must not be treated as authorization secrets or
+included in logs.

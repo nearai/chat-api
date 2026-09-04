@@ -92,6 +92,21 @@ const FIELDS: &[Field] = &[
 ];
 
 const APPROVED: &[(&str, &str, &str)] = &[
+    (
+        "conversations",
+        "id",
+        "Opaque protocol identifier; authorization is enforced independently and primary-key migration cost outweighs correlation benefit",
+    ),
+    (
+        "files",
+        "id",
+        "Opaque protocol identifier; authorization is enforced independently and primary-key migration cost outweighs correlation benefit",
+    ),
+    (
+        "conversation_shares",
+        "conversation_id",
+        "Required relationship to the approved opaque conversation identifier",
+    ),
     ("conversations", "user_id", "Required relationship key"),
     ("files", "user_id", "Required relationship key"),
     ("files", "purpose", "Queryable protocol enum"),
@@ -279,21 +294,6 @@ const APPROVED: &[(&str, &str, &str)] = &[
 ];
 
 const SENSITIVE_FIELDS: &[(&str, &str, &str)] = &[
-    (
-        "conversations",
-        "id",
-        "External conversation identifier; migrate to encrypted value and keyed token",
-    ),
-    (
-        "files",
-        "id",
-        "External file identifier; migrate to encrypted value and keyed token",
-    ),
-    (
-        "conversation_shares",
-        "conversation_id",
-        "External conversation identifier; replace with internal relationship UUID",
-    ),
     (
         "users",
         "email",
@@ -1172,14 +1172,23 @@ mod tests {
     }
 
     #[test]
-    fn provider_identifiers_require_encryption() {
-        for (table, column) in [("conversations", "id"), ("files", "id")] {
+    fn opaque_provider_identifiers_are_explicitly_approved() {
+        for (table, column) in [
+            ("conversations", "id"),
+            ("files", "id"),
+            ("conversation_shares", "conversation_id"),
+        ] {
             assert_eq!(
                 classification(table, column, "character varying")
                     .unwrap()
                     .0,
-                "encryption_required"
+                "approved_plaintext"
             );
+            assert!(APPROVED
+                .iter()
+                .any(|(known_table, known_column, reason)| *known_table == table
+                    && *known_column == column
+                    && reason.contains("identifier")));
         }
     }
 
