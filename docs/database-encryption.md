@@ -73,7 +73,6 @@ boundary or be destroyed under the backup-retention policy.
 - `conversation_share_groups.name`
 - `conversation_share_group_members.member_value`
 - `conversation_shares.recipient_value`
-- `user_activity_log.metadata`
 - `oauth_tokens.access_token`
 - `oauth_tokens.refresh_token`
 - `agent_instances.auth_session_token`

@@ -21,57 +21,6 @@ impl PostgresAnalyticsRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
-
-    fn encode_metadata(
-        &self,
-        id: uuid::Uuid,
-        metadata: Option<serde_json::Value>,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
-        let Some(value) = metadata else {
-            return Ok(None);
-        };
-        let Some(config) = self
-            .pool
-            .field_encryption()
-            .filter(|config| config.write_enabled)
-        else {
-            return Ok(Some(value));
-        };
-        let encoded = crate::field_encryption::encrypt(
-            &config.key,
-            &config.key_id,
-            "user_activity_log",
-            "metadata",
-            id,
-            &serde_json::to_string(&value)?,
-        )?;
-        Ok(Some(serde_json::from_str(&encoded)?))
-    }
-
-    fn decode_metadata(
-        &self,
-        id: uuid::Uuid,
-        metadata: Option<serde_json::Value>,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
-        let Some(value) = metadata else {
-            return Ok(None);
-        };
-        let Some(config) = self.pool.field_encryption() else {
-            return Ok(Some(value));
-        };
-        if !crate::field_encryption::is_envelope(&value) {
-            return Ok(Some(value));
-        }
-        let decoded = crate::field_encryption::decrypt(
-            &config.key,
-            &config.key_id,
-            "user_activity_log",
-            "metadata",
-            id,
-            &serde_json::to_string(&value)?,
-        )?;
-        Ok(Some(serde_json::from_str(&decoded)?))
-    }
 }
 
 #[async_trait]
@@ -82,7 +31,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         let activity_type = request.activity_type.as_str();
         let auth_method = request.auth_method.map(|m| m.as_str().to_string());
         let id = uuid::Uuid::new_v4();
-        let metadata = self.encode_metadata(id, request.metadata)?;
+        let metadata = request.metadata;
 
         client
             .execute(
@@ -120,7 +69,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         let client = self.pool.get().await?;
         let activity_type = request.activity_type.as_str();
         let id = uuid::Uuid::new_v4();
-        let metadata = self.encode_metadata(id, request.metadata)?;
+        let metadata = request.metadata;
 
         // Use a single query to atomically:
         // 1. Count activities in the sliding window
@@ -421,7 +370,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                     user_id: row.get(1),
                     activity_type: row.get(2),
                     auth_method: row.get(3),
-                    metadata: self.decode_metadata(id, row.get(4))?,
+                    metadata: row.get(4),
                     created_at: row.get(5),
                 })
             })

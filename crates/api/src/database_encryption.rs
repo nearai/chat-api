@@ -21,7 +21,6 @@ fn worker() -> &'static Semaphore {
 #[derive(Clone, Copy)]
 enum Kind {
     Text,
-    Json,
 }
 
 #[derive(Clone, Copy)]
@@ -72,14 +71,6 @@ const FIELDS: &[Field] = &[
             "recipient_value_search_token",
             "conversation_shares.recipient_value",
         )),
-    },
-    Field {
-        table: "user_activity_log",
-        column: "metadata",
-        id_column: "id",
-        kind: Kind::Json,
-        reason: "Conversation/file activity metadata",
-        token: None,
     },
     Field {
         table: "oauth_tokens",
@@ -186,6 +177,11 @@ const APPROVED: &[(&str, &str, &str)] = &[
         "user_activity_log",
         "auth_method",
         "Queryable authentication-method enum",
+    ),
+    (
+        "user_activity_log",
+        "metadata",
+        "Analytics context limited to opaque resource IDs, model ID, cache-hit status, share count, and permission",
     ),
     (
         "database_encryption_jobs",
@@ -1058,7 +1054,6 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
         if mode == "execute" && !ids.is_empty() {
             let expression = match field.kind {
                 Kind::Text => "batch.value",
-                Kind::Json => "batch.value::jsonb",
             };
             if let Some((token_column, _)) = field.token {
                 let update=format!("UPDATE {table} target SET {column}={expression},{token_column}=batch.token FROM UNNEST($1::uuid[],$2::text[],$3::bytea[]) batch(id,value,token) WHERE target.{id}=batch.id",table=field.table,column=field.column,id=field.id_column);
@@ -1253,7 +1248,6 @@ mod tests {
             ("conversation_share_groups", "name"),
             ("conversation_share_group_members", "member_value"),
             ("conversation_shares", "recipient_value"),
-            ("user_activity_log", "metadata"),
             ("oauth_tokens", "access_token"),
             ("oauth_tokens", "refresh_token"),
             ("agent_instances", "auth_session_token"),
