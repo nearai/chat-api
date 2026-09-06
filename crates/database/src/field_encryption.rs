@@ -16,7 +16,7 @@ const AEAD_KEY_INFO: &[u8] = b"near-chat-db-aead-v1";
 const SEARCH_KEY_INFO: &[u8] = b"near-chat-db-search-v1";
 
 fn derive_key(master_key: &[u8; 32], info: &[u8]) -> Result<[u8; 32]> {
-    let mut key = [0u8; 32];
+    let mut key = *master_key;
     Hkdf::<Sha256>::new(None, master_key)
         .expand(info, &mut key)
         .map_err(|_| anyhow!("database encryption key derivation failed"))?;
