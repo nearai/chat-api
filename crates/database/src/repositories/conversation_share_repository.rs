@@ -60,15 +60,16 @@ impl PostgresConversationShareRepository {
     }
 
     fn token(&self, domain: &str, value: &str) -> Result<Option<Vec<u8>>, ConversationError> {
+        let normalized = if domain == "conversation_share_groups.name" {
+            value.trim().to_string()
+        } else {
+            value.trim().to_lowercase()
+        };
         self.pool
             .field_encryption()
             .map(|config| {
-                crate::field_encryption::search_token(
-                    &config.key,
-                    domain,
-                    &value.trim().to_lowercase(),
-                )
-                .map_err(|e| ConversationError::DatabaseError(e.to_string()))
+                crate::field_encryption::search_token(&config.key, domain, &normalized)
+                    .map_err(|e| ConversationError::DatabaseError(e.to_string()))
             })
             .transpose()
     }
@@ -194,6 +195,137 @@ impl PostgresConversationShareRepository {
             updated_at: row.get("updated_at"),
         })
     }
+
+    async fn upsert_share<C>(
+        &self,
+        client: &C,
+        share: &NewConversationShare,
+    ) -> Result<ConversationShare, ConversationError>
+    where
+        C: tokio_postgres::GenericClient + Sync,
+    {
+        let recipient_token = share
+            .recipient
+            .as_ref()
+            .map(|recipient| self.token("conversation_shares.recipient_value", &recipient.value))
+            .transpose()?
+            .flatten();
+        let existing_direct_id = if let (ShareType::Direct, Some(recipient), Some(token)) =
+            (&share.share_type, &share.recipient, &recipient_token)
+        {
+            let lock_key = format!(
+                "direct-share:{}:{}:{}",
+                share.conversation_id,
+                recipient.kind.as_str(),
+                recipient.value.trim().to_lowercase()
+            );
+            client
+                .query_one(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    &[&lock_key],
+                )
+                .await
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+            let matches = client
+                .query(
+                    "SELECT id FROM conversation_shares
+                     WHERE conversation_id=$1 AND share_type='direct' AND recipient_type=$2
+                       AND (recipient_value_search_token=$3 OR
+                            (recipient_value_search_token IS NULL AND LOWER(recipient_value)=LOWER($4)))
+                     ORDER BY recipient_value_search_token IS NULL
+                     FOR UPDATE",
+                    &[
+                        &share.conversation_id,
+                        &recipient.kind.as_str(),
+                        token,
+                        &recipient.value,
+                    ],
+                )
+                .await
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+            let ids = matches
+                .iter()
+                .map(|row| row.get::<_, Uuid>(0))
+                .collect::<Vec<_>>();
+            if ids.len() > 1 {
+                let duplicate_ids = ids[1..].to_vec();
+                client
+                    .execute(
+                        "DELETE FROM conversation_shares WHERE id=ANY($1)",
+                        &[&duplicate_ids],
+                    )
+                    .await
+                    .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+            }
+            ids.first().copied()
+        } else {
+            None
+        };
+
+        let share_id = existing_direct_id.unwrap_or_else(Uuid::new_v4);
+        let recipient_value = share
+            .recipient
+            .as_ref()
+            .map(|recipient| {
+                self.encode(
+                    "conversation_shares",
+                    "recipient_value",
+                    share_id,
+                    &recipient.value,
+                )
+            })
+            .transpose()?;
+
+        let row = if existing_direct_id.is_some() {
+            client
+                .query_one(
+                    "UPDATE conversation_shares
+                     SET owner_user_id=$2, permission=$3, recipient_value=$4,
+                         recipient_value_search_token=$5, updated_at=NOW()
+                     WHERE id=$1
+                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
+                               recipient_type, recipient_value, group_id, org_email_pattern,
+                               created_at, updated_at",
+                    &[
+                        &share_id,
+                        &share.owner_user_id.0,
+                        &share.permission.as_str(),
+                        &recipient_value,
+                        &recipient_token,
+                    ],
+                )
+                .await
+        } else {
+            let query = match share.share_type {
+                ShareType::Direct => "INSERT INTO conversation_shares (conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,id,recipient_value_search_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (conversation_id,recipient_type,recipient_value_search_token) WHERE share_type='direct' AND recipient_value_search_token IS NOT NULL DO UPDATE SET permission=EXCLUDED.permission,updated_at=NOW() RETURNING id,conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,created_at,updated_at",
+                ShareType::Group => "INSERT INTO conversation_shares (conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,id,recipient_value_search_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (conversation_id,group_id) WHERE share_type='group' DO UPDATE SET permission=EXCLUDED.permission,updated_at=NOW() RETURNING id,conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,created_at,updated_at",
+                ShareType::Organization => "INSERT INTO conversation_shares (conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,id,recipient_value_search_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (conversation_id,org_email_pattern) WHERE share_type='organization' DO UPDATE SET permission=EXCLUDED.permission,updated_at=NOW() RETURNING id,conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,created_at,updated_at",
+                ShareType::Public => "INSERT INTO conversation_shares (conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,id,recipient_value_search_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (conversation_id) WHERE share_type='public' DO UPDATE SET permission=EXCLUDED.permission,updated_at=NOW() RETURNING id,conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,created_at,updated_at",
+            };
+            client
+                .query_one(
+                    query,
+                    &[
+                        &share.conversation_id,
+                        &share.owner_user_id.0,
+                        &share.share_type.as_str(),
+                        &share.permission.as_str(),
+                        &share
+                            .recipient
+                            .as_ref()
+                            .map(|recipient| recipient.kind.as_str()),
+                        &recipient_value,
+                        &share.group_id,
+                        &share.org_email_pattern,
+                        &share_id,
+                        &recipient_token,
+                    ],
+                )
+                .await
+        }
+        .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+        self.map_share_row(&row)
+    }
 }
 
 #[async_trait]
@@ -216,8 +348,32 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
         let group_id = Uuid::new_v4();
-        let stored_name = self.encode("conversation_share_groups", "name", group_id, name)?;
         let name_token = self.token("conversation_share_groups.name", name)?;
+        let lock_key = format!("share-group:{}:{}", owner_user_id.0, name.trim());
+        transaction
+            .query_one(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                &[&lock_key],
+            )
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+        if transaction
+            .query_opt(
+                "SELECT id FROM conversation_share_groups
+                 WHERE owner_user_id=$1 AND
+                       (name_search_token=$2 OR (name_search_token IS NULL AND name=$3))
+                 LIMIT 1 FOR UPDATE",
+                &[&owner_user_id.0, &name_token, &name],
+            )
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?
+            .is_some()
+        {
+            return Err(ConversationError::DatabaseError(
+                "share group name already exists".into(),
+            ));
+        }
+        let stored_name = self.encode("conversation_share_groups", "name", group_id, name)?;
         let row = transaction
             .query_one(
                 "INSERT INTO conversation_share_groups (id, owner_user_id, name, name_search_token)
@@ -539,143 +695,20 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         &self,
         share: NewConversationShare,
     ) -> Result<ConversationShare, ConversationError> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-        let share_id = Uuid::new_v4();
-        let recipient_value = share
-            .recipient
-            .as_ref()
-            .map(|recipient| {
-                self.encode(
-                    "conversation_shares",
-                    "recipient_value",
-                    share_id,
-                    &recipient.value,
-                )
-            })
-            .transpose()?;
-        let recipient_token = share
-            .recipient
-            .as_ref()
-            .map(|recipient| self.token("conversation_shares.recipient_value", &recipient.value))
-            .transpose()?
-            .flatten();
-        let org_email_pattern = &share.org_email_pattern;
-        // Use ON CONFLICT to update existing shares based on share type
-        let query = match share.share_type {
-            ShareType::Direct => {
-                "INSERT INTO conversation_shares (
-                     conversation_id,
-                     owner_user_id,
-                     share_type,
-                     permission,
-                     recipient_type,
-                     recipient_value,
-                     group_id,
-                     org_email_pattern, id, recipient_value_search_token
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT (conversation_id, recipient_type, recipient_value_search_token)
-                     WHERE share_type = 'direct' AND recipient_value_search_token IS NOT NULL
-                 DO UPDATE SET
-                     permission = EXCLUDED.permission,
-                     updated_at = NOW()
-                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                           recipient_type, recipient_value, group_id, org_email_pattern,
-                           created_at, updated_at"
-            }
-            ShareType::Group => {
-                "INSERT INTO conversation_shares (
-                     conversation_id,
-                     owner_user_id,
-                     share_type,
-                     permission,
-                     recipient_type,
-                     recipient_value,
-                     group_id,
-                     org_email_pattern, id, recipient_value_search_token
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT (conversation_id, group_id)
-                     WHERE share_type = 'group'
-                 DO UPDATE SET
-                     permission = EXCLUDED.permission,
-                     updated_at = NOW()
-                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                           recipient_type, recipient_value, group_id, org_email_pattern,
-                           created_at, updated_at"
-            }
-            ShareType::Organization => {
-                "INSERT INTO conversation_shares (
-                     conversation_id,
-                     owner_user_id,
-                     share_type,
-                     permission,
-                     recipient_type,
-                     recipient_value,
-                     group_id,
-                     org_email_pattern, id, recipient_value_search_token
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT (conversation_id, org_email_pattern)
-                     WHERE share_type = 'organization'
-                 DO UPDATE SET
-                     permission = EXCLUDED.permission,
-                     updated_at = NOW()
-                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                           recipient_type, recipient_value, group_id, org_email_pattern,
-                           created_at, updated_at"
-            }
-            ShareType::Public => {
-                "INSERT INTO conversation_shares (
-                     conversation_id,
-                     owner_user_id,
-                     share_type,
-                     permission,
-                     recipient_type,
-                     recipient_value,
-                     group_id,
-                     org_email_pattern, id, recipient_value_search_token
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT (conversation_id)
-                     WHERE share_type = 'public'
-                 DO UPDATE SET
-                     permission = EXCLUDED.permission,
-                     updated_at = NOW()
-                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                           recipient_type, recipient_value, group_id, org_email_pattern,
-                           created_at, updated_at"
-            }
-        };
-
-        let row = client
-            .query_one(
-                query,
-                &[
-                    &share.conversation_id,
-                    &share.owner_user_id.0,
-                    &share.share_type.as_str(),
-                    &share.permission.as_str(),
-                    &share
-                        .recipient
-                        .as_ref()
-                        .map(|recipient| recipient.kind.as_str()),
-                    &recipient_value,
-                    &share.group_id,
-                    &org_email_pattern,
-                    &share_id,
-                    &recipient_token,
-                ],
-            )
+        let tx = client
+            .transaction()
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-        self.map_share_row(&row)
+        let result = self.upsert_share(&*tx, &share).await?;
+        tx.commit()
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+        Ok(result)
     }
 
     /// Create multiple shares atomically (all succeed or all fail).
@@ -702,139 +735,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         let mut results = Vec::with_capacity(shares.len());
 
         for share in shares {
-            let share_id = Uuid::new_v4();
-            let recipient_value = share
-                .recipient
-                .as_ref()
-                .map(|recipient| {
-                    self.encode(
-                        "conversation_shares",
-                        "recipient_value",
-                        share_id,
-                        &recipient.value,
-                    )
-                })
-                .transpose()?;
-            let recipient_token = share
-                .recipient
-                .as_ref()
-                .map(|recipient| {
-                    self.token("conversation_shares.recipient_value", &recipient.value)
-                })
-                .transpose()?
-                .flatten();
-            let org_email_pattern = &share.org_email_pattern;
-            // Use ON CONFLICT to update existing shares based on share type
-            let query = match share.share_type {
-                ShareType::Direct => {
-                    "INSERT INTO conversation_shares (
-                         conversation_id,
-                         owner_user_id,
-                         share_type,
-                         permission,
-                         recipient_type,
-                         recipient_value,
-                         group_id,
-                         org_email_pattern, id, recipient_value_search_token
-                     )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                     ON CONFLICT (conversation_id, recipient_type, recipient_value_search_token)
-                         WHERE share_type = 'direct' AND recipient_value_search_token IS NOT NULL
-                     DO UPDATE SET
-                         permission = EXCLUDED.permission,
-                         updated_at = NOW()
-                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                               recipient_type, recipient_value, group_id, org_email_pattern,
-                               created_at, updated_at"
-                }
-                ShareType::Group => {
-                    "INSERT INTO conversation_shares (
-                         conversation_id,
-                         owner_user_id,
-                         share_type,
-                         permission,
-                         recipient_type,
-                         recipient_value,
-                         group_id,
-                         org_email_pattern, id, recipient_value_search_token
-                     )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                     ON CONFLICT (conversation_id, group_id)
-                         WHERE share_type = 'group'
-                     DO UPDATE SET
-                         permission = EXCLUDED.permission,
-                         updated_at = NOW()
-                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                               recipient_type, recipient_value, group_id, org_email_pattern,
-                               created_at, updated_at"
-                }
-                ShareType::Organization => {
-                    "INSERT INTO conversation_shares (
-                         conversation_id,
-                         owner_user_id,
-                         share_type,
-                         permission,
-                         recipient_type,
-                         recipient_value,
-                         group_id,
-                         org_email_pattern, id, recipient_value_search_token
-                     )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                     ON CONFLICT (conversation_id, org_email_pattern)
-                         WHERE share_type = 'organization'
-                     DO UPDATE SET
-                         permission = EXCLUDED.permission,
-                         updated_at = NOW()
-                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                               recipient_type, recipient_value, group_id, org_email_pattern,
-                               created_at, updated_at"
-                }
-                ShareType::Public => {
-                    "INSERT INTO conversation_shares (
-                         conversation_id,
-                         owner_user_id,
-                         share_type,
-                         permission,
-                         recipient_type,
-                         recipient_value,
-                         group_id,
-                         org_email_pattern, id, recipient_value_search_token
-                     )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                     ON CONFLICT (conversation_id)
-                         WHERE share_type = 'public'
-                     DO UPDATE SET
-                         permission = EXCLUDED.permission,
-                         updated_at = NOW()
-                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                               recipient_type, recipient_value, group_id, org_email_pattern,
-                               created_at, updated_at"
-                }
-            };
-
-            let row = transaction
-                .query_one(
-                    query,
-                    &[
-                        &share.conversation_id,
-                        &share.owner_user_id.0,
-                        &share.share_type.as_str(),
-                        &share.permission.as_str(),
-                        &share
-                            .recipient
-                            .as_ref()
-                            .map(|recipient| recipient.kind.as_str()),
-                        &recipient_value,
-                        &share.group_id,
-                        &org_email_pattern,
-                        &share_id,
-                        &recipient_token,
-                    ],
-                )
-                .await
-                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-            results.push(self.map_share_row(&row)?);
+            results.push(self.upsert_share(&*transaction, &share).await?);
         }
 
         transaction
