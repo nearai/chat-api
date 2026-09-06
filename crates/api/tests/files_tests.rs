@@ -20,7 +20,7 @@ async fn repository_encrypts_filename_and_dual_reads_it() {
             ..config
         });
     let user_id = Uuid::new_v4();
-    let file_id = format!("file-encrypted-{user_id}");
+    let file_id = format!("file-{user_id}");
     let client = db.pool().get().await.unwrap();
     client
         .execute(

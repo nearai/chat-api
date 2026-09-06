@@ -29,18 +29,21 @@ impl PostgresFileRepository {
         }
     }
 
-    fn decode_filename(&self, id: Option<Uuid>, value: String) -> Result<String, FileError> {
-        let Some(id) = id else {
-            return if serde_json::from_str::<serde_json::Value>(&value)
-                .is_ok_and(|value| crate::field_encryption::is_envelope(&value))
-            {
-                Err(FileError::DatabaseError(
-                    "encrypted filename is missing its encryption context".into(),
-                ))
-            } else {
-                Ok(value)
-            };
-        };
+    fn encryption_context(file_id: &str) -> Result<Uuid, FileError> {
+        Uuid::parse_str(file_id.strip_prefix("file-").unwrap_or(file_id)).map_err(|_| {
+            FileError::DatabaseError(format!(
+                "file ID does not contain the UUID required for encryption context: {file_id}"
+            ))
+        })
+    }
+
+    fn decode_filename(&self, file_id: &str, value: String) -> Result<String, FileError> {
+        if !serde_json::from_str::<serde_json::Value>(&value)
+            .is_ok_and(|value| crate::field_encryption::is_envelope(&value))
+        {
+            return Ok(value);
+        }
+        let id = Self::encryption_context(file_id)?;
         match self.pool.field_encryption() {
             Some(config) => crate::field_encryption::decrypt_if_encrypted(
                 &config.key,
@@ -56,12 +59,13 @@ impl PostgresFileRepository {
     }
 
     fn raw_to_file_data(&self, row: &Row) -> Result<FileData, FileError> {
+        let id: String = row.get("id");
         Ok(FileData {
-            id: row.get("id"),
+            id: id.clone(),
             bytes: row.get("bytes"),
             created_at: row.get("file_created_at"),
             expires_at: row.get("file_expires_at"),
-            filename: self.decode_filename(row.get("encryption_id"), row.get("filename"))?,
+            filename: self.decode_filename(&id, row.get("filename"))?,
             purpose: row.get("purpose"),
         })
     }
@@ -76,40 +80,24 @@ impl FileRepository for PostgresFileRepository {
             user_id
         );
 
-        let mut client = self
+        let client = self
             .pool
             .get()
             .await
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
-        let transaction = client
-            .transaction()
-            .await
-            .map_err(|e| FileError::DatabaseError(e.to_string()))?;
-        transaction
-            .query_one(
-                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                &[&format!("file:{}", file.id)],
-            )
-            .await
-            .map_err(|e| FileError::DatabaseError(e.to_string()))?;
-        let encryption_id = transaction
-            .query_opt(
-                "SELECT encryption_id FROM files WHERE id=$1 FOR UPDATE",
-                &[&file.id],
-            )
-            .await
-            .map_err(|e| FileError::DatabaseError(e.to_string()))?
-            .and_then(|row| row.get::<_, Option<Uuid>>(0))
-            .unwrap_or_else(Uuid::new_v4);
-        let filename = self.encode_filename(encryption_id, &file.filename)?;
-        transaction
+        let filename = match self.pool.field_encryption() {
+            Some(config) if config.write_enabled => {
+                self.encode_filename(Self::encryption_context(&file.id)?, &file.filename)?
+            }
+            _ => file.filename.clone(),
+        };
+        client
             .execute(
-                "INSERT INTO files (id, encryption_id, user_id, bytes, file_created_at, file_expires_at, filename, purpose)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "INSERT INTO files (id, user_id, bytes, file_created_at, file_expires_at, filename, purpose)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                  ON CONFLICT (id) 
                  DO UPDATE SET 
-                     encryption_id = COALESCE(files.encryption_id, EXCLUDED.encryption_id),
                      user_id = EXCLUDED.user_id,
                      bytes = EXCLUDED.bytes,
                      file_created_at = EXCLUDED.file_created_at,
@@ -119,7 +107,6 @@ impl FileRepository for PostgresFileRepository {
                      updated_at = NOW()",
                 &[
                     &file.id,
-                    &encryption_id,
                     &user_id.0,
                     &file.bytes,
                     &file.created_at,
@@ -128,10 +115,6 @@ impl FileRepository for PostgresFileRepository {
                     &file.purpose,
                 ],
             )
-            .await
-            .map_err(|e| FileError::DatabaseError(e.to_string()))?;
-        transaction
-            .commit()
             .await
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
@@ -159,7 +142,7 @@ impl FileRepository for PostgresFileRepository {
 
         let row = client
             .query_opt(
-                "SELECT id, encryption_id, bytes, file_created_at, file_expires_at, filename, purpose
+                "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
                  FROM files 
                  WHERE id = $1 AND user_id = $2",
                 &[&file_id, &user_id.0],
@@ -211,7 +194,7 @@ impl FileRepository for PostgresFileRepository {
             // With cursor
             let op = if order == "asc" { ">" } else { "<" };
             let sql = format!(
-                "SELECT id, encryption_id, bytes, file_created_at, file_expires_at, filename, purpose
+                "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
                  FROM files
                  WHERE user_id = $1
                    AND ($2::text IS NULL OR purpose = $2)
@@ -232,7 +215,7 @@ impl FileRepository for PostgresFileRepository {
         } else {
             // Without cursor
             let sql = format!(
-                "SELECT id, encryption_id, bytes, file_created_at, file_expires_at, filename, purpose
+                "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
                  FROM files
                  WHERE user_id = $1
                    AND ($2::text IS NULL OR purpose = $2)

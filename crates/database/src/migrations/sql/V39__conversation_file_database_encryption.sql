@@ -25,12 +25,8 @@ CREATE UNIQUE INDEX idx_database_encryption_jobs_active_scope
     ON database_encryption_jobs ((scope::text))
     WHERE status IN ('queued', 'running');
 
--- Provider file IDs remain the protocol-facing primary key during Stage I.
--- A stable internal UUID is used as authenticated encryption context.
 ALTER TABLE files
-    ADD COLUMN encryption_id UUID,
     ALTER COLUMN filename TYPE TEXT;
-ALTER TABLE files ALTER COLUMN encryption_id SET DEFAULT uuid_generate_v4();
 
 -- Randomized ciphertext cannot satisfy equality/uniqueness lookups. Store
 -- domain-separated HMAC-SHA256 tokens alongside encrypted display values.

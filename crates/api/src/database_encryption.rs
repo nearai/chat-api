@@ -37,7 +37,7 @@ const FIELDS: &[Field] = &[
     Field {
         table: "files",
         column: "filename",
-        id_column: "encryption_id",
+        id_column: "id",
         kind: Kind::Text,
         reason: "User-provided file metadata",
         token: None,
@@ -226,7 +226,6 @@ const APPROVED: &[(&str, &str, &str)] = &[
     ("files", "file_expires_at", "Provider timestamp"),
     ("files", "created_at", "Operational timestamp"),
     ("files", "updated_at", "Operational timestamp"),
-    ("files", "encryption_id", "Internal encryption context UUID"),
     (
         "conversation_share_groups",
         "id",
@@ -760,14 +759,14 @@ async fn counts(
     let client = state.db_pool.get().await?;
     let mut result = Vec::new();
     for field in fields {
+        let row_id = row_id_expression(field, None);
         let cap = limit.unwrap_or(i64::MAX).clamp(1, 100_000);
         let token = field
             .token
             .map(|(column, _)| column)
             .unwrap_or("NULL::bytea");
         let query = format!(
-            "SELECT {id},{column}::text,{token} FROM {table} ORDER BY {id} LIMIT $1",
-            id = field.id_column,
+            "SELECT {row_id} AS row_id,{column}::text,{token} FROM {table} WHERE {row_id} IS NOT NULL ORDER BY row_id LIMIT $1",
             column = field.column,
             table = field.table
         );
@@ -971,32 +970,12 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
         tx.query_one("SELECT pg_advisory_xact_lock($1)", &[&WORKER_LOCK])
             .await?;
         if tx.query_one("SELECT cancel_requested_at IS NOT NULL FROM database_encryption_jobs WHERE id=$1 FOR UPDATE",&[&id]).await?.get::<_,bool>(0) { tx.execute("UPDATE database_encryption_jobs SET status='cancelled',completed_at=NOW() WHERE id=$1",&[&id]).await?; tx.commit().await?; return Ok(()); }
-        if mode == "execute" && field.table == "files" && field.id_column == "encryption_id" {
-            let assigned = tx
-                .execute(
-                    "WITH candidates AS (
-                         SELECT ctid FROM files
-                         WHERE encryption_id IS NULL
-                         LIMIT $1
-                         FOR UPDATE SKIP LOCKED
-                     )
-                     UPDATE files target
-                     SET encryption_id=uuid_generate_v4()
-                     FROM candidates
-                     WHERE target.ctid=candidates.ctid",
-                    &[&cap],
-                )
-                .await?;
-            if assigned > 0 {
-                tx.commit().await?;
-                continue;
-            }
-        }
+        let row_id = row_id_expression(field, None);
         let token = field
             .token
             .map(|(column, _)| column)
             .unwrap_or("NULL::bytea");
-        let query=format!("WITH candidates AS (SELECT {id},{column}::text value,{token} search_token FROM {table} WHERE {id}>$1 AND {column} IS NOT NULL ORDER BY {id} LIMIT $2 FOR UPDATE), sized AS (SELECT *,sum(octet_length(value)) OVER(ORDER BY {id}) bytes,row_number() OVER(ORDER BY {id}) row_no FROM candidates) SELECT {id},value,search_token FROM sized WHERE bytes<=$3 OR row_no=1 ORDER BY {id}",id=field.id_column,column=field.column,table=field.table);
+        let query=format!("WITH candidates AS (SELECT {row_id} AS row_id,{column}::text value,{token} search_token FROM {table} WHERE {row_id}>$1 AND {column} IS NOT NULL ORDER BY row_id LIMIT $2 FOR UPDATE), sized AS (SELECT *,sum(octet_length(value)) OVER(ORDER BY row_id) bytes,row_number() OVER(ORDER BY row_id) row_no FROM candidates) SELECT row_id,value,search_token FROM sized WHERE bytes<=$3 OR row_no=1 ORDER BY row_id",column=field.column,table=field.table);
         let rows = tx.query(&query, &[&after, &cap, &MAX_BATCH_BYTES]).await?;
         if rows.is_empty() {
             field_index += 1;
@@ -1056,10 +1035,12 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
                 Kind::Text => "batch.value",
             };
             if let Some((token_column, _)) = field.token {
-                let update=format!("UPDATE {table} target SET {column}={expression},{token_column}=batch.token FROM UNNEST($1::uuid[],$2::text[],$3::bytea[]) batch(id,value,token) WHERE target.{id}=batch.id",table=field.table,column=field.column,id=field.id_column);
+                let target_id = row_id_expression(field, Some("target"));
+                let update=format!("UPDATE {table} target SET {column}={expression},{token_column}=batch.token FROM UNNEST($1::uuid[],$2::text[],$3::bytea[]) batch(id,value,token) WHERE {target_id}=batch.id",table=field.table,column=field.column);
                 encrypted += tx.execute(&update, &[&ids, &values, &tokens]).await? as i64;
             } else {
-                let update=format!("UPDATE {table} target SET {column}={expression} FROM UNNEST($1::uuid[],$2::text[]) batch(id,value) WHERE target.{id}=batch.id",table=field.table,column=field.column,id=field.id_column);
+                let target_id = row_id_expression(field, Some("target"));
+                let update=format!("UPDATE {table} target SET {column}={expression} FROM UNNEST($1::uuid[],$2::text[]) batch(id,value) WHERE {target_id}=batch.id",table=field.table,column=field.column);
                 encrypted += tx.execute(&update, &[&ids, &values]).await? as i64;
             }
         }
@@ -1073,11 +1054,11 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
     };
     let mut missing_encryption_contexts = 0i64;
     for field in &fields {
+        let row_id = row_id_expression(field, None);
         let query = format!(
-            "SELECT count(*) FROM {table} WHERE {column} IS NOT NULL AND {id} IS NULL",
+            "SELECT count(*) FROM {table} WHERE {column} IS NOT NULL AND {row_id} IS NULL",
             table = field.table,
             column = field.column,
-            id = field.id_column,
         );
         missing_encryption_contexts += client.query_one(&query, &[]).await?.get::<_, i64>(0);
     }
@@ -1089,6 +1070,18 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
             && inventory.legacy_confidential.is_empty();
     client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"missing_encryption_contexts":missing_encryption_contexts,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
     Ok(())
+}
+
+fn row_id_expression(field: &Field, qualifier: Option<&str>) -> String {
+    let prefix = qualifier.map_or_else(String::new, |value| format!("{value}."));
+    if field.table == "files" && field.column == "filename" {
+        let id = format!("{prefix}id");
+        format!(
+            "CASE WHEN {id} ~* '^file-[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$' THEN substring({id} from 6)::uuid END"
+        )
+    } else {
+        format!("{prefix}{}", field.id_column)
+    }
 }
 
 fn execute_writes_enabled(state: &AppState) -> bool {

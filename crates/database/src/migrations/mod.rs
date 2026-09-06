@@ -83,13 +83,8 @@ mod tests {
     }
 
     #[test]
-    fn v39_does_not_rewrite_files_to_add_encryption_context() {
-        assert!(V39.contains("ADD COLUMN encryption_id UUID,"));
-        assert!(V39.contains(
-            "ALTER TABLE files ALTER COLUMN encryption_id SET DEFAULT uuid_generate_v4()"
-        ));
-        assert!(!V39.contains("encryption_id UUID NOT NULL DEFAULT"));
-        assert!(!V39.contains("CREATE UNIQUE INDEX idx_files_encryption_id"));
+    fn v39_uses_cloud_file_uuid_without_an_auxiliary_encryption_id() {
+        assert!(!V39.contains("encryption_id"));
     }
 
     #[test]
