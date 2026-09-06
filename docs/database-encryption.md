@@ -55,10 +55,10 @@ Suggested execute request:
 
 Jobs commit one bounded batch at a time. Retrying an interrupted job is safe:
 authenticated envelopes are detected and skipped, and cursor/progress state is
-durable. The active-scope index prevents two workers from processing the same
-canonical scope, and the process-local worker semaphore prevents connection-pool
-exhaustion. A transaction-scoped PostgreSQL advisory lock also serializes
-batches across replicas without leaking a session lock. A failed deploy may be
+durable. The active-scope index prevents duplicate jobs for the same canonical
+scope, and the process-local worker semaphore prevents connection-pool
+exhaustion. A PostgreSQL session advisory lock held for the complete job
+serializes workers across replicas. A failed deploy may be
 rolled back only to a version that supports dual reads; rolling back to a
 plaintext-only reader after encrypted writes begin makes data unreadable.
 
@@ -85,10 +85,11 @@ must be confirmed absent in every deployed database and backup.
 
 Organization email patterns remain approved plaintext because the API supports
 arbitrary SQL wildcard patterns and deterministic equality tokens cannot
-preserve those matching semantics. File encryption IDs are added without a
-table-rewriting default; execute jobs assign missing IDs in bounded batches, and
-verification fails while any filename lacks its encryption context. A later
-cleanup migration may validate `NOT NULL` and uniqueness after backfill.
+preserve those matching semantics. Cloud API file IDs have the form
+`file-<UUID>`; the embedded UUID is the authenticated encryption context for
+`files.filename`. Before enabling writes, confirm every existing `files.id`
+matches that format. Nonconforming IDs are skipped by execute jobs and cause
+verification to fail with a missing encryption context.
 
 ## Whole-database policy classification
 
