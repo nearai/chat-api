@@ -643,6 +643,10 @@ fn classification(
 
 async fn inventory(state: &AppState) -> anyhow::Result<Inventory> {
     let client = state.db_pool.get().await?;
+    inventory_with_client(&client).await
+}
+
+async fn inventory_with_client(client: &deadpool_postgres::Object) -> anyhow::Result<Inventory> {
     let rows = client.query("SELECT columns.table_name,columns.column_name,columns.data_type FROM information_schema.columns columns JOIN information_schema.tables tables USING(table_schema,table_name) WHERE columns.table_schema='public' AND tables.table_type='BASE TABLE' AND columns.table_name <> 'refinery_schema_history' ORDER BY columns.table_name,columns.ordinal_position", &[]).await?;
     let mut inventory = Inventory::default();
     for row in rows {
@@ -929,11 +933,28 @@ pub async fn create_job(
 }
 
 async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
+    let mut client = state.db_pool.get().await?;
+    client
+        .query_one("SELECT pg_advisory_lock($1)", &[&WORKER_LOCK])
+        .await?;
+    let result = run_locked_job(state, id, &mut client).await;
+    let unlock = client
+        .query_one("SELECT pg_advisory_unlock($1)", &[&WORKER_LOCK])
+        .await;
+    result?;
+    unlock?;
+    Ok(())
+}
+
+async fn run_locked_job(
+    state: &AppState,
+    id: Uuid,
+    client: &mut deadpool_postgres::Object,
+) -> anyhow::Result<()> {
     let config = state
         .db_pool
         .field_encryption()
         .ok_or_else(|| anyhow::anyhow!("database encryption is not configured"))?;
-    let mut client = state.db_pool.get().await?;
     let Some(job)=client.query_opt("UPDATE database_encryption_jobs SET status='running',started_at=COALESCE(started_at,NOW()) WHERE id=$1 AND status IN ('queued','running') RETURNING mode,scope,batch_size,max_rows,cursor,progress",&[&id]).await? else { return Ok(()) };
     let mode: String = job.get(0);
     if write_gate_blocks(&mode, execute_writes_enabled(state)) {
@@ -966,8 +987,6 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
             .unwrap_or(batch);
         let tx = client.transaction().await?;
         tx.batch_execute("SET LOCAL statement_timeout='30s'")
-            .await?;
-        tx.query_one("SELECT pg_advisory_xact_lock($1)", &[&WORKER_LOCK])
             .await?;
         if tx.query_one("SELECT cancel_requested_at IS NOT NULL FROM database_encryption_jobs WHERE id=$1 FOR UPDATE",&[&id]).await?.get::<_,bool>(0) { tx.execute("UPDATE database_encryption_jobs SET status='cancelled',completed_at=NOW() WHERE id=$1",&[&id]).await?; tx.commit().await?; return Ok(()); }
         let row_id = row_id_expression(field, None);
@@ -1048,7 +1067,7 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
         tx.commit().await?;
     }
     let inventory = if mode == "verify" {
-        inventory(state).await?
+        inventory_with_client(&client).await?
     } else {
         Inventory::default()
     };

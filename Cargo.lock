@@ -516,6 +516,7 @@ dependencies = [
  "chrono",
  "config",
  "database",
+ "deadpool-postgres",
  "dotenvy",
  "dstack-sdk",
  "flate2",
