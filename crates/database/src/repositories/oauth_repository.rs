@@ -5,6 +5,7 @@ use services::{
     user::ports::OAuthProvider,
     UserId,
 };
+use uuid::Uuid;
 
 pub struct PostgresOAuthRepository {
     pool: DbPool,
@@ -13,6 +14,34 @@ pub struct PostgresOAuthRepository {
 impl PostgresOAuthRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
+    }
+
+    fn encode_token(&self, column: &str, id: Uuid, value: &str) -> anyhow::Result<String> {
+        match self.pool.field_encryption() {
+            Some(config) if config.write_enabled => crate::field_encryption::encrypt(
+                &config.key,
+                &config.key_id,
+                "oauth_tokens",
+                column,
+                id,
+                value,
+            ),
+            _ => Ok(value.to_string()),
+        }
+    }
+
+    fn decode_token(&self, column: &str, id: Uuid, value: String) -> anyhow::Result<String> {
+        match self.pool.field_encryption() {
+            Some(config) => crate::field_encryption::decrypt_if_encrypted(
+                &config.key,
+                &config.key_id,
+                "oauth_tokens",
+                column,
+                id,
+                value,
+            ),
+            None => Ok(value),
+        }
     }
 }
 
@@ -133,7 +162,7 @@ impl OAuthRepository for PostgresOAuthRepository {
             tokens.refresh_token.is_some()
         );
 
-        let client = self.pool.get().await?;
+        let mut client = self.pool.get().await?;
 
         let provider_str = match provider {
             OAuthProvider::Google => "google",
@@ -141,25 +170,48 @@ impl OAuthRepository for PostgresOAuthRepository {
             OAuthProvider::Near => "near",
         };
 
-        let rows_affected = client
+        let transaction = client.transaction().await?;
+        transaction
+            .query_one(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                &[&format!("oauth-token:{}:{provider_str}", user_id.0)],
+            )
+            .await?;
+        let id = transaction
+            .query_opt(
+                "SELECT id FROM oauth_tokens WHERE user_id = $1 AND provider = $2 FOR UPDATE",
+                &[&user_id, &provider_str],
+            )
+            .await?
+            .map(|row| row.get(0))
+            .unwrap_or_else(Uuid::new_v4);
+        let access_token = self.encode_token("access_token", id, &tokens.access_token)?;
+        let refresh_token = tokens
+            .refresh_token
+            .as_deref()
+            .map(|value| self.encode_token("refresh_token", id, value))
+            .transpose()?;
+        let rows_affected = transaction
             .execute(
-                "INSERT INTO oauth_tokens (user_id, provider, access_token, refresh_token, expires_at) 
-                 VALUES ($1, $2, $3, $4, $5) 
-                 ON CONFLICT (user_id, provider) 
-                 DO UPDATE SET 
-                    access_token = EXCLUDED.access_token, 
-                    refresh_token = EXCLUDED.refresh_token, 
+                "INSERT INTO oauth_tokens (id, user_id, provider, access_token, refresh_token, expires_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (user_id, provider)
+                 DO UPDATE SET
+                    access_token = EXCLUDED.access_token,
+                    refresh_token = EXCLUDED.refresh_token,
                     expires_at = EXCLUDED.expires_at,
                     updated_at = NOW()",
                 &[
+                    &id,
                     &user_id,
                     &provider_str,
-                    &tokens.access_token,
-                    &tokens.refresh_token,
+                    &access_token,
+                    &refresh_token,
                     &tokens.expires_at,
                 ],
             )
             .await?;
+        transaction.commit().await?;
 
         tracing::debug!(
             "Repository: OAuth tokens stored successfully - user_id={}, provider={:?}, rows_affected={}",
@@ -186,17 +238,24 @@ impl OAuthRepository for PostgresOAuthRepository {
 
         let row = client
             .query_opt(
-                "SELECT access_token, refresh_token, expires_at 
-                 FROM oauth_tokens 
+                "SELECT id, access_token, refresh_token, expires_at
+                 FROM oauth_tokens
                  WHERE user_id = $1 AND provider = $2",
                 &[&user_id, &provider_str],
             )
             .await?;
 
-        Ok(row.map(|r| OAuthTokens {
-            access_token: r.get(0),
-            refresh_token: r.get(1),
-            expires_at: r.get(2),
-        }))
+        row.map(|r| {
+            let id = r.get(0);
+            Ok(OAuthTokens {
+                access_token: self.decode_token("access_token", id, r.get(1))?,
+                refresh_token: r
+                    .get::<_, Option<String>>(2)
+                    .map(|value| self.decode_token("refresh_token", id, value))
+                    .transpose()?,
+                expires_at: r.get(3),
+            })
+        })
+        .transpose()
     }
 }

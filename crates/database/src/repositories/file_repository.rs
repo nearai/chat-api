@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use services::file::ports::{FileData, FileError, FileRepository};
 use services::UserId;
 use tokio_postgres::Row;
+use uuid::Uuid;
 
 pub struct PostgresFileRepository {
     pool: DbPool,
@@ -11,6 +12,62 @@ pub struct PostgresFileRepository {
 impl PostgresFileRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
+    }
+
+    fn encode_filename(&self, id: Uuid, value: &str) -> Result<String, FileError> {
+        match self.pool.field_encryption() {
+            Some(config) if config.write_enabled => crate::field_encryption::encrypt(
+                &config.key,
+                &config.key_id,
+                "files",
+                "filename",
+                id,
+                value,
+            )
+            .map_err(|e| FileError::DatabaseError(e.to_string())),
+            _ => Ok(value.to_string()),
+        }
+    }
+
+    fn encryption_context(file_id: &str) -> Result<Uuid, FileError> {
+        Uuid::parse_str(file_id.strip_prefix("file-").unwrap_or(file_id)).map_err(|_| {
+            FileError::DatabaseError(format!(
+                "file ID does not contain the UUID required for encryption context: {file_id}"
+            ))
+        })
+    }
+
+    fn decode_filename(&self, file_id: &str, value: String) -> Result<String, FileError> {
+        if !serde_json::from_str::<serde_json::Value>(&value)
+            .is_ok_and(|value| crate::field_encryption::is_envelope(&value))
+        {
+            return Ok(value);
+        }
+        let id = Self::encryption_context(file_id)?;
+        match self.pool.field_encryption() {
+            Some(config) => crate::field_encryption::decrypt_if_encrypted(
+                &config.key,
+                &config.key_id,
+                "files",
+                "filename",
+                id,
+                value,
+            )
+            .map_err(|e| FileError::DatabaseError(e.to_string())),
+            None => Ok(value),
+        }
+    }
+
+    fn raw_to_file_data(&self, row: &Row) -> Result<FileData, FileError> {
+        let id: String = row.get("id");
+        Ok(FileData {
+            id: id.clone(),
+            bytes: row.get("bytes"),
+            created_at: row.get("file_created_at"),
+            expires_at: row.get("file_expires_at"),
+            filename: self.decode_filename(&id, row.get("filename"))?,
+            purpose: row.get("purpose"),
+        })
     }
 }
 
@@ -29,6 +86,12 @@ impl FileRepository for PostgresFileRepository {
             .await
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
+        let filename = match self.pool.field_encryption() {
+            Some(config) if config.write_enabled => {
+                self.encode_filename(Self::encryption_context(&file.id)?, &file.filename)?
+            }
+            _ => file.filename.clone(),
+        };
         client
             .execute(
                 "INSERT INTO files (id, user_id, bytes, file_created_at, file_expires_at, filename, purpose)
@@ -48,7 +111,7 @@ impl FileRepository for PostgresFileRepository {
                     &file.bytes,
                     &file.created_at,
                     &file.expires_at,
-                    &file.filename,
+                    &filename,
                     &file.purpose,
                 ],
             )
@@ -88,7 +151,7 @@ impl FileRepository for PostgresFileRepository {
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
         match row {
-            Some(r) => Ok(raw_to_file_data(&r)),
+            Some(r) => self.raw_to_file_data(&r),
             None => Err(FileError::NotFound),
         }
     }
@@ -164,7 +227,10 @@ impl FileRepository for PostgresFileRepository {
         }
         .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
-        let files: Vec<FileData> = rows.iter().map(raw_to_file_data).collect();
+        let files: Vec<FileData> = rows
+            .iter()
+            .map(|row| self.raw_to_file_data(row))
+            .collect::<Result<_, _>>()?;
 
         tracing::debug!(
             "Repository: Found {} file(s) with pagination for user_id={}",
@@ -217,16 +283,5 @@ impl FileRepository for PostgresFileRepository {
         } else {
             Ok(())
         }
-    }
-}
-
-fn raw_to_file_data(row: &Row) -> FileData {
-    FileData {
-        id: row.get("id"),
-        bytes: row.get("bytes"),
-        created_at: row.get("file_created_at"),
-        expires_at: row.get("file_expires_at"),
-        filename: row.get("filename"),
-        purpose: row.get("purpose"),
     }
 }

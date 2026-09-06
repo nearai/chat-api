@@ -137,6 +137,18 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Connecting to database...");
     let db = database::Database::from_config(&config.database).await?;
 
+    if config.database_encryption.key.is_empty() {
+        anyhow::bail!("DB_ENCRYPTION_KEY or DB_ENCRYPTION_KEY_FILE is required");
+    }
+    let key = database::field_encryption::parse_key(&config.database_encryption.key)?;
+    database::field_encryption::validate_key_id(&config.database_encryption.key_id)?;
+    db.pool()
+        .set_field_encryption(services::db_pool::FieldEncryptionConfig {
+            key,
+            key_id: config.database_encryption.key_id.clone(),
+            write_enabled: config.database_encryption.write_enabled,
+        });
+
     tracing::info!("Running migrations...");
     db.run_migrations().await?;
 
@@ -428,6 +440,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app_state = AppState {
+        db_pool: db.pool().clone(),
         oauth_service,
         email_auth_service,
         email_auth_trusted_proxy_count: config.email_auth.trusted_proxy_count,
@@ -470,6 +483,8 @@ async fn main() -> anyhow::Result<()> {
         bi_metrics_service,
         account_deletion_task_publisher,
     };
+
+    api::database_encryption::recover_jobs(app_state.clone()).await;
 
     // Create router with CORS support
     let app = create_router_with_cors(app_state, config.cors.clone())

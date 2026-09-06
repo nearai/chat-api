@@ -17,6 +17,14 @@ use deadpool_postgres::Pool;
 #[derive(Clone)]
 pub struct DbPool {
     inner: std::sync::Arc<std::sync::RwLock<Option<Pool>>>,
+    field_encryption: std::sync::Arc<std::sync::RwLock<Option<FieldEncryptionConfig>>>,
+}
+
+#[derive(Clone)]
+pub struct FieldEncryptionConfig {
+    pub key: [u8; 32],
+    pub key_id: String,
+    pub write_enabled: bool,
 }
 
 impl DbPool {
@@ -24,6 +32,7 @@ impl DbPool {
     pub fn new(pool: Pool) -> Self {
         Self {
             inner: std::sync::Arc::new(std::sync::RwLock::new(Some(pool))),
+            field_encryption: Default::default(),
         }
     }
 
@@ -32,6 +41,7 @@ impl DbPool {
     pub fn uninitialized() -> Self {
         Self {
             inner: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            field_encryption: Default::default(),
         }
     }
 
@@ -59,6 +69,20 @@ impl DbPool {
     /// Status of the currently installed pool, or `None` before initialization.
     pub fn status(&self) -> Option<deadpool_postgres::Status> {
         self.current().map(|pool| pool.status())
+    }
+
+    pub fn set_field_encryption(&self, config: FieldEncryptionConfig) {
+        *self
+            .field_encryption
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(config);
+    }
+
+    pub fn field_encryption(&self) -> Option<FieldEncryptionConfig> {
+        self.field_encryption
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 

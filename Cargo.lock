@@ -516,6 +516,7 @@ dependencies = [
  "chrono",
  "config",
  "database",
+ "deadpool-postgres",
  "dotenvy",
  "dstack-sdk",
  "flate2",
@@ -1950,11 +1951,14 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "config",
  "deadpool",
  "deadpool-postgres",
  "hex",
+ "hkdf",
+ "hmac 0.12.1",
  "native-tls",
  "postgres-native-tls",
  "postgres-types",
@@ -2841,6 +2845,15 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac 0.12.1",
 ]
 
 [[package]]
