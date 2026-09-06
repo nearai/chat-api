@@ -70,7 +70,11 @@ impl PostgresFileRepository {
 #[async_trait]
 impl FileRepository for PostgresFileRepository {
     async fn upsert_file(&self, file: &FileData, user_id: UserId) -> Result<(), FileError> {
-        tracing::debug!("Repository: Upserting file for user_id={}", user_id);
+        tracing::debug!(
+            "Repository: Upserting file - file_id={}, user_id={}",
+            file.id,
+            user_id
+        );
 
         let mut client = self
             .pool
@@ -131,13 +135,21 @@ impl FileRepository for PostgresFileRepository {
             .await
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
-        tracing::debug!("Repository: File upserted for user_id={}", user_id);
+        tracing::debug!(
+            "Repository: File upserted - file_id={}, user_id={}",
+            file.id,
+            user_id
+        );
 
         Ok(())
     }
 
     async fn get_file(&self, file_id: &str, user_id: UserId) -> Result<FileData, FileError> {
-        tracing::debug!("Repository: Getting file for user_id={}", user_id);
+        tracing::debug!(
+            "Repository: Getting file - file_id={}, user_id={}",
+            file_id,
+            user_id
+        );
 
         let client = self
             .pool
