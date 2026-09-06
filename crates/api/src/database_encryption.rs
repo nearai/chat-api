@@ -603,7 +603,6 @@ const CLASSIFIED_TABLES: &[&str] = &[
 
 #[derive(Default)]
 struct Inventory {
-    encryption_required: Vec<Value>,
     legacy_confidential: Vec<Value>,
     unclassified: Vec<Value>,
 }
@@ -669,7 +668,6 @@ async fn inventory(state: &AppState) -> anyhow::Result<Inventory> {
         ));
         let entry = json!({"table":table,"column":column,"data_type":data_type,"classification":kind,"reason":reason});
         match kind {
-            "encryption_required" => inventory.encryption_required.push(entry),
             "legacy_confidential" => inventory.legacy_confidential.push(entry),
             "unclassified" => inventory.unclassified.push(entry),
             _ => {}
@@ -851,7 +849,7 @@ pub async fn scan(
         "complete": counts.iter().all(|c| c.complete),
     });
     Ok(Json(
-        json!({"run_id":Uuid::new_v4(),"status":"completed","fields":counts,"totals":totals,"approved_plaintext":if req.include_approved_plaintext { json!(APPROVED.iter().chain(REVIEWED_PLAINTEXT_FIELDS.iter()).map(|(table,column,_)| { let (_,reason)=classification(table,column,"text").expect("registered field"); json!({"table":table,"column":column,"classification":"approved_plaintext","reason":reason}) }).collect::<Vec<_>>()) } else { json!([]) },"encryption_required":inventory.encryption_required,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified}),
+        json!({"run_id":Uuid::new_v4(),"status":"completed","fields":counts,"totals":totals,"approved_plaintext":if req.include_approved_plaintext { json!(APPROVED.iter().chain(REVIEWED_PLAINTEXT_FIELDS.iter()).map(|(table,column,_)| { let (_,reason)=classification(table,column,"text").expect("registered field"); json!({"table":table,"column":column,"classification":"approved_plaintext","reason":reason}) }).collect::<Vec<_>>()) } else { json!([]) },"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified}),
     ))
 }
 
@@ -888,6 +886,9 @@ pub async fn create_job(
         .ok_or_else(|| bad("database encryption is not configured"))?;
     if !(1..=1000).contains(&req.batch_size) || req.max_rows.is_some_and(|value| value <= 0) {
         return Err(bad("invalid batch_size or max_rows"));
+    }
+    if matches!(req.mode, Mode::Verify) && req.max_rows.is_some() {
+        return Err(bad("verify jobs cannot set max_rows"));
     }
     if !matches!(req.mode, Mode::Verify)
         && req.scope.tables.is_empty()
@@ -928,9 +929,7 @@ pub async fn create_job(
         };
         if let Err(_error) = run_job(&state, id).await {
             tracing::error!(job_id=%id,error_class="database_encryption_job_failed","Database encryption job failed");
-            if let Ok(client) = state.db_pool.get().await {
-                let _=client.execute("UPDATE database_encryption_jobs SET status='failed',last_error_class='batch_failed',last_error_message='batch_failed',completed_at=NOW() WHERE id=$1",&[&id]).await;
-            }
+            let _ = mark_job_failed(&state, id, "batch_failed", "batch_failed").await;
         }
     });
     Ok((
@@ -1073,10 +1072,9 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
     let pass = mode != "verify"
         || plaintext == 0
             && invalid == 0
-            && inventory.encryption_required.is_empty()
             && inventory.unclassified.is_empty()
             && inventory.legacy_confidential.is_empty();
-    client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"encryption_required":inventory.encryption_required,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
+    client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
     Ok(())
 }
 
@@ -1092,16 +1090,31 @@ fn write_gate_blocks(mode: &str, write_enabled: bool) -> bool {
 }
 
 async fn fail_write_disabled_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
+    mark_job_failed(
+        state,
+        id,
+        "write_disabled",
+        "DB_ENCRYPTION_WRITE_ENABLED is disabled",
+    )
+    .await
+}
+
+async fn mark_job_failed(
+    state: &AppState,
+    id: Uuid,
+    error_class: &str,
+    error_message: &str,
+) -> anyhow::Result<()> {
     let client = state.db_pool.get().await?;
     client
         .execute(
             "UPDATE database_encryption_jobs
              SET status='failed',
-                 last_error_class='write_disabled',
-                 last_error_message='DB_ENCRYPTION_WRITE_ENABLED is disabled',
+                 last_error_class=$2,
+                 last_error_message=$3,
                  completed_at=NOW()
              WHERE id=$1 AND status IN ('queued','running')",
-            &[&id],
+            &[&id, &error_class, &error_message],
         )
         .await?;
     Ok(())
@@ -1134,7 +1147,10 @@ pub async fn recover_jobs(state: AppState) {
             let Ok(_permit) = worker().acquire().await else {
                 return;
             };
-            let _ = run_job(&worker_state, id).await;
+            if let Err(_error) = run_job(&worker_state, id).await {
+                tracing::error!(job_id=%id,error_class="database_encryption_recovered_job_failed","Recovered database encryption job failed");
+                let _ = mark_job_failed(&worker_state, id, "batch_failed", "batch_failed").await;
+            }
         });
     }
 }

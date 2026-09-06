@@ -54,3 +54,31 @@ pub async fn run(pool: &DbPool) -> Result<()> {
     info!("All migrations completed successfully");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    const V39: &str = include_str!("sql/V39__conversation_file_database_encryption.sql");
+
+    #[test]
+    fn v39_preserves_legacy_conflict_arbiters_for_rolling_deployments() {
+        for name in [
+            "conversation_share_groups_owner_user_id_name_key",
+            "conversation_share_group_memb_group_id_member_type_member_v_key",
+            "idx_conversation_shares_direct_unique",
+            "idx_conversation_shares_org_unique",
+        ] {
+            assert!(!V39.contains(&format!("DROP INDEX IF EXISTS {name}")));
+            assert!(!V39.contains(&format!("DROP CONSTRAINT IF EXISTS {name}")));
+        }
+    }
+
+    #[test]
+    fn v39_keeps_job_history_without_blocking_account_deletion() {
+        assert!(V39.contains("admin_actor UUID REFERENCES users(id) ON DELETE SET NULL"));
+    }
+
+    #[test]
+    fn v39_forbids_bounded_verification_jobs() {
+        assert!(V39.contains("CHECK (mode <> 'verify' OR max_rows IS NULL)"));
+    }
+}

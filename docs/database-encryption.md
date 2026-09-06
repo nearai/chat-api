@@ -34,6 +34,11 @@ cursors after restart and can be cancelled at a transaction boundary.
    Do not move the database or backups outside the CVM boundary unless `pass` is
    true and plaintext/invalid-envelope counts are zero.
 
+V39 deliberately retains the legacy share and group uniqueness/index arbiters
+for rolling-deployment compatibility. Remove them only in a separately reviewed
+cleanup migration after all old replicas have drained and the backfill and
+verification jobs have completed.
+
 Suggested execute request:
 
 ```json
@@ -70,27 +75,33 @@ boundary or be destroyed under the backup-retention policy.
 - `conversation_shares.recipient_value`
 - `conversation_shares.org_email_pattern`
 - `user_activity_log.metadata`
+- `oauth_tokens.access_token`
+- `oauth_tokens.refresh_token`
+- `agent_instances.auth_session_token`
+- `agent_instances.instance_url`
+- `agent_instances.dashboard_url`
 
 File content is not stored in this database; verify object-storage encryption
 separately. Legacy `conversations.title` and the dropped `response_authors` table
 must be confirmed absent in every deployed database and backup.
 
-## Whole-database classification
+## Whole-database policy classification
 
 The inventory enumerates every column in every application base table, across
-all PostgreSQL data types. Implemented encrypted fields and approved operational
-columns are registered individually. Account/profile, OAuth/session, billing,
-AML, passkey, agent, configuration, deletion, and broader usage tables are
-reported field-by-field as `encryption_required`; they are never silently
-treated as approved plaintext. New tables outside these policies and new
-columns in the individually classified encryption tables are `unclassified` and
-fail verification. A deployed legacy `conversations.title` column or
+all PostgreSQL data types. Fields selected for encryption and fields explicitly
+approved for plaintext storage outside the TEE are registered individually.
+Account/profile, OAuth/session, billing, AML, passkey, agent, configuration,
+deletion, and broader usage fields not listed above were reviewed and approved
+as plaintext by policy. New tables outside these policies and new columns in
+the individually classified encryption tables are `unclassified` and fail
+verification. A deployed legacy `conversations.title` column or
 `response_authors` table is reported as `legacy_confidential` and also fails
 verification.
 
-`encryption_required` fields fail the whole-database release gate until their
-repository-aware designs for lookup tokens, uniqueness, foreign keys,
-retention, and credential lifecycle are implemented and verified.
+`pass=true` confirms compliance with this reviewed policy; it does not mean
+that every database value is encrypted. Verification requires a complete scan
+and fails for plaintext or invalid envelopes in registered encrypted fields,
+unclassified columns, or legacy confidential conversation data.
 
 ## Approved operational plaintext
 

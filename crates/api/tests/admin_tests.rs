@@ -33,7 +33,7 @@ async fn database_encryption_scan_and_write_gate_are_admin_only_and_safe() {
     assert_eq!(body["status"], "completed");
     assert_eq!(body["unclassified"], json!([]), "{body}");
     assert_eq!(body["legacy_confidential"], json!([]), "{body}");
-    assert_eq!(body["encryption_required"], json!([]), "{body}");
+    assert!(body.get("encryption_required").is_none(), "{body}");
     assert!(body["approved_plaintext"]
         .as_array()
         .is_some_and(|fields| fields.iter().any(|field| field["table"] == "users"
@@ -42,6 +42,19 @@ async fn database_encryption_scan_and_write_gate_are_admin_only_and_safe() {
     assert!(body["fields"]
         .as_array()
         .is_some_and(|fields| fields.iter().all(|field| field.get("sample").is_none())));
+
+    let bounded_verify = server
+        .post("/v1/admin/database-encryption/jobs")
+        .add_header(http::HeaderName::from_static("authorization"), auth.clone())
+        .json(
+            &json!({"mode":"verify","scope":{},"batch_size":10,"max_rows":1,"actions":["verify"]}),
+        )
+        .await;
+    assert_eq!(bounded_verify.status_code(), 400);
+    assert_eq!(
+        bounded_verify.json::<serde_json::Value>()["error"]["message"],
+        "verify jobs cannot set max_rows"
+    );
 
     let execute = server
         .post("/v1/admin/database-encryption/jobs")
