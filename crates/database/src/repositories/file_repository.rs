@@ -29,7 +29,18 @@ impl PostgresFileRepository {
         }
     }
 
-    fn decode_filename(&self, id: Uuid, value: String) -> Result<String, FileError> {
+    fn decode_filename(&self, id: Option<Uuid>, value: String) -> Result<String, FileError> {
+        let Some(id) = id else {
+            return if serde_json::from_str::<serde_json::Value>(&value)
+                .is_ok_and(|value| crate::field_encryption::is_envelope(&value))
+            {
+                Err(FileError::DatabaseError(
+                    "encrypted filename is missing its encryption context".into(),
+                ))
+            } else {
+                Ok(value)
+            };
+        };
         match self.pool.field_encryption() {
             Some(config) => crate::field_encryption::decrypt_if_encrypted(
                 &config.key,
@@ -61,25 +72,40 @@ impl FileRepository for PostgresFileRepository {
     async fn upsert_file(&self, file: &FileData, user_id: UserId) -> Result<(), FileError> {
         tracing::debug!("Repository: Upserting file for user_id={}", user_id);
 
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
-        let encryption_id = client
-            .query_opt("SELECT encryption_id FROM files WHERE id=$1", &[&file.id])
+        let transaction = client
+            .transaction()
+            .await
+            .map_err(|e| FileError::DatabaseError(e.to_string()))?;
+        transaction
+            .query_one(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                &[&format!("file:{}", file.id)],
+            )
+            .await
+            .map_err(|e| FileError::DatabaseError(e.to_string()))?;
+        let encryption_id = transaction
+            .query_opt(
+                "SELECT encryption_id FROM files WHERE id=$1 FOR UPDATE",
+                &[&file.id],
+            )
             .await
             .map_err(|e| FileError::DatabaseError(e.to_string()))?
-            .map(|row| row.get(0))
+            .and_then(|row| row.get::<_, Option<Uuid>>(0))
             .unwrap_or_else(Uuid::new_v4);
         let filename = self.encode_filename(encryption_id, &file.filename)?;
-        client
+        transaction
             .execute(
                 "INSERT INTO files (id, encryption_id, user_id, bytes, file_created_at, file_expires_at, filename, purpose)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  ON CONFLICT (id) 
                  DO UPDATE SET 
+                     encryption_id = COALESCE(files.encryption_id, EXCLUDED.encryption_id),
                      user_id = EXCLUDED.user_id,
                      bytes = EXCLUDED.bytes,
                      file_created_at = EXCLUDED.file_created_at,
@@ -98,6 +124,10 @@ impl FileRepository for PostgresFileRepository {
                     &file.purpose,
                 ],
             )
+            .await
+            .map_err(|e| FileError::DatabaseError(e.to_string()))?;
+        transaction
+            .commit()
             .await
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 

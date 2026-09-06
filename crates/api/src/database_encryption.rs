@@ -74,14 +74,6 @@ const FIELDS: &[Field] = &[
         )),
     },
     Field {
-        table: "conversation_shares",
-        column: "org_email_pattern",
-        id_column: "id",
-        kind: Kind::Text,
-        reason: "Organization sharing domain",
-        token: Some(("org_domain_search_token", "conversation_shares.org_domain")),
-    },
-    Field {
         table: "user_activity_log",
         column: "metadata",
         id_column: "id",
@@ -304,8 +296,8 @@ const APPROVED: &[(&str, &str, &str)] = &[
     ),
     (
         "conversation_shares",
-        "org_domain_search_token",
-        "Non-reversible keyed lookup token",
+        "org_email_pattern",
+        "Approved sharing policy pattern; plaintext preserves SQL wildcard semantics",
     ),
     ("user_activity_log", "id", "Internal event UUID"),
     ("user_activity_log", "user_id", "Required relationship key"),
@@ -807,17 +799,18 @@ async fn counts(
             };
             match serde_json::from_str::<Value>(&raw) {
                 Ok(value) if database::field_encryption::is_envelope(&value) => {
-                    let id: Uuid = row.get(0);
-                    if database::field_encryption::decrypt(
-                        &config.key,
-                        &config.key_id,
-                        field.table,
-                        field.column,
-                        id,
-                        &raw,
-                    )
-                    .is_ok()
-                        && (field.token.is_none() || row.get::<_, Option<Vec<u8>>>(2).is_some())
+                    let id: Option<Uuid> = row.get(0);
+                    if id.is_some_and(|id| {
+                        database::field_encryption::decrypt(
+                            &config.key,
+                            &config.key_id,
+                            field.table,
+                            field.column,
+                            id,
+                            &raw,
+                        )
+                        .is_ok()
+                    }) && (field.token.is_none() || row.get::<_, Option<Vec<u8>>>(2).is_some())
                     {
                         count.encrypted += 1
                     } else {
@@ -982,6 +975,27 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
         tx.query_one("SELECT pg_advisory_xact_lock($1)", &[&WORKER_LOCK])
             .await?;
         if tx.query_one("SELECT cancel_requested_at IS NOT NULL FROM database_encryption_jobs WHERE id=$1 FOR UPDATE",&[&id]).await?.get::<_,bool>(0) { tx.execute("UPDATE database_encryption_jobs SET status='cancelled',completed_at=NOW() WHERE id=$1",&[&id]).await?; tx.commit().await?; return Ok(()); }
+        if mode == "execute" && field.table == "files" && field.id_column == "encryption_id" {
+            let assigned = tx
+                .execute(
+                    "WITH candidates AS (
+                         SELECT ctid FROM files
+                         WHERE encryption_id IS NULL
+                         LIMIT $1
+                         FOR UPDATE SKIP LOCKED
+                     )
+                     UPDATE files target
+                     SET encryption_id=uuid_generate_v4()
+                     FROM candidates
+                     WHERE target.ctid=candidates.ctid",
+                    &[&cap],
+                )
+                .await?;
+            if assigned > 0 {
+                tx.commit().await?;
+                continue;
+            }
+        }
         let token = field
             .token
             .map(|(column, _)| column)
@@ -1022,14 +1036,7 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
                 _ if mode == "execute" => {
                     ids.push(row_id);
                     if let Some((_, domain)) = field.token {
-                        let normalized = if field.column == "org_email_pattern" {
-                            raw.trim()
-                                .trim_start_matches('%')
-                                .trim_start_matches('@')
-                                .to_lowercase()
-                        } else {
-                            raw.trim().to_lowercase()
-                        };
+                        let normalized = raw.trim().to_lowercase();
                         tokens.push(database::field_encryption::search_token(
                             &config.key,
                             domain,
@@ -1069,12 +1076,23 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
     } else {
         Inventory::default()
     };
+    let mut missing_encryption_contexts = 0i64;
+    for field in &fields {
+        let query = format!(
+            "SELECT count(*) FROM {table} WHERE {column} IS NOT NULL AND {id} IS NULL",
+            table = field.table,
+            column = field.column,
+            id = field.id_column,
+        );
+        missing_encryption_contexts += client.query_one(&query, &[]).await?.get::<_, i64>(0);
+    }
     let pass = mode != "verify"
         || plaintext == 0
             && invalid == 0
+            && missing_encryption_contexts == 0
             && inventory.unclassified.is_empty()
             && inventory.legacy_confidential.is_empty();
-    client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
+    client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"missing_encryption_contexts":missing_encryption_contexts,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
     Ok(())
 }
 
@@ -1235,7 +1253,6 @@ mod tests {
             ("conversation_share_groups", "name"),
             ("conversation_share_group_members", "member_value"),
             ("conversation_shares", "recipient_value"),
-            ("conversation_shares", "org_email_pattern"),
             ("user_activity_log", "metadata"),
             ("oauth_tokens", "access_token"),
             ("oauth_tokens", "refresh_token"),
@@ -1303,6 +1320,17 @@ mod tests {
                 .iter()
                 .any(|field| field.table == table && field.column == column));
         }
+    }
+
+    #[test]
+    fn wildcard_organization_patterns_remain_approved_plaintext() {
+        let (kind, reason) = classification("conversation_shares", "org_email_pattern", "text")
+            .expect("organization pattern is classified");
+        assert_eq!(kind, "approved_plaintext");
+        assert!(reason.contains("wildcard"));
+        assert!(!FIELDS.iter().any(|field| {
+            field.table == "conversation_shares" && field.column == "org_email_pattern"
+        }));
     }
 
     #[test]

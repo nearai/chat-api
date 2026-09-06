@@ -73,7 +73,6 @@ boundary or be destroyed under the backup-retention policy.
 - `conversation_share_groups.name`
 - `conversation_share_group_members.member_value`
 - `conversation_shares.recipient_value`
-- `conversation_shares.org_email_pattern`
 - `user_activity_log.metadata`
 - `oauth_tokens.access_token`
 - `oauth_tokens.refresh_token`
@@ -84,6 +83,13 @@ boundary or be destroyed under the backup-retention policy.
 File content is not stored in this database; verify object-storage encryption
 separately. Legacy `conversations.title` and the dropped `response_authors` table
 must be confirmed absent in every deployed database and backup.
+
+Organization email patterns remain approved plaintext because the API supports
+arbitrary SQL wildcard patterns and deterministic equality tokens cannot
+preserve those matching semantics. File encryption IDs are added without a
+table-rewriting default; execute jobs assign missing IDs in bounded batches, and
+verification fails while any filename lacks its encryption context. A later
+cleanup migration may validate `NOT NULL` and uniqueness after backfill.
 
 ## Whole-database policy classification
 

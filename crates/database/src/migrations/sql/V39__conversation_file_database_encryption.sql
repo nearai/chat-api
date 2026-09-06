@@ -28,9 +28,9 @@ CREATE UNIQUE INDEX idx_database_encryption_jobs_active_scope
 -- Provider file IDs remain the protocol-facing primary key during Stage I.
 -- A stable internal UUID is used as authenticated encryption context.
 ALTER TABLE files
-    ADD COLUMN encryption_id UUID NOT NULL DEFAULT uuid_generate_v4(),
+    ADD COLUMN encryption_id UUID,
     ALTER COLUMN filename TYPE TEXT;
-CREATE UNIQUE INDEX idx_files_encryption_id ON files(encryption_id);
+ALTER TABLE files ALTER COLUMN encryption_id SET DEFAULT uuid_generate_v4();
 
 -- Randomized ciphertext cannot satisfy equality/uniqueness lookups. Store
 -- domain-separated HMAC-SHA256 tokens alongside encrypted display values.
@@ -53,15 +53,9 @@ CREATE INDEX idx_share_group_members_lookup_token
 ALTER TABLE conversation_shares
     ALTER COLUMN recipient_value TYPE TEXT,
     ALTER COLUMN org_email_pattern TYPE TEXT,
-    ADD COLUMN recipient_value_search_token BYTEA,
-    ADD COLUMN org_domain_search_token BYTEA;
+    ADD COLUMN recipient_value_search_token BYTEA;
 CREATE INDEX idx_conversation_shares_recipient_token
     ON conversation_shares(recipient_type, recipient_value_search_token);
-CREATE INDEX idx_conversation_shares_org_domain_token
-    ON conversation_shares(org_domain_search_token);
 CREATE UNIQUE INDEX idx_conversation_shares_direct_token_unique
     ON conversation_shares(conversation_id, recipient_type, recipient_value_search_token)
     WHERE share_type = 'direct' AND recipient_value_search_token IS NOT NULL;
-CREATE UNIQUE INDEX idx_conversation_shares_org_token_unique
-    ON conversation_shares(conversation_id, org_domain_search_token)
-    WHERE share_type = 'organization' AND org_domain_search_token IS NOT NULL;

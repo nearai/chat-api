@@ -581,9 +581,10 @@ async fn update_conversation(
     request: Request,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "update_conversation called for user_id={}, session_id={}",
+        "update_conversation called for user_id={}, session_id={}, conversation_id={}",
         user.user_id,
-        user.session_id
+        user.session_id,
+        conversation_id
     );
 
     // Validate user has access to the conversation

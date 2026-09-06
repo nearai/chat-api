@@ -81,4 +81,20 @@ mod tests {
     fn v39_forbids_bounded_verification_jobs() {
         assert!(V39.contains("CHECK (mode <> 'verify' OR max_rows IS NULL)"));
     }
+
+    #[test]
+    fn v39_does_not_rewrite_files_to_add_encryption_context() {
+        assert!(V39.contains("ADD COLUMN encryption_id UUID,"));
+        assert!(V39.contains(
+            "ALTER TABLE files ALTER COLUMN encryption_id SET DEFAULT uuid_generate_v4()"
+        ));
+        assert!(!V39.contains("encryption_id UUID NOT NULL DEFAULT"));
+        assert!(!V39.contains("CREATE UNIQUE INDEX idx_files_encryption_id"));
+    }
+
+    #[test]
+    fn v39_keeps_organization_patterns_in_plaintext() {
+        assert!(!V39.contains("org_domain_search_token"));
+        assert!(V39.contains("ALTER COLUMN org_email_pattern TYPE TEXT"));
+    }
 }
