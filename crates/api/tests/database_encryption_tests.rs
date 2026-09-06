@@ -164,7 +164,7 @@ async fn encrypted_share_upsert_migrates_legacy_row_and_downgrades_permission() 
 }
 
 #[tokio::test]
-async fn encrypted_group_names_preserve_case_sensitive_uniqueness() {
+async fn encrypted_group_names_preserve_raw_uniqueness() {
     let (_server, db) = create_test_server_and_db(TestServerConfig::default()).await;
     let config = db.pool().field_encryption().expect("test key configured");
     db.pool()
@@ -191,8 +191,12 @@ async fn encrypted_group_names_preserve_case_sensitive_uniqueness() {
         .create_group(UserId(user_id), "team", &[])
         .await
         .unwrap();
+    repository
+        .create_group(UserId(user_id), "Team ", &[])
+        .await
+        .unwrap();
     assert_eq!(
         repository.list_groups(UserId(user_id)).await.unwrap().len(),
-        2
+        3
     );
 }

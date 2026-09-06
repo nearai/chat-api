@@ -61,7 +61,7 @@ impl PostgresConversationShareRepository {
 
     fn token(&self, domain: &str, value: &str) -> Result<Option<Vec<u8>>, ConversationError> {
         let normalized = if domain == "conversation_share_groups.name" {
-            value.trim().to_string()
+            value.to_string()
         } else {
             value.trim().to_lowercase()
         };
@@ -349,7 +349,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
 
         let group_id = Uuid::new_v4();
         let name_token = self.token("conversation_share_groups.name", name)?;
-        let lock_key = format!("share-group:{}:{}", owner_user_id.0, name.trim());
+        let lock_key = format!("share-group:{}:{}", owner_user_id.0, name);
         transaction
             .query_one(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",

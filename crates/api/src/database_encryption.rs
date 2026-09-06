@@ -760,7 +760,7 @@ fn selected(scope: &Scope) -> Result<Vec<&'static Field>, (StatusCode, Json<Valu
 
 fn normalized_token_value(domain: &str, value: &str) -> String {
     if domain == "conversation_share_groups.name" {
-        value.trim().to_string()
+        value.to_string()
     } else {
         value.trim().to_lowercase()
     }
@@ -1459,5 +1459,13 @@ mod tests {
             Some(&token)
         ));
         assert!(!search_token_matches(&key, field, "user@example.com", None));
+    }
+
+    #[test]
+    fn group_name_tokens_preserve_case_and_whitespace() {
+        let domain = "conversation_share_groups.name";
+        assert_eq!(normalized_token_value(domain, "Team"), "Team");
+        assert_eq!(normalized_token_value(domain, "team"), "team");
+        assert_eq!(normalized_token_value(domain, "Team "), "Team ");
     }
 }
