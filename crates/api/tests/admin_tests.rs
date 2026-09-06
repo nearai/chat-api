@@ -104,6 +104,7 @@ async fn database_encryption_job_backfills_and_verifies_without_values_in_progre
     }
     let completed = completed.expect("job completed");
     assert_eq!(completed["status"], "completed", "{completed}");
+    assert_eq!(completed["progress"]["encrypted"], 1, "{completed}");
     assert!(!completed.to_string().contains("backfill-secret.txt"));
     let client = db.pool().get().await.unwrap();
     let stored: String = client
