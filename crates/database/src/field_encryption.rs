@@ -4,6 +4,7 @@ use aes_gcm::{
 };
 use anyhow::{anyhow, ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
@@ -11,6 +12,16 @@ use uuid::Uuid;
 
 pub const MARKER: &str = "__near_db_encrypted";
 pub const DEFAULT_KEY_ID: &str = "db-v1";
+const AEAD_KEY_INFO: &[u8] = b"near-chat-db-aead-v1";
+const SEARCH_KEY_INFO: &[u8] = b"near-chat-db-search-v1";
+
+fn derive_key(master_key: &[u8; 32], info: &[u8]) -> Result<[u8; 32]> {
+    let mut key = [0u8; 32];
+    Hkdf::<Sha256>::new(None, master_key)
+        .expand(info, &mut key)
+        .map_err(|_| anyhow!("database encryption key derivation failed"))?;
+    Ok(key)
+}
 
 pub fn parse_key(hex_key: &str) -> Result<[u8; 32]> {
     let bytes = hex::decode(hex_key).context("database encryption key must be hex encoded")?;
@@ -53,7 +64,8 @@ pub fn encrypt(
     let mut nonce = [0; 12];
     OsRng.fill_bytes(&mut nonce);
     let aad = format!("{table}:{column}:{row_id}");
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| anyhow!("invalid key"))?;
+    let aead_key = derive_key(key, AEAD_KEY_INFO)?;
+    let cipher = Aes256Gcm::new_from_slice(&aead_key).map_err(|_| anyhow!("invalid key"))?;
     let ciphertext = cipher
         .encrypt(
             &Nonce::from(nonce),
@@ -103,7 +115,8 @@ pub fn decrypt(
             .ok_or_else(|| anyhow!("missing ciphertext"))?,
     )?;
     let aad = format!("{table}:{column}:{row_id}");
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| anyhow!("invalid key"))?;
+    let aead_key = derive_key(key, AEAD_KEY_INFO)?;
+    let cipher = Aes256Gcm::new_from_slice(&aead_key).map_err(|_| anyhow!("invalid key"))?;
     let plaintext = cipher
         .decrypt(
             &Nonce::from(nonce),
@@ -133,7 +146,8 @@ pub fn decrypt_if_encrypted(
 }
 
 pub fn search_token(key: &[u8; 32], domain: &str, value: &str) -> Result<Vec<u8>> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
+    let search_key = derive_key(key, SEARCH_KEY_INFO)?;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&search_key)
         .map_err(|_| anyhow!("invalid search-token key"))?;
     mac.update(b"near-chat-db-search-v1\0");
     mac.update(domain.as_bytes());
@@ -200,6 +214,15 @@ mod tests {
         assert_ne!(
             a,
             search_token(&key, "files.provider_id", "file-2").unwrap()
+        );
+    }
+
+    #[test]
+    fn encryption_and_search_use_distinct_subkeys() {
+        let key = test_key();
+        assert_ne!(
+            derive_key(&key, AEAD_KEY_INFO).unwrap(),
+            derive_key(&key, SEARCH_KEY_INFO).unwrap()
         );
     }
 }
