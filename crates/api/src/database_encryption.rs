@@ -720,6 +720,13 @@ fn internal(_: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
     )
 }
 
+fn conflict(message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({"error":{"code":"conflict","message":message.into()}})),
+    )
+}
+
 fn selected(scope: &Scope) -> Result<Vec<&'static Field>, (StatusCode, Json<Value>)> {
     if scope
         .tables
@@ -913,6 +920,29 @@ pub async fn create_job(
     let scope_value = serde_json::to_value(&req.scope).map_err(internal)?;
     let actions_value = json!(req.actions);
     let client = state.db_pool.get().await.map_err(internal)?;
+    if mode == "execute" {
+        let collisions: bool = client
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM conversation_share_group_members
+                    WHERE member_value_search_token IS NULL
+                    GROUP BY group_id,member_type,LOWER(BTRIM(member_value)) HAVING count(*) > 1
+                    UNION ALL
+                    SELECT 1 FROM conversation_shares
+                    WHERE share_type='direct' AND recipient_value_search_token IS NULL
+                    GROUP BY conversation_id,recipient_type,LOWER(BTRIM(recipient_value)) HAVING count(*) > 1
+                )",
+                &[],
+            )
+            .await
+            .map_err(internal)?
+            .get(0);
+        if collisions {
+            return Err(conflict(
+                "normalized share recipient collisions must be remediated before execute",
+            ));
+        }
+    }
     client.execute("INSERT INTO database_encryption_jobs(id,mode,status,scope,actions,batch_size,max_rows,admin_actor) VALUES($1,$2,'queued',$3,$4,$5,$6,$7)", &[&id,&mode,&scope_value,&actions_value,&req.batch_size,&req.max_rows,&admin.user_id.0]).await.map_err(internal)?;
     drop(client);
     tokio::spawn(async move {
@@ -1030,7 +1060,11 @@ async fn run_locked_job(
                 _ if mode == "execute" => {
                     ids.push(row_id);
                     if let Some((_, domain)) = field.token {
-                        let normalized = raw.trim().to_lowercase();
+                        let normalized = if domain == "conversation_share_groups.name" {
+                            raw.trim().to_string()
+                        } else {
+                            raw.trim().to_lowercase()
+                        };
                         tokens.push(database::field_encryption::search_token(
                             &config.key,
                             domain,
