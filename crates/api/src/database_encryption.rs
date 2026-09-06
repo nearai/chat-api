@@ -758,6 +758,34 @@ fn selected(scope: &Scope) -> Result<Vec<&'static Field>, (StatusCode, Json<Valu
     }
 }
 
+fn normalized_token_value(domain: &str, value: &str) -> String {
+    if domain == "conversation_share_groups.name" {
+        value.trim().to_string()
+    } else {
+        value.trim().to_lowercase()
+    }
+}
+
+fn search_token_matches(
+    key: &[u8; 32],
+    field: &Field,
+    plaintext: &str,
+    stored: Option<&[u8]>,
+) -> bool {
+    let Some((_, domain)) = field.token else {
+        return true;
+    };
+    let Some(stored) = stored else {
+        return false;
+    };
+    database::field_encryption::search_token(
+        key,
+        domain,
+        &normalized_token_value(domain, plaintext),
+    )
+    .is_ok_and(|expected| expected == stored)
+}
+
 async fn counts(
     state: &AppState,
     fields: &[&Field],
@@ -806,6 +834,7 @@ async fn counts(
             match serde_json::from_str::<Value>(&raw) {
                 Ok(value) if database::field_encryption::is_envelope(&value) => {
                     let id: Option<Uuid> = row.get(0);
+                    let stored_token: Option<Vec<u8>> = row.get(2);
                     if id.is_some_and(|id| {
                         database::field_encryption::decrypt(
                             &config.key,
@@ -815,9 +844,15 @@ async fn counts(
                             id,
                             &raw,
                         )
-                        .is_ok()
-                    }) && (field.token.is_none() || row.get::<_, Option<Vec<u8>>>(2).is_some())
-                    {
+                        .is_ok_and(|plaintext| {
+                            search_token_matches(
+                                &config.key,
+                                field,
+                                &plaintext,
+                                stored_token.as_deref(),
+                            )
+                        })
+                    }) {
                         count.encrypted += 1
                     } else {
                         count.invalid_envelope += 1
@@ -1043,28 +1078,31 @@ async fn run_locked_job(
             let Some(raw) = raw else { continue };
             match serde_json::from_str::<Value>(&raw) {
                 Ok(value) if database::field_encryption::is_envelope(&value) => {
-                    if database::field_encryption::decrypt(
+                    let stored_token: Option<Vec<u8>> = row.get(2);
+                    let invalid_token_or_envelope = match database::field_encryption::decrypt(
                         &config.key,
                         &config.key_id,
                         field.table,
                         field.column,
                         row_id,
                         &raw,
-                    )
-                    .is_err()
-                        || (field.token.is_some() && row.get::<_, Option<Vec<u8>>>(2).is_none())
-                    {
+                    ) {
+                        Ok(plaintext) => !search_token_matches(
+                            &config.key,
+                            field,
+                            &plaintext,
+                            stored_token.as_deref(),
+                        ),
+                        Err(_) => true,
+                    };
+                    if invalid_token_or_envelope {
                         invalid += 1
                     }
                 }
                 _ if mode == "execute" => {
                     ids.push(row_id);
                     if let Some((_, domain)) = field.token {
-                        let normalized = if domain == "conversation_share_groups.name" {
-                            raw.trim().to_string()
-                        } else {
-                            raw.trim().to_lowercase()
-                        };
+                        let normalized = normalized_token_value(domain, &raw);
                         tokens.push(database::field_encryption::search_token(
                             &config.key,
                             domain,
@@ -1393,5 +1431,33 @@ mod tests {
         assert!(!write_gate_blocks("execute", true));
         assert!(!write_gate_blocks("dry_run", false));
         assert!(!write_gate_blocks("verify", false));
+    }
+
+    #[test]
+    fn search_token_validation_rejects_missing_stale_and_copied_tokens() {
+        let key = [7u8; 32];
+        let field = FIELDS
+            .iter()
+            .find(|field| field.table == "conversation_shares" && field.column == "recipient_value")
+            .unwrap();
+        let token = database::field_encryption::search_token(
+            &key,
+            "conversation_shares.recipient_value",
+            "user@example.com",
+        )
+        .unwrap();
+        assert!(search_token_matches(
+            &key,
+            field,
+            " User@Example.COM ",
+            Some(&token)
+        ));
+        assert!(!search_token_matches(
+            &key,
+            field,
+            "other@example.com",
+            Some(&token)
+        ));
+        assert!(!search_token_matches(&key, field, "user@example.com", None));
     }
 }
