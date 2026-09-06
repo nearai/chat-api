@@ -72,7 +72,7 @@ async fn database_encryption_job_backfills_and_verifies_without_values_in_progre
     })
     .await;
     let user_id = Uuid::new_v4();
-    let file_id = format!("file-backfill-{user_id}");
+    let file_id = format!("file-{user_id}");
     let client = db.pool().get().await.unwrap();
     client
         .execute(
