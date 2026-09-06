@@ -949,6 +949,10 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
     let mut client = state.db_pool.get().await?;
     let Some(job)=client.query_opt("UPDATE database_encryption_jobs SET status='running',started_at=COALESCE(started_at,NOW()) WHERE id=$1 AND status IN ('queued','running') RETURNING mode,scope,batch_size,max_rows,cursor,progress",&[&id]).await? else { return Ok(()) };
     let mode: String = job.get(0);
+    if write_gate_blocks(&mode, execute_writes_enabled(state)) {
+        fail_write_disabled_job(state, id).await?;
+        return Ok(());
+    }
     let scope: Scope = serde_json::from_value(job.get(1))?;
     let batch: i64 = job.get(2);
     let max: Option<i64> = job.get(3);
@@ -965,6 +969,10 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
     let mut plaintext = progress["plaintext"].as_i64().unwrap_or(0);
     let mut invalid = progress["invalid_envelopes"].as_i64().unwrap_or(0);
     while field_index < fields.len() && max.is_none_or(|limit| processed < limit) {
+        if write_gate_blocks(&mode, execute_writes_enabled(state)) {
+            fail_write_disabled_job(state, id).await?;
+            return Ok(());
+        }
         let field = fields[field_index];
         let cap = max
             .map(|limit| (limit - processed).min(batch))
@@ -1069,6 +1077,33 @@ async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
             && inventory.unclassified.is_empty()
             && inventory.legacy_confidential.is_empty();
     client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"encryption_required":inventory.encryption_required,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
+    Ok(())
+}
+
+fn execute_writes_enabled(state: &AppState) -> bool {
+    state
+        .db_pool
+        .field_encryption()
+        .is_some_and(|config| config.write_enabled)
+}
+
+fn write_gate_blocks(mode: &str, write_enabled: bool) -> bool {
+    mode == "execute" && !write_enabled
+}
+
+async fn fail_write_disabled_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
+    let client = state.db_pool.get().await?;
+    client
+        .execute(
+            "UPDATE database_encryption_jobs
+             SET status='failed',
+                 last_error_class='write_disabled',
+                 last_error_message='DB_ENCRYPTION_WRITE_ENABLED is disabled',
+                 completed_at=NOW()
+             WHERE id=$1 AND status IN ('queued','running')",
+            &[&id],
+        )
+        .await?;
     Ok(())
 }
 
@@ -1266,5 +1301,13 @@ mod tests {
             assert!(!reason.is_empty());
         }
         assert!(classification("new_unreviewed_table", "payload", "jsonb").is_none());
+    }
+
+    #[test]
+    fn disabled_write_gate_blocks_only_execute_batches() {
+        assert!(write_gate_blocks("execute", false));
+        assert!(!write_gate_blocks("execute", true));
+        assert!(!write_gate_blocks("dry_run", false));
+        assert!(!write_gate_blocks("verify", false));
     }
 }
