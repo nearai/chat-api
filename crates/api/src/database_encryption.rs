@@ -1101,7 +1101,7 @@ async fn run_locked_job(
         tx.commit().await?;
     }
     let inventory = if mode == "verify" {
-        inventory_with_client(&client).await?
+        inventory_with_client(client).await?
     } else {
         Inventory::default()
     };
