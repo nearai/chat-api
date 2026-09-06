@@ -30,22 +30,15 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
 
         let activity_type = request.activity_type.as_str();
         let auth_method = request.auth_method.map(|m| m.as_str().to_string());
-        let id = uuid::Uuid::new_v4();
         let metadata = request.metadata;
 
         client
             .execute(
                 r#"
-                INSERT INTO user_activity_log (id, user_id, activity_type, auth_method, metadata)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO user_activity_log (user_id, activity_type, auth_method, metadata)
+                VALUES ($1, $2, $3, $4)
                 "#,
-                &[
-                    &id,
-                    &request.user_id,
-                    &activity_type,
-                    &auth_method,
-                    &metadata,
-                ],
+                &[&request.user_id, &activity_type, &auth_method, &metadata],
             )
             .await?;
 
@@ -68,7 +61,6 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
 
         let client = self.pool.get().await?;
         let activity_type = request.activity_type.as_str();
-        let id = uuid::Uuid::new_v4();
         let metadata = request.metadata;
 
         // Use a single query to atomically:
@@ -92,8 +84,8 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                     SELECT (SELECT cnt FROM current_count) < $4 as allowed
                 ),
                 inserted AS (
-                    INSERT INTO user_activity_log (id, user_id, activity_type, metadata, created_at)
-                    SELECT $5, $1, $2, $6, NOW()
+                    INSERT INTO user_activity_log (user_id, activity_type, metadata, created_at)
+                    SELECT $1, $2, $5, NOW()
                     WHERE (SELECT allowed FROM can_insert) = true
                     RETURNING id
                 )
@@ -107,7 +99,6 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                     &activity_type,
                     &request.window_duration.num_seconds(),
                     &(request.limit as i64),
-                    &id,
                     &metadata,
                 ],
             )
