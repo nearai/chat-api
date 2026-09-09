@@ -3,8 +3,30 @@ use std::collections::HashMap;
 use std::fmt;
 use url::Url;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseConnectionMode {
+    #[default]
+    Patroni,
+    Direct,
+}
+
+impl std::str::FromStr for DatabaseConnectionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "patroni" => Ok(Self::Patroni),
+            "direct" => Ok(Self::Direct),
+            _ => Err("DATABASE_CONNECTION_MODE must be exactly 'patroni' or 'direct' (lowercase, no surrounding whitespace)".into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
+    #[serde(default)]
+    pub connection_mode: DatabaseConnectionMode,
     pub host: Option<String>,
     pub port: u16,
     pub database: String,
@@ -21,12 +43,51 @@ pub struct DatabaseConfig {
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
+        let connection_mode = std::env::var("DATABASE_CONNECTION_MODE")
+            .unwrap_or_else(|_| "patroni".into())
+            .parse::<DatabaseConnectionMode>()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let host = std::env::var("DATABASE_HOST").ok();
+        if connection_mode == DatabaseConnectionMode::Direct
+            && host.as_deref().is_none_or(|host| host.trim().is_empty())
+        {
+            panic!("DATABASE_HOST is required in direct mode");
+        }
+        let port = std::env::var("DATABASE_PORT")
+            .map(|value| {
+                value.parse().unwrap_or_else(|_| {
+                    if connection_mode == DatabaseConnectionMode::Direct {
+                        panic!("DATABASE_PORT must be a valid port number");
+                    }
+                    5432
+                })
+            })
+            .unwrap_or(5432);
+        let max_connections = std::env::var("DATABASE_MAX_CONNECTIONS")
+            .map(|value| {
+                value.parse().unwrap_or_else(|_| {
+                    if connection_mode == DatabaseConnectionMode::Direct {
+                        panic!("DATABASE_MAX_CONNECTIONS must be a valid number");
+                    }
+                    10
+                })
+            })
+            .unwrap_or(10);
+        let tls_enabled = std::env::var("DATABASE_TLS_ENABLED")
+            .map(|value| {
+                value.parse().unwrap_or_else(|_| {
+                    if connection_mode == DatabaseConnectionMode::Direct {
+                        panic!("DATABASE_TLS_ENABLED must be true or false");
+                    }
+                    false
+                })
+            })
+            .unwrap_or(false);
+
         Self {
-            host: std::env::var("DATABASE_HOST").ok(),
-            port: std::env::var("DATABASE_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(5432),
+            connection_mode,
+            host,
+            port,
             database: std::env::var("DATABASE_NAME").unwrap_or_else(|_| "chat_api".to_string()),
             username: std::env::var("DATABASE_USER").unwrap_or_else(|_| "postgres".to_string()),
             password: if let Ok(path) = std::env::var("DATABASE_PASSWORD_FILE") {
@@ -38,14 +99,8 @@ impl Default for DatabaseConfig {
             } else {
                 std::env::var("DATABASE_PASSWORD").unwrap_or_else(|_| "postgres".to_string())
             },
-            max_connections: std::env::var("DATABASE_MAX_CONNECTIONS")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(10),
-            tls_enabled: std::env::var("DATABASE_TLS_ENABLED")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(false),
+            max_connections,
+            tls_enabled,
             tls_ca_cert_path: std::env::var("DATABASE_TLS_CA_CERT_PATH").ok(),
             primary_app_id: std::env::var("DATABASE_PRIMARY_APP_ID").unwrap_or_default(),
             gateway_subdomain: std::env::var("GATEWAY_SUBDOMAIN").unwrap_or_default(),
@@ -967,6 +1022,77 @@ impl Default for DatabaseEncryptionConfig {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::ffi::OsString;
+
+    #[test]
+    fn database_connection_mode_requires_exact_values() {
+        for value in ["DIRECT", "direct ", " patroni", ""] {
+            let error = value.parse::<DatabaseConnectionMode>().unwrap_err();
+            assert!(error.contains("lowercase, no surrounding whitespace"));
+        }
+        assert_eq!(
+            "direct".parse::<DatabaseConnectionMode>().unwrap(),
+            DatabaseConnectionMode::Direct
+        );
+        assert_eq!(
+            "patroni".parse::<DatabaseConnectionMode>().unwrap(),
+            DatabaseConnectionMode::Patroni
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn database_connection_mode_environment() {
+        const KEYS: [&str; 5] = [
+            "DATABASE_CONNECTION_MODE",
+            "DATABASE_HOST",
+            "DATABASE_PORT",
+            "DATABASE_MAX_CONNECTIONS",
+            "DATABASE_TLS_ENABLED",
+        ];
+        struct Restore(Vec<(&'static str, Option<OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(
+            KEYS.iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect(),
+        );
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+
+        assert_eq!(
+            DatabaseConfig::default().connection_mode,
+            DatabaseConnectionMode::Patroni
+        );
+        std::env::set_var("DATABASE_CONNECTION_MODE", "direct");
+        assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+        std::env::set_var("DATABASE_HOST", "writer.example.rds.amazonaws.com");
+        std::env::set_var("DATABASE_TLS_ENABLED", "true");
+        let config = DatabaseConfig::default();
+        assert_eq!(config.connection_mode, DatabaseConnectionMode::Direct);
+        assert!(config.tls_enabled);
+        std::env::set_var("DATABASE_PORT", "invalid");
+        assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+        std::env::remove_var("DATABASE_PORT");
+        std::env::set_var("DATABASE_MAX_CONNECTIONS", "invalid");
+        assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+        std::env::remove_var("DATABASE_MAX_CONNECTIONS");
+        std::env::set_var("DATABASE_TLS_ENABLED", "invalid");
+        assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+        std::env::set_var("DATABASE_TLS_ENABLED", "true");
+        std::env::set_var("DATABASE_CONNECTION_MODE", "typo");
+        assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+    }
 
     #[test]
     #[serial]
