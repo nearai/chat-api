@@ -39,7 +39,7 @@ pub fn is_valid_service_type(service_type: &str) -> bool {
 /// Default [`AgentInstance::service_type`] when unset in storage or API payloads.
 pub const DEFAULT_AGENT_SERVICE_TYPE: &str = "openclaw";
 
-/// Enrichment data from the agent compose-api (TEE or non-TEE) for instance responses
+/// Enrichment data from the agent compose-api for instance responses
 #[derive(Debug, Clone, Default)]
 pub struct AgentApiInstanceEnrichment {
     pub status: Option<String>,
@@ -384,13 +384,6 @@ pub trait AgentRepository: Send + Sync {
         dashboard_url: Option<String>,
         name: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
-
-    /// Returns (total, migrated, pending, no_url, unknown).
-    async fn get_migration_status_counts(
-        &self,
-        legacy_patterns: Vec<String>,
-        crabshack_pattern: String,
-    ) -> anyhow::Result<(i64, i64, i64, i64, i64)>;
 }
 
 /// Service trait for agent business logic
@@ -409,18 +402,8 @@ pub trait AgentService: Send + Sync {
         params: InstanceCreationParams,
     ) -> anyhow::Result<AgentInstance>;
 
-    /// Create instance via TEE compose-api with streaming lifecycle events.
-    /// Streams events from the agent API as they occur during instance creation.
-    /// Returns a receiver that yields raw JSON events from the agent API.
-    async fn create_instance_from_agent_api_streaming(
-        &self,
-        user_id: UserId,
-        params: InstanceCreationParams,
-        max_allowed: u64,
-    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
-
     /// Create instance with per-instance passkey credentials and streaming lifecycle events.
-    /// Calls non-TEE compose-api /auth/register to set up the instance with unique credentials,
+    /// Calls compose-api /auth/register to set up the instance with unique credentials,
     /// then creates the instance using the session token instead of manager token.
     /// Returns a receiver that yields raw JSON events as they occur during instance creation.
     async fn create_passkey_instance_streaming(
@@ -535,9 +518,6 @@ pub trait AgentService: Send + Sync {
     /// Setup gateway session for a user.
     /// Creates user passkey credentials on first login, then sets the gateway cookie via /auth/proxy-session.
     /// Returns the Set-Cookie header value to be forwarded to the browser, or None if not available.
-    /// Runs when `new_agent_with_non_tee_infra` is set, or when the user already has passkey credentials
-    /// or instances on a non-TEE manager (so crabshack sessions still work after switching global infra to TEE).
-    /// Propagates errors if system configs cannot be loaded (callers typically log and continue).
     /// Safe to call multiple times (idempotent on subsequent logins).
     async fn setup_gateway_session_for_user(
         &self,
@@ -618,10 +598,6 @@ pub trait AgentService: Send + Sync {
         instance_id: Uuid,
         user_id: UserId,
     ) -> anyhow::Result<Option<InstanceBalance>>;
-
-    /// Find the configured manager whose URL matches a given agent_api_base_url.
-    /// Returns the manager config (URL + token) if found.
-    fn find_manager_for_url(&self, agent_api_base_url: &str) -> Option<config::AgentManager>;
 
     /// Find a CrabShack manager by URL containing "crabshack".
     fn find_crabshack_manager(&self) -> Option<config::AgentManager>;

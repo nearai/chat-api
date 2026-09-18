@@ -56,6 +56,7 @@ pub struct Subscription {
     pub customer_id: String,
     pub price_id: String,
     pub status: String,
+    pub current_period_start: Option<DateTime<Utc>>,
     pub current_period_end: DateTime<Utc>,
     pub cancel_at_period_end: bool,
     pub created_at: DateTime<Utc>,
@@ -1367,4 +1368,20 @@ pub struct CreditsSummary {
     pub period_spent_credits: i64,
     /// Plan credit limit (nano-USD).
     pub plan_credits: i64,
+    /// HoS accounting basis for the same cached entitlement observation.
+    pub house_of_stake: Option<HouseOfStakeCreditSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct HouseOfStakeCreditSnapshot {
+    /// Highest stake already credited in this period. String preserves the full u128 value.
+    pub credited_stake_yocto: String,
+    /// Most recently observed effective stake. String preserves the full u128 value.
+    pub last_observed_stake_yocto: String,
+    /// Earned current-period limit retained by the snapshot, including while effective stake is zero.
+    pub credit_limit_nano_usd: i64,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub observed_at: DateTime<Utc>,
 }

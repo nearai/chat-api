@@ -28,7 +28,7 @@ urlencoding = "2.1"
 bytes = "1.5"
 http = "1.0"
 tokio-stream = "0.1"
-tokio-postgres = { version = "0.7", features = ["with-uuid-1"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
 deadpool-postgres = "0.14"
 # MCP protocol
 rmcp = { version = "0.6", features = [
@@ -39,8 +39,6 @@ rmcp = { version = "0.6", features = [
 hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
-# X25519 key derivation for age encryption (backup keypair derivation)
-x25519-dalek = { version = "2", features = ["static_secrets"] }
 dstack-sdk = "0.1"
 # OpenTelemetry for metrics
 opentelemetry = { version = "0.31", features = ["metrics"] }

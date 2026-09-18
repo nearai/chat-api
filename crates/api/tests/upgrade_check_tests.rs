@@ -304,13 +304,13 @@ async fn test_upgrade_completion_only_on_success() {
 }
 
 // ============================================================================
-// NON-TEE UPGRADE AVAILABILITY (crabshack /images + /instances)
+// UPGRADE AVAILABILITY (crabshack /images + /instances)
 // ============================================================================
 //
 // These scenarios are fully asserted in the `services` crate (wiremock + mock repository),
 // because `AgentService::check_upgrade_available` lives there and integration tests here do not
 // have access to `MockAgentRepository`. Run:
-//   cargo test -p services non_tee_check_upgrade
+//   cargo test -p services check_upgrade
 //
 // Crabshack filter key comes from `service_type_for_crabshack` (see also
 // `test_service_type_for_crabshack_transformation` below): by default DB `openclaw` maps to
@@ -320,14 +320,14 @@ async fn test_upgrade_completion_only_on_success() {
 // `service_type: "openclaw-dind"` for that path.
 //
 // Covered service tests:
-// - `non_tee_check_upgrade_legacy_openclaw_dind_filter_and_semver` — legacy `openclaw-dind` row +
+// - `check_upgrade_legacy_openclaw_dind_filter_and_semver` — legacy `openclaw-dind` row +
 //   crabshack allowlist filter + semver
-// - `non_tee_check_upgrade_prerelease_same_numeric_max_picks_later_allowlist_entry` — rc vs release tie
-// - `non_tee_check_upgrade_canonical_openclaw_images` — DB `openclaw` + crabshack `openclaw` images
-// - `non_tee_check_upgrade_instance_404_blocks_upgrade` — unsynced instance / no upgrade
-// - `non_tee_stable_only_filter_picks_highest_stable_not_prerelease` — mixed stable + pre-release allowlist,
+// - `check_upgrade_prerelease_same_numeric_max_picks_later_allowlist_entry` — rc vs release tie
+// - `check_upgrade_canonical_openclaw_images` — DB `openclaw` + crabshack `openclaw` images
+// - `check_upgrade_instance_404_blocks_upgrade` — unsynced instance / no upgrade
+// - `stable_only_filter_picks_highest_stable_not_prerelease` — mixed stable + pre-release allowlist,
 //   default `allow_prerelease_upgrades=false` picks highest stable
-// - `non_tee_allow_prerelease_includes_prerelease_in_latest` — same allowlist with flag true picks pre-release
+// - `allow_prerelease_includes_prerelease_in_latest` — same allowlist with flag true picks pre-release
 //
 // `allow_prerelease_upgrades` behavior (stable-only vs including pre-releases when picking the newest
 // versioned tag from crabshack) is intentionally exercised there with real `/images` mocks and
@@ -462,7 +462,6 @@ async fn test_service_type_for_crabshack_transformation() {
 
     // Test with custom config overrides
     let custom_config = AgentHostingConfig {
-        new_agent_with_non_tee_infra: None,
         crabshack: AgentHostingCrabshackConfig {
             ironclaw_service_type: Some("ironclaw-custom".to_string()),
             openclaw_service_type: Some("openclaw-v2".to_string()),

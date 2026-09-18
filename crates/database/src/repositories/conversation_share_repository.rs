@@ -17,6 +17,63 @@ impl PostgresConversationShareRepository {
         Self { pool }
     }
 
+    fn encode(
+        &self,
+        table: &str,
+        column: &str,
+        id: Uuid,
+        value: &str,
+    ) -> Result<String, ConversationError> {
+        match self.pool.field_encryption() {
+            Some(config) if config.write_enabled => crate::field_encryption::encrypt(
+                &config.key,
+                &config.key_id,
+                table,
+                column,
+                id,
+                value,
+            )
+            .map_err(|e| ConversationError::DatabaseError(e.to_string())),
+            _ => Ok(value.to_string()),
+        }
+    }
+
+    fn decode(
+        &self,
+        table: &str,
+        column: &str,
+        id: Uuid,
+        value: String,
+    ) -> Result<String, ConversationError> {
+        match self.pool.field_encryption() {
+            Some(config) => crate::field_encryption::decrypt_if_encrypted(
+                &config.key,
+                &config.key_id,
+                table,
+                column,
+                id,
+                value,
+            )
+            .map_err(|e| ConversationError::DatabaseError(e.to_string())),
+            None => Ok(value),
+        }
+    }
+
+    fn token(&self, domain: &str, value: &str) -> Result<Option<Vec<u8>>, ConversationError> {
+        let normalized = if domain == "conversation_share_groups.name" {
+            value.to_string()
+        } else {
+            value.trim().to_lowercase()
+        };
+        self.pool
+            .field_encryption()
+            .map(|config| {
+                crate::field_encryption::search_token(&config.key, domain, &normalized)
+                    .map_err(|e| ConversationError::DatabaseError(e.to_string()))
+            })
+            .transpose()
+    }
+
     fn map_permission(value: &str) -> Result<SharePermission, ConversationError> {
         match value {
             "read" => Ok(SharePermission::Read),
@@ -49,19 +106,23 @@ impl PostgresConversationShareRepository {
         }
     }
 
-    fn map_share_row(row: &tokio_postgres::Row) -> Result<ConversationShare, ConversationError> {
+    fn map_share_row(
+        &self,
+        row: &tokio_postgres::Row,
+    ) -> Result<ConversationShare, ConversationError> {
+        let id: Uuid = row.get("id");
         let recipient_kind: Option<String> = row.get("recipient_type");
         let recipient_value: Option<String> = row.get("recipient_value");
         let recipient = match (recipient_kind, recipient_value) {
             (Some(kind), Some(value)) => Some(ShareRecipient {
                 kind: Self::map_recipient_kind(&kind)?,
-                value,
+                value: self.decode("conversation_shares", "recipient_value", id, value)?,
             }),
             _ => None,
         };
 
         Ok(ConversationShare {
-            id: row.get("id"),
+            id,
             conversation_id: row.get("conversation_id"),
             owner_user_id: row.get("owner_user_id"),
             share_type: Self::map_share_type(row.get("share_type"))?,
@@ -90,7 +151,7 @@ impl PostgresConversationShareRepository {
 
         let rows = client
             .query(
-                "SELECT group_id, member_type, member_value
+                "SELECT id, group_id, member_type, member_value
                  FROM conversation_share_group_members
                  WHERE group_id = ANY($1)",
                 &[&group_ids],
@@ -101,9 +162,15 @@ impl PostgresConversationShareRepository {
         let mut members: HashMap<Uuid, Vec<ShareRecipient>> = HashMap::new();
 
         for row in rows {
+            let id: Uuid = row.get("id");
             let group_id: Uuid = row.get("group_id");
             let kind = Self::map_recipient_kind(row.get("member_type"))?;
-            let value: String = row.get("member_value");
+            let value = self.decode(
+                "conversation_share_group_members",
+                "member_value",
+                id,
+                row.get("member_value"),
+            )?;
             members
                 .entry(group_id)
                 .or_default()
@@ -113,15 +180,151 @@ impl PostgresConversationShareRepository {
         Ok(members)
     }
 
-    fn to_share_group(row: &tokio_postgres::Row, members: Vec<ShareRecipient>) -> ShareGroup {
-        ShareGroup {
-            id: row.get("id"),
+    fn to_share_group(
+        &self,
+        row: &tokio_postgres::Row,
+        members: Vec<ShareRecipient>,
+    ) -> Result<ShareGroup, ConversationError> {
+        let id: Uuid = row.get("id");
+        Ok(ShareGroup {
+            id,
             owner_user_id: row.get("owner_user_id"),
-            name: row.get("name"),
+            name: self.decode("conversation_share_groups", "name", id, row.get("name"))?,
             members,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
+        })
+    }
+
+    async fn upsert_share<C>(
+        &self,
+        client: &C,
+        share: &NewConversationShare,
+    ) -> Result<ConversationShare, ConversationError>
+    where
+        C: tokio_postgres::GenericClient + Sync,
+    {
+        let recipient_token = share
+            .recipient
+            .as_ref()
+            .map(|recipient| self.token("conversation_shares.recipient_value", &recipient.value))
+            .transpose()?
+            .flatten();
+        let existing_direct_id = if let (ShareType::Direct, Some(recipient), Some(token)) =
+            (&share.share_type, &share.recipient, &recipient_token)
+        {
+            let lock_key = format!(
+                "direct-share:{}:{}:{}",
+                share.conversation_id,
+                recipient.kind.as_str(),
+                recipient.value.trim().to_lowercase()
+            );
+            client
+                .query_one(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    &[&lock_key],
+                )
+                .await
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+            let matches = client
+                .query(
+                    "SELECT id FROM conversation_shares
+                     WHERE conversation_id=$1 AND share_type='direct' AND recipient_type=$2
+                       AND (recipient_value_search_token=$3 OR
+                            (recipient_value_search_token IS NULL AND LOWER(recipient_value)=LOWER($4)))
+                     ORDER BY recipient_value_search_token IS NULL
+                     FOR UPDATE",
+                    &[
+                        &share.conversation_id,
+                        &recipient.kind.as_str(),
+                        token,
+                        &recipient.value,
+                    ],
+                )
+                .await
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+            let ids = matches
+                .iter()
+                .map(|row| row.get::<_, Uuid>(0))
+                .collect::<Vec<_>>();
+            if ids.len() > 1 {
+                let duplicate_ids = ids[1..].to_vec();
+                client
+                    .execute(
+                        "DELETE FROM conversation_shares WHERE id=ANY($1)",
+                        &[&duplicate_ids],
+                    )
+                    .await
+                    .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+            }
+            ids.first().copied()
+        } else {
+            None
+        };
+
+        let share_id = existing_direct_id.unwrap_or_else(Uuid::new_v4);
+        let recipient_value = share
+            .recipient
+            .as_ref()
+            .map(|recipient| {
+                self.encode(
+                    "conversation_shares",
+                    "recipient_value",
+                    share_id,
+                    &recipient.value,
+                )
+            })
+            .transpose()?;
+
+        let row = if existing_direct_id.is_some() {
+            client
+                .query_one(
+                    "UPDATE conversation_shares
+                     SET owner_user_id=$2, permission=$3, recipient_value=$4,
+                         recipient_value_search_token=$5, updated_at=NOW()
+                     WHERE id=$1
+                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
+                               recipient_type, recipient_value, group_id, org_email_pattern,
+                               created_at, updated_at",
+                    &[
+                        &share_id,
+                        &share.owner_user_id.0,
+                        &share.permission.as_str(),
+                        &recipient_value,
+                        &recipient_token,
+                    ],
+                )
+                .await
+        } else {
+            let query = match share.share_type {
+                ShareType::Direct => "INSERT INTO conversation_shares (conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,id,recipient_value_search_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (conversation_id,recipient_type,recipient_value_search_token) WHERE share_type='direct' AND recipient_value_search_token IS NOT NULL DO UPDATE SET permission=EXCLUDED.permission,updated_at=NOW() RETURNING id,conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,created_at,updated_at",
+                ShareType::Group => "INSERT INTO conversation_shares (conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,id,recipient_value_search_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (conversation_id,group_id) WHERE share_type='group' DO UPDATE SET permission=EXCLUDED.permission,updated_at=NOW() RETURNING id,conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,created_at,updated_at",
+                ShareType::Organization => "INSERT INTO conversation_shares (conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,id,recipient_value_search_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (conversation_id,org_email_pattern) WHERE share_type='organization' DO UPDATE SET permission=EXCLUDED.permission,updated_at=NOW() RETURNING id,conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,created_at,updated_at",
+                ShareType::Public => "INSERT INTO conversation_shares (conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,id,recipient_value_search_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (conversation_id) WHERE share_type='public' DO UPDATE SET permission=EXCLUDED.permission,updated_at=NOW() RETURNING id,conversation_id,owner_user_id,share_type,permission,recipient_type,recipient_value,group_id,org_email_pattern,created_at,updated_at",
+            };
+            client
+                .query_one(
+                    query,
+                    &[
+                        &share.conversation_id,
+                        &share.owner_user_id.0,
+                        &share.share_type.as_str(),
+                        &share.permission.as_str(),
+                        &share
+                            .recipient
+                            .as_ref()
+                            .map(|recipient| recipient.kind.as_str()),
+                        &recipient_value,
+                        &share.group_id,
+                        &share.org_email_pattern,
+                        &share_id,
+                        &recipient_token,
+                    ],
+                )
+                .await
         }
+        .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+        self.map_share_row(&row)
     }
 }
 
@@ -144,25 +347,61 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
+        let group_id = Uuid::new_v4();
+        let name_token = self.token("conversation_share_groups.name", name)?;
+        let lock_key = format!("share-group:{}:{}", owner_user_id.0, name);
+        transaction
+            .query_one(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                &[&lock_key],
+            )
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+        if transaction
+            .query_opt(
+                "SELECT id FROM conversation_share_groups
+                 WHERE owner_user_id=$1 AND
+                       (name_search_token=$2 OR (name_search_token IS NULL AND name=$3))
+                 LIMIT 1 FOR UPDATE",
+                &[&owner_user_id.0, &name_token, &name],
+            )
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?
+            .is_some()
+        {
+            return Err(ConversationError::DatabaseError(
+                "share group name already exists".into(),
+            ));
+        }
+        let stored_name = self.encode("conversation_share_groups", "name", group_id, name)?;
         let row = transaction
             .query_one(
-                "INSERT INTO conversation_share_groups (owner_user_id, name)
-                 VALUES ($1, $2)
+                "INSERT INTO conversation_share_groups (id, owner_user_id, name, name_search_token)
+                 VALUES ($1, $2, $3, $4)
                  RETURNING id, owner_user_id, name, created_at, updated_at",
-                &[&owner_user_id.0, &name],
+                &[&group_id, &owner_user_id.0, &stored_name, &name_token],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let group_id: Uuid = row.get("id");
-
         for member in members {
+            let member_id = Uuid::new_v4();
+            let stored_value = self.encode(
+                "conversation_share_group_members",
+                "member_value",
+                member_id,
+                &member.value,
+            )?;
+            let value_token = self.token(
+                "conversation_share_group_members.member_value",
+                &member.value,
+            )?;
             transaction
                 .execute(
-                    "INSERT INTO conversation_share_group_members (group_id, member_type, member_value)
-                     VALUES ($1, $2, $3)
-                     ON CONFLICT (group_id, member_type, member_value) DO NOTHING",
-                    &[&group_id, &member.kind.as_str(), &member.value],
+                    "INSERT INTO conversation_share_group_members (id, group_id, member_type, member_value, member_value_search_token)
+                     VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT (group_id, member_type, member_value_search_token) WHERE member_value_search_token IS NOT NULL DO NOTHING",
+                    &[&member_id, &group_id, &member.kind.as_str(), &stored_value, &value_token],
                 )
                 .await
                 .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
@@ -173,7 +412,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        Ok(Self::to_share_group(&row, members.to_vec()))
+        self.to_share_group(&row, members.to_vec())
     }
 
     async fn list_groups(
@@ -191,7 +430,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                 "SELECT id, owner_user_id, name, created_at, updated_at
                  FROM conversation_share_groups
                  WHERE owner_user_id = $1
-                 ORDER BY name",
+                 ORDER BY created_at, id",
                 &[&owner_user_id.0],
             )
             .await
@@ -204,9 +443,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .iter()
             .map(|row| {
                 let id: Uuid = row.get("id");
-                Self::to_share_group(row, members.get(&id).cloned().unwrap_or_default())
+                self.to_share_group(row, members.get(&id).cloned().unwrap_or_default())
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         Ok(groups)
     }
@@ -236,6 +475,15 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .iter()
             .map(|m| m.value.to_lowercase())
             .collect();
+        let member_tokens: Vec<Option<Vec<u8>>> = member_identifiers
+            .iter()
+            .map(|member| {
+                self.token(
+                    "conversation_share_group_members.member_value",
+                    &member.value,
+                )
+            })
+            .collect::<Result<_, _>>()?;
 
         // Use parameterized query with UNNEST to safely match (type, value) pairs
         // This avoids dynamic SQL construction while maintaining correct pairing semantics
@@ -244,11 +492,12 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                 "SELECT DISTINCT g.id, g.owner_user_id, g.name, g.created_at, g.updated_at
                  FROM conversation_share_groups g
                  JOIN conversation_share_group_members m ON g.id = m.group_id
-                 JOIN UNNEST($1::text[], $2::text[]) AS search(member_type, member_value)
+                 JOIN UNNEST($1::text[], $2::text[], $3::bytea[]) AS search(member_type, member_value, member_token)
                    ON m.member_type = search.member_type
-                   AND LOWER(m.member_value) = search.member_value
-                 ORDER BY g.name",
-                &[&member_types, &member_values_lower],
+                   AND (m.member_value_search_token = search.member_token OR
+                        (m.member_value_search_token IS NULL AND LOWER(m.member_value) = search.member_value))
+                 ORDER BY g.created_at, g.id",
+                &[&member_types, &member_values_lower, &member_tokens],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
@@ -260,9 +509,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .iter()
             .map(|row| {
                 let id: Uuid = row.get("id");
-                Self::to_share_group(row, members.get(&id).cloned().unwrap_or_default())
+                self.to_share_group(row, members.get(&id).cloned().unwrap_or_default())
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         Ok(groups)
     }
@@ -293,7 +542,8 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         };
 
         let members = self.load_group_members(&[group_id]).await?;
-        let group = Self::to_share_group(&row, members.get(&group_id).cloned().unwrap_or_default());
+        let group =
+            self.to_share_group(&row, members.get(&group_id).cloned().unwrap_or_default())?;
         Ok(Some(group))
     }
 
@@ -315,13 +565,20 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
+        let stored_name = name
+            .map(|value| self.encode("conversation_share_groups", "name", group_id, value))
+            .transpose()?;
+        let name_token = name
+            .map(|value| self.token("conversation_share_groups.name", value))
+            .transpose()?
+            .flatten();
         let row = transaction
             .query_opt(
                 "UPDATE conversation_share_groups
-                 SET name = COALESCE($1, name), updated_at = NOW()
-                 WHERE owner_user_id = $2 AND id = $3
+                 SET name = COALESCE($1, name), name_search_token = COALESCE($2, name_search_token), updated_at = NOW()
+                 WHERE owner_user_id = $3 AND id = $4
                  RETURNING id, owner_user_id, name, created_at, updated_at",
-                &[&name, &owner_user_id.0, &group_id],
+                &[&stored_name, &name_token, &owner_user_id.0, &group_id],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
@@ -340,12 +597,23 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                 .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
             for member in members {
+                let member_id = Uuid::new_v4();
+                let stored_value = self.encode(
+                    "conversation_share_group_members",
+                    "member_value",
+                    member_id,
+                    &member.value,
+                )?;
+                let value_token = self.token(
+                    "conversation_share_group_members.member_value",
+                    &member.value,
+                )?;
                 transaction
                     .execute(
-                        "INSERT INTO conversation_share_group_members (group_id, member_type, member_value)
-                         VALUES ($1, $2, $3)
-                         ON CONFLICT (group_id, member_type, member_value) DO NOTHING",
-                        &[&group_id, &member.kind.as_str(), &member.value],
+                        "INSERT INTO conversation_share_group_members (id, group_id, member_type, member_value, member_value_search_token)
+                         VALUES ($1, $2, $3, $4, $5)
+                         ON CONFLICT (group_id, member_type, member_value_search_token) WHERE member_value_search_token IS NOT NULL DO NOTHING",
+                        &[&member_id, &group_id, &member.kind.as_str(), &stored_value, &value_token],
                     )
                     .await
                     .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
@@ -364,7 +632,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             members_map.get(&group_id).cloned().unwrap_or_default()
         };
 
-        Ok(Self::to_share_group(&row, members))
+        self.to_share_group(&row, members)
     }
 
     async fn delete_group(
@@ -427,124 +695,20 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         &self,
         share: NewConversationShare,
     ) -> Result<ConversationShare, ConversationError> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-        // Use ON CONFLICT to update existing shares based on share type
-        let query = match share.share_type {
-            ShareType::Direct => {
-                "INSERT INTO conversation_shares (
-                     conversation_id,
-                     owner_user_id,
-                     share_type,
-                     permission,
-                     recipient_type,
-                     recipient_value,
-                     group_id,
-                     org_email_pattern
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (conversation_id, recipient_type, recipient_value)
-                     WHERE share_type = 'direct'
-                 DO UPDATE SET
-                     permission = EXCLUDED.permission,
-                     updated_at = NOW()
-                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                           recipient_type, recipient_value, group_id, org_email_pattern,
-                           created_at, updated_at"
-            }
-            ShareType::Group => {
-                "INSERT INTO conversation_shares (
-                     conversation_id,
-                     owner_user_id,
-                     share_type,
-                     permission,
-                     recipient_type,
-                     recipient_value,
-                     group_id,
-                     org_email_pattern
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (conversation_id, group_id)
-                     WHERE share_type = 'group'
-                 DO UPDATE SET
-                     permission = EXCLUDED.permission,
-                     updated_at = NOW()
-                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                           recipient_type, recipient_value, group_id, org_email_pattern,
-                           created_at, updated_at"
-            }
-            ShareType::Organization => {
-                "INSERT INTO conversation_shares (
-                     conversation_id,
-                     owner_user_id,
-                     share_type,
-                     permission,
-                     recipient_type,
-                     recipient_value,
-                     group_id,
-                     org_email_pattern
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (conversation_id, org_email_pattern)
-                     WHERE share_type = 'organization'
-                 DO UPDATE SET
-                     permission = EXCLUDED.permission,
-                     updated_at = NOW()
-                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                           recipient_type, recipient_value, group_id, org_email_pattern,
-                           created_at, updated_at"
-            }
-            ShareType::Public => {
-                "INSERT INTO conversation_shares (
-                     conversation_id,
-                     owner_user_id,
-                     share_type,
-                     permission,
-                     recipient_type,
-                     recipient_value,
-                     group_id,
-                     org_email_pattern
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (conversation_id)
-                     WHERE share_type = 'public'
-                 DO UPDATE SET
-                     permission = EXCLUDED.permission,
-                     updated_at = NOW()
-                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                           recipient_type, recipient_value, group_id, org_email_pattern,
-                           created_at, updated_at"
-            }
-        };
-
-        let row = client
-            .query_one(
-                query,
-                &[
-                    &share.conversation_id,
-                    &share.owner_user_id.0,
-                    &share.share_type.as_str(),
-                    &share.permission.as_str(),
-                    &share
-                        .recipient
-                        .as_ref()
-                        .map(|recipient| recipient.kind.as_str()),
-                    &share
-                        .recipient
-                        .as_ref()
-                        .map(|recipient| recipient.value.as_str()),
-                    &share.group_id,
-                    &share.org_email_pattern,
-                ],
-            )
+        let tx = client
+            .transaction()
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-        Self::map_share_row(&row)
+        let result = self.upsert_share(&*tx, &share).await?;
+        tx.commit()
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+        Ok(result)
     }
 
     /// Create multiple shares atomically (all succeed or all fail).
@@ -571,118 +735,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         let mut results = Vec::with_capacity(shares.len());
 
         for share in shares {
-            // Use ON CONFLICT to update existing shares based on share type
-            let query = match share.share_type {
-                ShareType::Direct => {
-                    "INSERT INTO conversation_shares (
-                         conversation_id,
-                         owner_user_id,
-                         share_type,
-                         permission,
-                         recipient_type,
-                         recipient_value,
-                         group_id,
-                         org_email_pattern
-                     )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                     ON CONFLICT (conversation_id, recipient_type, recipient_value)
-                         WHERE share_type = 'direct'
-                     DO UPDATE SET
-                         permission = EXCLUDED.permission,
-                         updated_at = NOW()
-                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                               recipient_type, recipient_value, group_id, org_email_pattern,
-                               created_at, updated_at"
-                }
-                ShareType::Group => {
-                    "INSERT INTO conversation_shares (
-                         conversation_id,
-                         owner_user_id,
-                         share_type,
-                         permission,
-                         recipient_type,
-                         recipient_value,
-                         group_id,
-                         org_email_pattern
-                     )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                     ON CONFLICT (conversation_id, group_id)
-                         WHERE share_type = 'group'
-                     DO UPDATE SET
-                         permission = EXCLUDED.permission,
-                         updated_at = NOW()
-                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                               recipient_type, recipient_value, group_id, org_email_pattern,
-                               created_at, updated_at"
-                }
-                ShareType::Organization => {
-                    "INSERT INTO conversation_shares (
-                         conversation_id,
-                         owner_user_id,
-                         share_type,
-                         permission,
-                         recipient_type,
-                         recipient_value,
-                         group_id,
-                         org_email_pattern
-                     )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                     ON CONFLICT (conversation_id, org_email_pattern)
-                         WHERE share_type = 'organization'
-                     DO UPDATE SET
-                         permission = EXCLUDED.permission,
-                         updated_at = NOW()
-                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                               recipient_type, recipient_value, group_id, org_email_pattern,
-                               created_at, updated_at"
-                }
-                ShareType::Public => {
-                    "INSERT INTO conversation_shares (
-                         conversation_id,
-                         owner_user_id,
-                         share_type,
-                         permission,
-                         recipient_type,
-                         recipient_value,
-                         group_id,
-                         org_email_pattern
-                     )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                     ON CONFLICT (conversation_id)
-                         WHERE share_type = 'public'
-                     DO UPDATE SET
-                         permission = EXCLUDED.permission,
-                         updated_at = NOW()
-                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                               recipient_type, recipient_value, group_id, org_email_pattern,
-                               created_at, updated_at"
-                }
-            };
-
-            let row = transaction
-                .query_one(
-                    query,
-                    &[
-                        &share.conversation_id,
-                        &share.owner_user_id.0,
-                        &share.share_type.as_str(),
-                        &share.permission.as_str(),
-                        &share
-                            .recipient
-                            .as_ref()
-                            .map(|recipient| recipient.kind.as_str()),
-                        &share
-                            .recipient
-                            .as_ref()
-                            .map(|recipient| recipient.value.as_str()),
-                        &share.group_id,
-                        &share.org_email_pattern,
-                    ],
-                )
-                .await
-                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-            results.push(Self::map_share_row(&row)?);
+            results.push(self.upsert_share(&*transaction, &share).await?);
         }
 
         transaction
@@ -718,7 +771,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
         rows.iter()
-            .map(Self::map_share_row)
+            .map(|row| self.map_share_row(row))
             .collect::<Result<Vec<_>, _>>()
     }
 
@@ -762,6 +815,17 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
+        let email_token = self.token("conversation_shares.recipient_value", email)?;
+        let group_email_token =
+            self.token("conversation_share_group_members.member_value", email)?;
+        let near_tokens: Vec<Option<Vec<u8>>> = near_accounts
+            .iter()
+            .map(|value| self.token("conversation_shares.recipient_value", value))
+            .collect::<Result<_, _>>()?;
+        let group_near_tokens: Vec<Option<Vec<u8>>> = near_accounts
+            .iter()
+            .map(|value| self.token("conversation_share_group_members.member_value", value))
+            .collect::<Result<_, _>>()?;
         let row = client
             .query_opt(
                 "SELECT permission FROM (
@@ -770,9 +834,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE conversation_id = $1
                        AND share_type = 'direct'
                        AND (
-                            (recipient_type = 'email' AND recipient_value = $2)
+                            (recipient_type = 'email' AND (recipient_value_search_token = $4 OR (recipient_value_search_token IS NULL AND LOWER(recipient_value) = LOWER($2))))
                             OR
-                            (recipient_type = 'near' AND recipient_value = ANY($3))
+                            (recipient_type = 'near' AND (recipient_value_search_token = ANY($5) OR (recipient_value_search_token IS NULL AND recipient_value = ANY($3))))
                        )
                      UNION ALL
                      SELECT cs.permission
@@ -782,9 +846,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE cs.conversation_id = $1
                        AND cs.share_type = 'group'
                        AND (
-                            (cgm.member_type = 'email' AND cgm.member_value = $2)
+                            (cgm.member_type = 'email' AND (cgm.member_value_search_token = $6 OR (cgm.member_value_search_token IS NULL AND LOWER(cgm.member_value) = LOWER($2))))
                             OR
-                            (cgm.member_type = 'near' AND cgm.member_value = ANY($3))
+                            (cgm.member_type = 'near' AND (cgm.member_value_search_token = ANY($7) OR (cgm.member_value_search_token IS NULL AND cgm.member_value = ANY($3))))
                        )
                      UNION ALL
                      SELECT permission
@@ -795,7 +859,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                  ) perms
                  ORDER BY CASE WHEN permission = 'write' THEN 0 ELSE 1 END
                  LIMIT 1",
-                &[&conversation_id, &email, &near_accounts],
+                &[&conversation_id, &email, &near_accounts, &email_token, &near_tokens, &group_email_token, &group_near_tokens],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
@@ -833,7 +897,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
         match row {
-            Some(row) => Ok(Some(Self::map_share_row(&row)?)),
+            Some(row) => Ok(Some(self.map_share_row(&row)?)),
             None => Ok(None),
         }
     }
@@ -850,6 +914,17 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
+        let email_token = self.token("conversation_shares.recipient_value", email)?;
+        let group_email_token =
+            self.token("conversation_share_group_members.member_value", email)?;
+        let near_tokens: Vec<Option<Vec<u8>>> = near_accounts
+            .iter()
+            .map(|value| self.token("conversation_shares.recipient_value", value))
+            .collect::<Result<_, _>>()?;
+        let group_near_tokens: Vec<Option<Vec<u8>>> = near_accounts
+            .iter()
+            .map(|value| self.token("conversation_share_group_members.member_value", value))
+            .collect::<Result<_, _>>()?;
         // Query to find all conversations shared with the user via direct shares,
         // group memberships, or organization patterns. We take the highest permission
         // (write > read) for each conversation. Excludes conversations owned by the user.
@@ -863,9 +938,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE share_type = 'direct'
                        AND owner_user_id != $3
                        AND (
-                            (recipient_type = 'email' AND recipient_value = $1)
+                            (recipient_type = 'email' AND (recipient_value_search_token = $4 OR (recipient_value_search_token IS NULL AND LOWER(recipient_value) = LOWER($1))))
                             OR
-                            (recipient_type = 'near' AND recipient_value = ANY($2))
+                            (recipient_type = 'near' AND (recipient_value_search_token = ANY($5) OR (recipient_value_search_token IS NULL AND recipient_value = ANY($2))))
                        )
                      UNION ALL
                      -- Group shares where user is a member (exclude own)
@@ -876,9 +951,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE cs.share_type = 'group'
                        AND cs.owner_user_id != $3
                        AND (
-                            (cgm.member_type = 'email' AND cgm.member_value = $1)
+                            (cgm.member_type = 'email' AND (cgm.member_value_search_token = $6 OR (cgm.member_value_search_token IS NULL AND LOWER(cgm.member_value) = LOWER($1))))
                             OR
-                            (cgm.member_type = 'near' AND cgm.member_value = ANY($2))
+                            (cgm.member_type = 'near' AND (cgm.member_value_search_token = ANY($7) OR (cgm.member_value_search_token IS NULL AND cgm.member_value = ANY($2))))
                        )
                      UNION ALL
                      -- Organization shares matching email pattern (exclude own)
@@ -890,7 +965,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                  ) shares
                  GROUP BY conversation_id
                  ORDER BY conversation_id",
-                &[&email, &near_accounts, &user_id.0],
+                &[&email, &near_accounts, &user_id.0, &email_token, &near_tokens, &group_email_token, &group_near_tokens],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;

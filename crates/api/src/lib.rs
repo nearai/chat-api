@@ -1,6 +1,7 @@
 pub mod cloud_api;
 pub mod common;
 pub mod consts;
+pub mod database_encryption;
 pub mod error;
 pub mod middleware;
 pub mod model_pricing;

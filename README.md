@@ -31,7 +31,7 @@ crates/
 - **Service Layer**: Business logic in `services` crate, injected into `AppState`
 - **NEAR AI Cloud API Proxy**: OpenAI-compatible inference routes forward to NEAR AI Cloud API with auth; Responses requests are stateless
 - **Temporary Read Views**: Owner-only Conversation and File GET endpoints remain available for the Stage I migration/export window. Ordinary Conversation, File, and sharing writes return `410 Gone`; the existing `DELETE /v1/users/me` account-deletion flow remains available.
-- **Patroni Support**: Optional cluster discovery for HA PostgreSQL via `DATABASE_PRIMARY_APP_ID`
+- **PostgreSQL deployment modes**: Optional Patroni discovery via `DATABASE_PRIMARY_APP_ID`, plus verified direct TLS connections for managed endpoints such as RDS
 
 ### Request Flow
 
@@ -180,7 +180,7 @@ Reports include:
 
 ## Database
 
-Migrations are in `crates/database/src/migrations/sql/` and run automatically on startup. Supports PostgreSQL and Patroni clusters (via `DATABASE_PRIMARY_APP_ID`).
+Migrations are in `crates/database/src/migrations/sql/` and run automatically on startup. Supports PostgreSQL, Patroni clusters (via `DATABASE_PRIMARY_APP_ID`), and verified direct managed-database connections (see [`docs/rds-database.md`](docs/rds-database.md)).
 
 ## API Documentation
 

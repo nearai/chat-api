@@ -490,6 +490,17 @@ async fn main() -> anyhow::Result<()> {
     let db = database::Database::from_config(&config.database)
         .await
         .context("failed to connect database for task worker")?;
+    if config.database_encryption.key.is_empty() {
+        anyhow::bail!("DB_ENCRYPTION_KEY or DB_ENCRYPTION_KEY_FILE is required");
+    }
+    let key = database::field_encryption::parse_key(&config.database_encryption.key)?;
+    database::field_encryption::validate_key_id(&config.database_encryption.key_id)?;
+    db.pool()
+        .set_field_encryption(services::db_pool::FieldEncryptionConfig {
+            key,
+            key_id: config.database_encryption.key_id.clone(),
+            write_enabled: config.database_encryption.write_enabled,
+        });
 
     let system_configs_service = Arc::new(
         services::system_configs::service::SystemConfigsServiceImpl::new(
@@ -504,7 +515,6 @@ async fn main() -> anyhow::Result<()> {
         config.agent.nearai_api_url.clone(),
         system_configs_service as Arc<dyn services::system_configs::ports::SystemConfigsService>,
         config.agent.channel_relay_url.clone(),
-        config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
     let vpc_auth_config = if config.vpc_auth.is_configured() {

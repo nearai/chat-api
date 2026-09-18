@@ -104,6 +104,7 @@ mod tests {
     #[test]
     fn test_tls_disabled_by_default() {
         let config = config::DatabaseConfig {
+            connection_mode: config::DatabaseConnectionMode::Patroni,
             host: Some("localhost".to_string()),
             port: 5432,
             gateway_subdomain: "dstack.internal".to_string(),
@@ -124,6 +125,7 @@ mod tests {
     #[test]
     fn test_tls_can_be_enabled() {
         let config = config::DatabaseConfig {
+            connection_mode: config::DatabaseConnectionMode::Patroni,
             host: Some("remote.example.com".to_string()),
             port: 5432,
             gateway_subdomain: "dstack.internal".to_string(),
@@ -145,6 +147,7 @@ mod tests {
     fn test_database_config_validation() {
         // Test valid local configuration without TLS
         let local_config = config::DatabaseConfig {
+            connection_mode: config::DatabaseConnectionMode::Patroni,
             host: Some("localhost".to_string()),
             port: 5432,
             database: "cloud_api".to_string(),
@@ -165,6 +168,7 @@ mod tests {
 
         // Test valid remote configuration with TLS
         let remote_config = config::DatabaseConfig {
+            connection_mode: config::DatabaseConnectionMode::Patroni,
             host: Some("prod-db.example.com".to_string()),
             port: 5432,
             gateway_subdomain: "dstack.internal".to_string(),

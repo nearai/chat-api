@@ -36,6 +36,44 @@ fn near_rpc_network_hint(host: Option<&str>) -> Option<&'static str> {
     }
 }
 
+fn log_lukka_aml_policy_config(config: &config::LukkaAmlConfig) -> anyhow::Result<()> {
+    tracing::info!(
+        enabled = config.enabled,
+        high_risk_risk_levels = ?config.high_risk_risk_levels,
+        high_risk_score_threshold = ?config.high_risk_score_threshold,
+        "Lukka AML policy configuration"
+    );
+
+    let diagnostics = config.high_risk_policy_diagnostics();
+    if !diagnostics.invalid_risk_level_tokens.is_empty() {
+        tracing::warn!(
+            source = ?diagnostics.risk_level_source,
+            invalid_levels = ?diagnostics.invalid_risk_level_tokens,
+            high_risk_risk_levels = ?config.high_risk_risk_levels,
+            "Unrecognized Lukka AML risk level tokens in configuration"
+        );
+    }
+
+    if let Some(value) = diagnostics.invalid_score_threshold {
+        tracing::warn!(
+            source = ?diagnostics.score_threshold_source,
+            value = %value,
+            "Invalid Lukka AML score block threshold; expected integer 1..=100 or disabled"
+        );
+    }
+
+    match config.validate_high_risk_policy() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "Refusing to start with an invalid enabled Lukka AML high-risk policy"
+            );
+            Err(anyhow::Error::msg(error))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file if it exists
@@ -49,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize tracing based on configuration
     api::init_tracing_from_config(&config.logging);
+    log_lukka_aml_policy_config(&config.lukka_aml)?;
 
     if config.tasks.enabled {
         if config.tasks.is_scheduler_configured() {
@@ -97,6 +136,18 @@ async fn main() -> anyhow::Result<()> {
     // Create database and run migrations
     tracing::info!("Connecting to database...");
     let db = database::Database::from_config(&config.database).await?;
+
+    if config.database_encryption.key.is_empty() {
+        anyhow::bail!("DB_ENCRYPTION_KEY or DB_ENCRYPTION_KEY_FILE is required");
+    }
+    let key = database::field_encryption::parse_key(&config.database_encryption.key)?;
+    database::field_encryption::validate_key_id(&config.database_encryption.key_id)?;
+    db.pool()
+        .set_field_encryption(services::db_pool::FieldEncryptionConfig {
+            key,
+            key_id: config.database_encryption.key_id.clone(),
+            write_enabled: config.database_encryption.write_enabled,
+        });
 
     tracing::info!("Running migrations...");
     db.run_migrations().await?;
@@ -232,7 +283,6 @@ async fn main() -> anyhow::Result<()> {
         system_configs_service.clone()
             as Arc<dyn services::system_configs::ports::SystemConfigsService>,
         config.agent.channel_relay_url.clone(),
-        config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
     // Initialize agent proxy service
@@ -390,6 +440,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app_state = AppState {
+        db_pool: db.pool().clone(),
         oauth_service,
         email_auth_service,
         email_auth_trusted_proxy_count: config.email_auth.trusted_proxy_count,
@@ -432,6 +483,8 @@ async fn main() -> anyhow::Result<()> {
         bi_metrics_service,
         account_deletion_task_publisher,
     };
+
+    api::database_encryption::recover_jobs(app_state.clone()).await;
 
     // Create router with CORS support
     let app = create_router_with_cors(app_state, config.cors.clone())

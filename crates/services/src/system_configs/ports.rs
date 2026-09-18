@@ -220,13 +220,13 @@ pub struct AgentHostingCrabshackConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_image: Option<String>,
 
-    /// When `true`, non-TEE deploys for canonical `ironclaw` use the latest versioned image ref
+    /// When `true`, worker deploys for canonical `ironclaw` use the latest versioned image ref
     /// from the agent manager (crabshack) `/images` allowlist—same source as upgrade checks—and
     /// ignore `ironclaw_image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ironclaw_deploy_latest_version_tag: Option<bool>,
 
-    /// When `true`, non-TEE deploys for canonical `openclaw` use the latest versioned image ref
+    /// When `true`, worker deploys for canonical `openclaw` use the latest versioned image ref
     /// from the agent manager `/images` allowlist, and ignore `openclaw_image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_deploy_latest_version_tag: Option<bool>,
@@ -272,11 +272,6 @@ impl AgentHostingCrabshackConfig {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentHostingConfig {
-    /// Use non-TEE infrastructure (true = non-TEE, false = TEE/default)
-    /// When true, only non-TEE managers are used for instance creation
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_agent_with_non_tee_infra: Option<bool>,
-
     #[serde(default, skip_serializing_if = "AgentHostingCrabshackConfig::is_empty")]
     pub crabshack: AgentHostingCrabshackConfig,
 }
@@ -288,8 +283,6 @@ impl<'de> Deserialize<'de> for AgentHostingConfig {
     {
         #[derive(Deserialize)]
         struct AgentHostingConfigDe {
-            #[serde(default)]
-            new_agent_with_non_tee_infra: Option<bool>,
             #[serde(default)]
             crabshack: Option<AgentHostingCrabshackConfig>,
             #[serde(default)]
@@ -327,10 +320,7 @@ impl<'de> Deserialize<'de> for AgentHostingConfig {
             crabshack.openclaw_service_type = h.openclaw_service_type;
         }
 
-        Ok(AgentHostingConfig {
-            new_agent_with_non_tee_infra: h.new_agent_with_non_tee_infra,
-            crabshack,
-        })
+        Ok(AgentHostingConfig { crabshack })
     }
 }
 
@@ -397,7 +387,6 @@ impl Default for SystemConfigs {
                 storage_size: Some("10G".to_string()),
             }),
             agent_hosting: Some(AgentHostingConfig {
-                new_agent_with_non_tee_infra: Some(false),
                 crabshack: AgentHostingCrabshackConfig::default(),
             }),
         }
@@ -421,9 +410,6 @@ fn merge_agent_hosting_config(
     partial: AgentHostingConfig,
 ) -> AgentHostingConfig {
     AgentHostingConfig {
-        new_agent_with_non_tee_infra: partial
-            .new_agent_with_non_tee_infra
-            .or(base.new_agent_with_non_tee_infra),
         crabshack: AgentHostingCrabshackConfig {
             ironclaw_image: merge_opt_override(
                 base.crabshack.ironclaw_image,
@@ -608,10 +594,8 @@ mod tests {
 
     #[test]
     fn agent_hosting_deserializes_nested_crabshack() {
-        let json =
-            r#"{"new_agent_with_non_tee_infra":true,"crabshack":{"ironclaw_image":"img:1"}}"#;
+        let json = r#"{"crabshack":{"ironclaw_image":"img:1"}}"#;
         let h: AgentHostingConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(h.new_agent_with_non_tee_infra, Some(true));
         assert_eq!(h.crabshack.ironclaw_image.as_deref(), Some("img:1"));
     }
 
@@ -669,7 +653,6 @@ mod tests {
     fn into_updated_merges_agent_hosting_nested_fields() {
         let base = SystemConfigs {
             agent_hosting: Some(AgentHostingConfig {
-                new_agent_with_non_tee_infra: Some(true),
                 crabshack: AgentHostingCrabshackConfig {
                     ironclaw_image: Some("iron:base".to_string()),
                     openclaw_image: Some("open:base".to_string()),
@@ -684,7 +667,6 @@ mod tests {
         let partial: PartialSystemConfigs = serde_json::from_str(partial_json).unwrap();
         let merged = base.into_updated(partial);
         let ah = merged.agent_hosting.expect("agent_hosting");
-        assert_eq!(ah.new_agent_with_non_tee_infra, Some(true));
         assert_eq!(ah.crabshack.ironclaw_image.as_deref(), Some("iron:patch"));
         assert_eq!(ah.crabshack.openclaw_image.as_deref(), Some("open:base"));
         assert_eq!(
@@ -701,7 +683,6 @@ mod tests {
     fn into_updated_clears_crabshack_override_on_empty_string() {
         let base = SystemConfigs {
             agent_hosting: Some(AgentHostingConfig {
-                new_agent_with_non_tee_infra: Some(false),
                 crabshack: AgentHostingCrabshackConfig {
                     ironclaw_image: Some("custom:iron".to_string()),
                     openclaw_image: None,

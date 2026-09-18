@@ -3,8 +3,30 @@ use std::collections::HashMap;
 use std::fmt;
 use url::Url;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseConnectionMode {
+    #[default]
+    Patroni,
+    Direct,
+}
+
+impl std::str::FromStr for DatabaseConnectionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "patroni" => Ok(Self::Patroni),
+            "direct" => Ok(Self::Direct),
+            _ => Err("DATABASE_CONNECTION_MODE must be exactly 'patroni' or 'direct' (lowercase, no surrounding whitespace)".into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
+    #[serde(default)]
+    pub connection_mode: DatabaseConnectionMode,
     pub host: Option<String>,
     pub port: u16,
     pub database: String,
@@ -21,12 +43,51 @@ pub struct DatabaseConfig {
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
+        let connection_mode = std::env::var("DATABASE_CONNECTION_MODE")
+            .unwrap_or_else(|_| "patroni".into())
+            .parse::<DatabaseConnectionMode>()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let host = std::env::var("DATABASE_HOST").ok();
+        if connection_mode == DatabaseConnectionMode::Direct
+            && host.as_deref().is_none_or(|host| host.trim().is_empty())
+        {
+            panic!("DATABASE_HOST is required in direct mode");
+        }
+        let port = std::env::var("DATABASE_PORT")
+            .map(|value| {
+                value.parse().unwrap_or_else(|_| {
+                    if connection_mode == DatabaseConnectionMode::Direct {
+                        panic!("DATABASE_PORT must be a valid port number");
+                    }
+                    5432
+                })
+            })
+            .unwrap_or(5432);
+        let max_connections = std::env::var("DATABASE_MAX_CONNECTIONS")
+            .map(|value| {
+                value.parse().unwrap_or_else(|_| {
+                    if connection_mode == DatabaseConnectionMode::Direct {
+                        panic!("DATABASE_MAX_CONNECTIONS must be a valid number");
+                    }
+                    10
+                })
+            })
+            .unwrap_or(10);
+        let tls_enabled = std::env::var("DATABASE_TLS_ENABLED")
+            .map(|value| {
+                value.parse().unwrap_or_else(|_| {
+                    if connection_mode == DatabaseConnectionMode::Direct {
+                        panic!("DATABASE_TLS_ENABLED must be true or false");
+                    }
+                    false
+                })
+            })
+            .unwrap_or(false);
+
         Self {
-            host: std::env::var("DATABASE_HOST").ok(),
-            port: std::env::var("DATABASE_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(5432),
+            connection_mode,
+            host,
+            port,
             database: std::env::var("DATABASE_NAME").unwrap_or_else(|_| "chat_api".to_string()),
             username: std::env::var("DATABASE_USER").unwrap_or_else(|_| "postgres".to_string()),
             password: if let Ok(path) = std::env::var("DATABASE_PASSWORD_FILE") {
@@ -38,14 +99,8 @@ impl Default for DatabaseConfig {
             } else {
                 std::env::var("DATABASE_PASSWORD").unwrap_or_else(|_| "postgres".to_string())
             },
-            max_connections: std::env::var("DATABASE_MAX_CONNECTIONS")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(10),
-            tls_enabled: std::env::var("DATABASE_TLS_ENABLED")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(false),
+            max_connections,
+            tls_enabled,
             tls_ca_cert_path: std::env::var("DATABASE_TLS_CA_CERT_PATH").ok(),
             primary_app_id: std::env::var("DATABASE_PRIMARY_APP_ID").unwrap_or_default(),
             gateway_subdomain: std::env::var("GATEWAY_SUBDOMAIN").unwrap_or_default(),
@@ -193,6 +248,8 @@ pub struct LukkaAmlConfig {
     pub enabled: bool,
     pub base_url: String,
     pub bearer_token: String,
+    pub high_risk_risk_levels: Vec<String>,
+    pub high_risk_score_threshold: Option<i64>,
     pub high_risk_slack_webhook_url: String,
     pub high_risk_slack_timeout_ms: u64,
     pub high_risk_slack_alert_on_cached_reports: bool,
@@ -202,12 +259,34 @@ pub struct LukkaAmlConfig {
     pub cache_ttl_secs: u64,
 }
 
+/// Parsing details for the AML high-risk policy environment variables.
+///
+/// The parsed policy remains intentionally permissive while AML is disabled so local and
+/// staged deployments can be configured before enabling the check. `main` validates these
+/// diagnostics before starting an AML-enabled server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LukkaAmlPolicyDiagnostics {
+    pub risk_level_source: Option<String>,
+    pub invalid_risk_level_tokens: Vec<String>,
+    pub score_threshold_source: Option<String>,
+    pub invalid_score_threshold: Option<String>,
+}
+
+#[derive(Debug)]
+struct ParsedLukkaAmlPolicy {
+    high_risk_risk_levels: Vec<String>,
+    high_risk_score_threshold: Option<i64>,
+    diagnostics: LukkaAmlPolicyDiagnostics,
+}
+
 impl fmt::Debug for LukkaAmlConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LukkaAmlConfig")
             .field("enabled", &self.enabled)
             .field("base_url", &self.base_url)
             .field("bearer_token", &"<redacted>")
+            .field("high_risk_risk_levels", &self.high_risk_risk_levels)
+            .field("high_risk_score_threshold", &self.high_risk_score_threshold)
             .field("high_risk_slack_webhook_url", &"<redacted>")
             .field(
                 "high_risk_slack_timeout_ms",
@@ -227,6 +306,7 @@ impl fmt::Debug for LukkaAmlConfig {
 
 impl Default for LukkaAmlConfig {
     fn default() -> Self {
+        let policy = parse_lukka_aml_policy();
         Self {
             enabled: std::env::var("LUKKA_AML_ENABLED")
                 .ok()
@@ -235,6 +315,8 @@ impl Default for LukkaAmlConfig {
             base_url: std::env::var("LUKKA_BASE_URL")
                 .unwrap_or_else(|_| "https://api.blockchain-analytics.lukka.tech".to_string()),
             bearer_token: std::env::var("LUKKA_BEARER_TOKEN").unwrap_or_default(),
+            high_risk_risk_levels: policy.high_risk_risk_levels,
+            high_risk_score_threshold: policy.high_risk_score_threshold,
             high_risk_slack_webhook_url: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_WEBHOOK_URL")
                 .unwrap_or_default(),
             high_risk_slack_timeout_ms: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_TIMEOUT_MS")
@@ -264,6 +346,131 @@ impl Default for LukkaAmlConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
         }
+    }
+}
+
+impl LukkaAmlConfig {
+    /// Returns the exact parsing diagnostics used by the environment-backed configuration.
+    pub fn high_risk_policy_diagnostics(&self) -> LukkaAmlPolicyDiagnostics {
+        parse_lukka_aml_policy().diagnostics
+    }
+
+    /// Reject policy typos and an empty policy when AML enforcement is enabled.
+    ///
+    /// Keeping this validation separate from parsing lets callers inspect and log the safe
+    /// configuration values after tracing is initialized, while still preventing a fail-open
+    /// production startup.
+    pub fn validate_high_risk_policy(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        let diagnostics = self.high_risk_policy_diagnostics();
+        let mut errors = Vec::new();
+        if !diagnostics.invalid_risk_level_tokens.is_empty() {
+            errors.push(format!(
+                "{} contains unrecognized risk level token(s): {}",
+                diagnostics
+                    .risk_level_source
+                    .as_deref()
+                    .unwrap_or("LUKKA_AML_HIGH_RISK_LEVELS"),
+                diagnostics.invalid_risk_level_tokens.join(", "),
+            ));
+        }
+        if let Some(value) = diagnostics.invalid_score_threshold {
+            errors.push(format!(
+                "{} has invalid score threshold {value:?}; expected integer 1..=100 or disabled",
+                diagnostics
+                    .score_threshold_source
+                    .as_deref()
+                    .unwrap_or("LUKKA_AML_SCORE_BLOCK_THRESHOLD"),
+            ));
+        }
+        if self.high_risk_risk_levels.is_empty() && self.high_risk_score_threshold.is_none() {
+            errors.push("AML is enabled but both high-risk predicates are disabled".to_string());
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+fn lukka_aml_env_value(primary: &str, alias: &str) -> Option<(String, String)> {
+    std::env::var(primary)
+        .map(|value| (primary.to_string(), value))
+        .or_else(|_| std::env::var(alias).map(|value| (alias.to_string(), value)))
+        .ok()
+}
+
+fn is_lukka_aml_policy_disabled(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || ["disabled", "none", "off", "false"]
+            .iter()
+            .any(|disabled| value.eq_ignore_ascii_case(disabled))
+}
+
+fn parse_lukka_aml_policy() -> ParsedLukkaAmlPolicy {
+    let (high_risk_risk_levels, risk_level_source, invalid_risk_level_tokens) =
+        match lukka_aml_env_value(
+            "LUKKA_AML_HIGH_RISK_LEVELS",
+            "LUKKA_AML_BLOCKED_RISK_LEVELS",
+        ) {
+            None => (vec!["HIGH".to_string()], None, Vec::new()),
+            Some((source, raw)) if is_lukka_aml_policy_disabled(&raw) => {
+                (Vec::new(), Some(source), Vec::new())
+            }
+            Some((source, raw)) => {
+                let mut levels = Vec::new();
+                let mut invalid_tokens = Vec::new();
+                for token in raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                {
+                    let level = token.to_ascii_uppercase();
+                    if matches!(level.as_str(), "LOW" | "MEDIUM" | "HIGH") {
+                        if !levels.contains(&level) {
+                            levels.push(level);
+                        }
+                    } else {
+                        invalid_tokens.push(token.to_string());
+                    }
+                }
+                (levels, Some(source), invalid_tokens)
+            }
+        };
+
+    let (high_risk_score_threshold, score_threshold_source, invalid_score_threshold) =
+        match lukka_aml_env_value(
+            "LUKKA_AML_SCORE_BLOCK_THRESHOLD",
+            "LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD",
+        ) {
+            None => (None, None, None),
+            Some((source, raw)) if is_lukka_aml_policy_disabled(&raw) => (None, Some(source), None),
+            Some((source, raw)) => {
+                let value = raw.trim();
+                let threshold = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|threshold| (1..=100).contains(threshold));
+                let invalid = threshold.is_none().then(|| value.to_string());
+                (threshold, Some(source), invalid)
+            }
+        };
+
+    ParsedLukkaAmlPolicy {
+        high_risk_risk_levels,
+        high_risk_score_threshold,
+        diagnostics: LukkaAmlPolicyDiagnostics {
+            risk_level_source,
+            invalid_risk_level_tokens,
+            score_threshold_source,
+            invalid_score_threshold,
+        },
     }
 }
 
@@ -504,26 +711,11 @@ fn default_nearai_api_url() -> String {
         .unwrap_or_else(|_| "https://private.near.ai/v1".to_string())
 }
 
-fn default_non_tee_agent_url() -> String {
-    std::env::var("NON_TEE_AGENT_URL").unwrap_or_else(|_| "claws".to_string())
-}
-
 /// A single agent manager endpoint with its URL and bearer token
 #[derive(Clone, serde::Deserialize)]
 pub struct AgentManager {
     pub url: String,
     pub token: String,
-    /// Whether this manager is non-TEE (true) or TEE (false)
-    /// Set at construction time based on infrastructure mode
-    #[serde(default)]
-    pub is_non_tee: bool,
-}
-
-impl AgentManager {
-    /// Get the effective is_non_tee value based on explicit configuration
-    pub fn get_is_non_tee(&self) -> bool {
-        self.is_non_tee
-    }
 }
 
 // Custom Debug to redact bearer tokens from log output (CLAUDE.md: never log credentials)
@@ -531,7 +723,6 @@ impl std::fmt::Debug for AgentManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentManager")
             .field("url", &self.url)
-            .field("is_non_tee", &self.get_is_non_tee())
             .field("token", &"[REDACTED]")
             .finish()
     }
@@ -555,10 +746,6 @@ pub struct AgentConfig {
     /// signing secret instead of the former shared CHANNEL_RELAY_SIGNING_SECRET.
     #[serde(default)]
     pub channel_relay_url: Option<String>,
-    /// URL pattern to identify non-TEE compose-api endpoints for instance type detection
-    /// Configurable via NON_TEE_AGENT_URL environment variable (defaults to "claws")
-    #[serde(default = "default_non_tee_agent_url")]
-    pub non_tee_agent_url_pattern: String,
 }
 
 /// Split a comma-separated env var value into non-empty trimmed entries.
@@ -572,38 +759,9 @@ fn split_csv(value: &str) -> Vec<String> {
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        // Load managers from both TEE and non-TEE configurations
-        // This supports mixed environments with both manager types available
-        // Manager type is determined dynamically from URL pattern, not from this setting
         let mut managers: Vec<AgentManager> = Vec::new();
 
-        // Load TEE managers from AGENT_MANAGER_URLS_TEE
-        if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS_TEE") {
-            let urls = split_csv(&urls_raw);
-            if !urls.is_empty() {
-                let tokens_raw = std::env::var("AGENT_MANAGER_TOKENS_TEE").unwrap_or_default();
-                let tokens = split_csv(&tokens_raw);
-                if urls.len() != tokens.len() {
-                    panic!(
-                        "AGENT_MANAGER_URLS_TEE has {} entries but AGENT_MANAGER_TOKENS_TEE has {} — they must match",
-                        urls.len(),
-                        tokens.len()
-                    );
-                }
-                let tee_mgrs: Vec<AgentManager> = urls
-                    .into_iter()
-                    .zip(tokens)
-                    .map(|(url, token)| AgentManager {
-                        url,
-                        token,
-                        is_non_tee: false,
-                    })
-                    .collect();
-                managers.extend(tee_mgrs);
-            }
-        }
-
-        // Load non-TEE managers from AGENT_MANAGER_URLS
+        // Load managers from AGENT_MANAGER_URLS
         if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS") {
             let urls = split_csv(&urls_raw);
             if !urls.is_empty() {
@@ -616,30 +774,21 @@ impl Default for AgentConfig {
                         tokens.len()
                     );
                 }
-                let non_tee_mgrs: Vec<AgentManager> = urls
+                let mgrs: Vec<AgentManager> = urls
                     .into_iter()
                     .zip(tokens)
-                    .map(|(url, token)| AgentManager {
-                        url,
-                        token,
-                        is_non_tee: true,
-                    })
+                    .map(|(url, token)| AgentManager { url, token })
                     .collect();
-                managers.extend(non_tee_mgrs);
+                managers.extend(mgrs);
             }
         }
 
         // If no managers configured, fall back to legacy AGENT_API_BASE_URL
-        // This will be interpreted as TEE if no "claws" pattern in URL
         if managers.is_empty() {
             let url = std::env::var("AGENT_API_BASE_URL")
                 .unwrap_or_else(|_| "https://api.agent.near.ai".to_string());
             let token = std::env::var("AGENT_API_TOKEN").unwrap_or_default();
-            managers.push(AgentManager {
-                url,
-                token,
-                is_non_tee: false,
-            });
+            managers.push(AgentManager { url, token });
         }
 
         // Sort for deterministic ordering
@@ -651,27 +800,6 @@ impl Default for AgentConfig {
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
                 .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
             channel_relay_url: std::env::var("CHANNEL_RELAY_URL").ok(),
-            non_tee_agent_url_pattern: default_non_tee_agent_url(),
-        }
-    }
-}
-
-/// Infrastructure mode configuration (TEE vs non-TEE)
-#[derive(Debug, Clone, Deserialize)]
-pub struct InfrastructureConfig {
-    /// Use non-TEE infrastructure (false = TEE/cloud, true = non-TEE)
-    /// When true, expects Agent API to provide instance URLs
-    /// When false, expects Agent API to provide URLs (traditional TEE mode)
-    pub non_tee_infra: bool,
-}
-
-impl Default for InfrastructureConfig {
-    fn default() -> Self {
-        Self {
-            non_tee_infra: std::env::var("NON_TEE_INFRA")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(false),
         }
     }
 }
@@ -806,6 +934,7 @@ impl Default for LoggingConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub database: DatabaseConfig,
+    pub database_encryption: DatabaseEncryptionConfig,
     pub oauth: OAuthConfig,
     pub email_auth: EmailAuthConfig,
     pub server: ServerConfig,
@@ -821,8 +950,6 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     pub logging: LoggingConfig,
     pub agent: AgentConfig,
-    /// Infrastructure mode (TEE vs non-TEE)
-    pub infrastructure: InfrastructureConfig,
     pub tasks: TaskConfig,
 }
 
@@ -830,6 +957,7 @@ impl Config {
     pub fn from_env() -> Self {
         Self {
             database: DatabaseConfig::default(),
+            database_encryption: DatabaseEncryptionConfig::default(),
             oauth: OAuthConfig::default(),
             email_auth: EmailAuthConfig::default(),
             server: ServerConfig::default(),
@@ -843,8 +971,49 @@ impl Config {
             telemetry: TelemetryConfig::default(),
             logging: LoggingConfig::default(),
             agent: AgentConfig::default(),
-            infrastructure: InfrastructureConfig::default(),
             tasks: TaskConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+pub struct DatabaseEncryptionConfig {
+    /// Dedicated AES-256 key for confidential database fields. Empty disables
+    /// database field encryption and its admin endpoints.
+    pub key: String,
+    pub key_id: String,
+    /// Enables encrypted repository writes and execute-mode backfills.
+    pub write_enabled: bool,
+}
+
+impl fmt::Debug for DatabaseEncryptionConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DatabaseEncryptionConfig")
+            .field("key", &"[REDACTED]")
+            .field("key_id", &self.key_id)
+            .field("write_enabled", &self.write_enabled)
+            .finish()
+    }
+}
+
+impl Default for DatabaseEncryptionConfig {
+    fn default() -> Self {
+        let key = if let Ok(path) = std::env::var("DB_ENCRYPTION_KEY_FILE") {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("Failed to read DB_ENCRYPTION_KEY_FILE at {path}: {e}"))
+                .trim()
+                .to_string()
+        } else {
+            std::env::var("DB_ENCRYPTION_KEY").unwrap_or_default()
+        };
+        Self {
+            key,
+            key_id: std::env::var("DB_ENCRYPTION_KEY_ID").unwrap_or_else(|_| "db-v1".to_string()),
+            write_enabled: std::env::var("DB_ENCRYPTION_WRITE_ENABLED")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(false),
         }
     }
 }
@@ -853,6 +1022,91 @@ impl Config {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::ffi::OsString;
+
+    #[test]
+    fn database_connection_mode_requires_exact_values() {
+        for value in ["DIRECT", "direct ", " patroni", ""] {
+            let error = value.parse::<DatabaseConnectionMode>().unwrap_err();
+            assert!(error.contains("lowercase, no surrounding whitespace"));
+        }
+        assert_eq!(
+            "direct".parse::<DatabaseConnectionMode>().unwrap(),
+            DatabaseConnectionMode::Direct
+        );
+        assert_eq!(
+            "patroni".parse::<DatabaseConnectionMode>().unwrap(),
+            DatabaseConnectionMode::Patroni
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn database_connection_mode_environment() {
+        const KEYS: [&str; 5] = [
+            "DATABASE_CONNECTION_MODE",
+            "DATABASE_HOST",
+            "DATABASE_PORT",
+            "DATABASE_MAX_CONNECTIONS",
+            "DATABASE_TLS_ENABLED",
+        ];
+        struct Restore(Vec<(&'static str, Option<OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(
+            KEYS.iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect(),
+        );
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+
+        assert_eq!(
+            DatabaseConfig::default().connection_mode,
+            DatabaseConnectionMode::Patroni
+        );
+        std::env::set_var("DATABASE_CONNECTION_MODE", "direct");
+        assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+        std::env::set_var("DATABASE_HOST", "writer.example.rds.amazonaws.com");
+        std::env::set_var("DATABASE_TLS_ENABLED", "true");
+        let config = DatabaseConfig::default();
+        assert_eq!(config.connection_mode, DatabaseConnectionMode::Direct);
+        assert!(config.tls_enabled);
+        std::env::set_var("DATABASE_PORT", "invalid");
+        assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+        std::env::remove_var("DATABASE_PORT");
+        std::env::set_var("DATABASE_MAX_CONNECTIONS", "invalid");
+        assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+        std::env::remove_var("DATABASE_MAX_CONNECTIONS");
+        std::env::set_var("DATABASE_TLS_ENABLED", "invalid");
+        assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+        std::env::set_var("DATABASE_TLS_ENABLED", "true");
+        std::env::set_var("DATABASE_CONNECTION_MODE", "typo");
+        assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn database_encryption_defaults_safe_and_redacts_key() {
+        std::env::set_var("DB_ENCRYPTION_KEY", "super-secret-test-value");
+        std::env::remove_var("DB_ENCRYPTION_KEY_FILE");
+        std::env::remove_var("DB_ENCRYPTION_WRITE_ENABLED");
+        let config = DatabaseEncryptionConfig::default();
+        assert!(!config.write_enabled);
+        assert_eq!(config.key_id, "db-v1");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("super-secret-test-value"));
+        std::env::remove_var("DB_ENCRYPTION_KEY");
+    }
 
     #[test]
     #[serial]
@@ -870,6 +1124,108 @@ mod tests {
             .contains(&"http://test.com".to_string()));
         assert!(config.wildcard_suffixes.is_empty());
         std::env::remove_var("CORS_ALLOWED_ORIGINS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_lukka_aml_high_risk_score_threshold_env() {
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD");
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
+        assert_eq!(LukkaAmlConfig::default().high_risk_score_threshold, None);
+
+        std::env::set_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD", "82");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_score_threshold,
+            Some(82)
+        );
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD", "91");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_score_threshold,
+            Some(82)
+        );
+
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_score_threshold,
+            Some(91)
+        );
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD", "101");
+        assert_eq!(LukkaAmlConfig::default().high_risk_score_threshold, None);
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD", "disabled");
+        assert_eq!(LukkaAmlConfig::default().high_risk_score_threshold, None);
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD");
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
+    }
+
+    #[test]
+    #[serial]
+    fn test_lukka_aml_high_risk_levels_env() {
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_LEVELS");
+        std::env::remove_var("LUKKA_AML_BLOCKED_RISK_LEVELS");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_risk_levels,
+            vec!["HIGH".to_string()]
+        );
+
+        std::env::set_var("LUKKA_AML_BLOCKED_RISK_LEVELS", " medium, high, medium ");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_risk_levels,
+            vec!["MEDIUM".to_string(), "HIGH".to_string()]
+        );
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "disabled");
+        assert!(LukkaAmlConfig::default().high_risk_risk_levels.is_empty());
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "typo");
+        assert!(LukkaAmlConfig::default().high_risk_risk_levels.is_empty());
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_LEVELS");
+        std::env::remove_var("LUKKA_AML_BLOCKED_RISK_LEVELS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_enabled_lukka_aml_rejects_invalid_or_empty_high_risk_policy() {
+        for variable in [
+            "LUKKA_AML_HIGH_RISK_LEVELS",
+            "LUKKA_AML_BLOCKED_RISK_LEVELS",
+            "LUKKA_AML_SCORE_BLOCK_THRESHOLD",
+            "LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD",
+        ] {
+            std::env::remove_var(variable);
+        }
+        std::env::set_var("LUKKA_AML_ENABLED", "true");
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "HIGH, HGIH");
+        std::env::set_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD", "75");
+        let config = LukkaAmlConfig::default();
+        let diagnostics = config.high_risk_policy_diagnostics();
+        assert_eq!(diagnostics.invalid_risk_level_tokens, vec!["HGIH"]);
+        assert!(config.validate_high_risk_policy().is_err());
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "disabled");
+        std::env::set_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD", "disabled");
+        let config = LukkaAmlConfig::default();
+        assert!(config.high_risk_risk_levels.is_empty());
+        assert_eq!(config.high_risk_score_threshold, None);
+        assert!(config.validate_high_risk_policy().is_err());
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "HIGH");
+        std::env::set_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD", "101");
+        let config = LukkaAmlConfig::default();
+        let diagnostics = config.high_risk_policy_diagnostics();
+        assert_eq!(diagnostics.invalid_score_threshold.as_deref(), Some("101"));
+        assert!(config.validate_high_risk_policy().is_err());
+
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
+        let config = LukkaAmlConfig::default();
+        assert!(config.validate_high_risk_policy().is_ok());
+
+        std::env::remove_var("LUKKA_AML_ENABLED");
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_LEVELS");
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
     }
 
     #[test]
@@ -959,8 +1315,6 @@ mod tests {
     #[test]
     #[serial]
     fn test_agent_config_csv_multiple_managers() {
-        // CSV managers are used in non-TEE mode
-        std::env::set_var("NON_TEE_INFRA", "true");
         std::env::set_var(
             "AGENT_MANAGER_URLS",
             "https://mgr2.example.com,https://mgr1.example.com",
@@ -973,7 +1327,6 @@ mod tests {
         assert_eq!(config.managers[0].token, "tok1");
         assert_eq!(config.managers[1].url, "https://mgr2.example.com");
         assert_eq!(config.managers[1].token, "tok2");
-        std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_MANAGER_URLS");
         std::env::remove_var("AGENT_MANAGER_TOKENS");
     }
@@ -981,8 +1334,6 @@ mod tests {
     #[test]
     #[serial]
     fn test_agent_config_csv_overrides_legacy() {
-        // CSV managers are used in non-TEE mode
-        std::env::set_var("NON_TEE_INFRA", "true");
         std::env::set_var("AGENT_MANAGER_URLS", "https://csv.example.com");
         std::env::set_var("AGENT_MANAGER_TOKENS", "csv-tok");
         std::env::set_var("AGENT_API_BASE_URL", "https://legacy.example.com");
@@ -992,7 +1343,6 @@ mod tests {
         assert_eq!(config.managers.len(), 1);
         assert_eq!(config.managers[0].url, "https://csv.example.com");
         assert_eq!(config.managers[0].token, "csv-tok");
-        std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_MANAGER_URLS");
         std::env::remove_var("AGENT_MANAGER_TOKENS");
         std::env::remove_var("AGENT_API_BASE_URL");
@@ -1003,8 +1353,6 @@ mod tests {
     #[serial]
     #[should_panic(expected = "AGENT_MANAGER_URLS has 2 entries but AGENT_MANAGER_TOKENS has 1")]
     fn test_agent_config_csv_mismatched_lengths_panics() {
-        // CSV managers are validated in non-TEE mode
-        std::env::set_var("NON_TEE_INFRA", "true");
         std::env::set_var(
             "AGENT_MANAGER_URLS",
             "https://mgr1.example.com,https://mgr2.example.com",
@@ -1012,7 +1360,6 @@ mod tests {
         std::env::set_var("AGENT_MANAGER_TOKENS", "tok1");
         let _ = AgentConfig::default();
         // Cleanup happens after panic
-        std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_MANAGER_URLS");
         std::env::remove_var("AGENT_MANAGER_TOKENS");
     }
@@ -1020,8 +1367,6 @@ mod tests {
     #[test]
     #[serial]
     fn test_agent_config_csv_whitespace_and_trailing_commas() {
-        // CSV managers are used in non-TEE mode
-        std::env::set_var("NON_TEE_INFRA", "true");
         std::env::set_var(
             "AGENT_MANAGER_URLS",
             " https://mgr1.example.com , https://mgr2.example.com , ",
@@ -1033,7 +1378,6 @@ mod tests {
         assert_eq!(config.managers[0].token, "tok1");
         assert_eq!(config.managers[1].url, "https://mgr2.example.com");
         assert_eq!(config.managers[1].token, "tok2");
-        std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_MANAGER_URLS");
         std::env::remove_var("AGENT_MANAGER_TOKENS");
     }
@@ -1044,24 +1388,11 @@ mod tests {
         let mgr = AgentManager {
             url: "https://test.com".to_string(),
             token: "super-secret".to_string(),
-            is_non_tee: false,
         };
         let debug_output = format!("{:?}", mgr);
         assert!(debug_output.contains("https://test.com"));
         assert!(!debug_output.contains("super-secret"));
         assert!(debug_output.contains("REDACTED"));
-    }
-
-    // ============================================================================
-    // Infrastructure Configuration Tests (TEE vs non-TEE mode)
-    // ============================================================================
-
-    #[test]
-    #[serial]
-    fn test_infrastructure_config_default_is_tee_mode() {
-        std::env::remove_var("NON_TEE_INFRA");
-        let config = InfrastructureConfig::default();
-        assert!(!config.non_tee_infra, "Default should be TEE mode (false)");
     }
 
     #[test]
@@ -1101,102 +1432,10 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_infrastructure_config_non_tee_enabled() {
-        std::env::set_var("NON_TEE_INFRA", "true");
-        let config = InfrastructureConfig::default();
-        assert!(
-            config.non_tee_infra,
-            "NON_TEE_INFRA=true should enable non-TEE mode"
-        );
-        std::env::remove_var("NON_TEE_INFRA");
-    }
-
-    #[test]
-    #[serial]
-    fn test_infrastructure_config_non_tee_disabled() {
-        std::env::set_var("NON_TEE_INFRA", "false");
-        let config = InfrastructureConfig::default();
-        assert!(
-            !config.non_tee_infra,
-            "NON_TEE_INFRA=false should disable non-TEE mode (TEE mode)"
-        );
-        std::env::remove_var("NON_TEE_INFRA");
-    }
-
-    #[test]
-    #[serial]
-    fn test_infrastructure_config_invalid_value_defaults_to_tee() {
-        std::env::set_var("NON_TEE_INFRA", "invalid");
-        let config = InfrastructureConfig::default();
-        assert!(
-            !config.non_tee_infra,
-            "Invalid NON_TEE_INFRA value should default to TEE mode"
-        );
-        std::env::remove_var("NON_TEE_INFRA");
-    }
-
-    // ============================================================================
-    // Agent Config Tests with Infrastructure Mode Switching
-    // ============================================================================
-
-    #[test]
-    #[serial]
-    fn test_agent_config_tee_mode_leaves_fields_empty() {
-        // TEE mode: NON_TEE_INFRA=false or unset
-        // Clean up any leftover env vars from other tests
-        std::env::remove_var("NON_TEE_INFRA");
-        std::env::remove_var("AGENT_DOMAIN");
-        std::env::remove_var("INSTANCE_DEFAULT_CPUS");
-        std::env::remove_var("INSTANCE_DEFAULT_MEM_LIMIT");
-        std::env::remove_var("INSTANCE_DEFAULT_STORAGE_SIZE");
-        std::env::remove_var("AGENT_MANAGER_URLS");
-        std::env::remove_var("AGENT_MANAGER_TOKENS");
-        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
-        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
-
-        let config = AgentConfig::default();
-
-        // Config creation should succeed (instance defaults now configured via system_configs)
-        assert!(!config.managers.is_empty());
-    }
-
-    #[test]
-    #[serial]
-    fn test_agent_config_non_tee_mode_sets_fields() {
+    fn test_agent_config_defaults_when_env_not_set() {
         // Clean up any leftover env vars from other tests
         std::env::remove_var("AGENT_MANAGER_URLS");
         std::env::remove_var("AGENT_MANAGER_TOKENS");
-        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
-        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
-
-        // Non-TEE mode: NON_TEE_INFRA=true
-        std::env::set_var("NON_TEE_INFRA", "true");
-        std::env::set_var("AGENT_DOMAIN", "test.sare.dev");
-
-        let config = AgentConfig::default();
-
-        // Config creation should succeed (instance defaults now configured via system_configs)
-        assert!(!config.managers.is_empty());
-
-        std::env::remove_var("NON_TEE_INFRA");
-        std::env::remove_var("AGENT_DOMAIN");
-        std::env::remove_var("AGENT_MANAGER_URLS");
-        std::env::remove_var("AGENT_MANAGER_TOKENS");
-        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
-        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
-    }
-
-    #[test]
-    #[serial]
-    fn test_agent_config_non_tee_mode_uses_defaults_when_env_not_set() {
-        // Clean up any leftover env vars from other tests
-        std::env::remove_var("AGENT_MANAGER_URLS");
-        std::env::remove_var("AGENT_MANAGER_TOKENS");
-        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
-        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
-
-        // Non-TEE mode with defaults
-        std::env::set_var("NON_TEE_INFRA", "true");
         std::env::remove_var("AGENT_DOMAIN");
         std::env::remove_var("INSTANCE_DEFAULT_CPUS");
         std::env::remove_var("INSTANCE_DEFAULT_MEM_LIMIT");
@@ -1206,116 +1445,6 @@ mod tests {
 
         // Config creation should succeed (instance defaults now configured via system_configs)
         assert!(!config.managers.is_empty());
-
-        std::env::remove_var("NON_TEE_INFRA");
-        std::env::remove_var("AGENT_MANAGER_URLS");
-        std::env::remove_var("AGENT_MANAGER_TOKENS");
-        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
-        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
-    }
-
-    #[test]
-    #[serial]
-    fn test_agent_config_switching_modes() {
-        // Clean up any leftover env vars from other tests
-        std::env::remove_var("AGENT_MANAGER_URLS");
-        std::env::remove_var("AGENT_MANAGER_TOKENS");
-
-        // Test switching from TEE to non-TEE
-        std::env::set_var("NON_TEE_INFRA", "false");
-        std::env::set_var("AGENT_DOMAIN", "ignored.dev");
-        let _tee_config = AgentConfig::default();
-
-        // Switch to non-TEE
-        std::env::set_var("NON_TEE_INFRA", "true");
-        let _non_tee_config = AgentConfig::default();
-
-        std::env::remove_var("NON_TEE_INFRA");
-        std::env::remove_var("AGENT_DOMAIN");
-        std::env::remove_var("AGENT_MANAGER_URLS");
-        std::env::remove_var("AGENT_MANAGER_TOKENS");
-    }
-
-    #[test]
-    #[serial]
-    fn test_config_struct_includes_infrastructure() {
-        std::env::remove_var("NON_TEE_INFRA");
-        // Clean up any leftover env vars from previous tests (especially from panicking tests)
-        std::env::remove_var("AGENT_MANAGER_URLS");
-        std::env::remove_var("AGENT_MANAGER_TOKENS");
-        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
-        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
-        let config = Config::from_env();
-
-        // Verify infrastructure config is part of Config struct
-        assert!(
-            !config.infrastructure.non_tee_infra,
-            "Config should include infrastructure with default TEE mode"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn test_config_struct_non_tee_mode() {
-        // Clean up any leftover env vars from other tests
-        std::env::remove_var("AGENT_MANAGER_URLS");
-        std::env::remove_var("AGENT_MANAGER_TOKENS");
-        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
-        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
-
-        std::env::set_var("NON_TEE_INFRA", "true");
-        std::env::set_var("AGENT_DOMAIN", "production.dev");
-
-        let config = Config::from_env();
-
-        assert!(
-            config.infrastructure.non_tee_infra,
-            "Config infrastructure should reflect NON_TEE_INFRA setting"
-        );
-
-        std::env::remove_var("NON_TEE_INFRA");
-        std::env::remove_var("AGENT_DOMAIN");
-        std::env::remove_var("AGENT_MANAGER_URLS");
-        std::env::remove_var("AGENT_MANAGER_TOKENS");
-    }
-
-    #[test]
-    #[serial]
-    fn test_agent_manager_type_detection_from_url() {
-        // Test that manager type uses explicit is_non_tee field (not URL pattern detection)
-
-        // Manager with is_non_tee=true should be detected as non-TEE
-        let non_tee_mgr = AgentManager {
-            url: "https://api.openclaw-dev.near.ai".to_string(),
-            token: "token1".to_string(),
-            is_non_tee: true,
-        };
-        assert!(
-            non_tee_mgr.get_is_non_tee(),
-            "Manager with is_non_tee=true should be non-TEE"
-        );
-
-        // Manager with is_non_tee=false should be detected as TEE
-        let tee_mgr = AgentManager {
-            url: "https://agents.example.com/api/crabshack".to_string(),
-            token: "token2".to_string(),
-            is_non_tee: false,
-        };
-        assert!(
-            !tee_mgr.get_is_non_tee(),
-            "Manager with is_non_tee=false should be TEE"
-        );
-
-        // Test that is_non_tee field is respected regardless of URL
-        let compose_mgr = AgentManager {
-            url: "https://compose.example.com".to_string(),
-            token: "token3".to_string(),
-            is_non_tee: true,
-        };
-        assert!(
-            compose_mgr.get_is_non_tee(),
-            "Manager with is_non_tee=true should be non-TEE even with generic URL"
-        );
     }
 
     #[test]

@@ -60,6 +60,8 @@ pub struct TestServerConfig {
     pub aml_service: Option<Arc<dyn services::aml::AmlRiskService>>,
     /// Optional AML report repository override for tests that need deterministic AML cache/allowlist state.
     pub aml_report_repo: Option<Arc<dyn services::aml::AmlReportRepository>>,
+    /// Enable confidential database writes/backfill for encryption tests.
+    pub database_encryption_write_enabled: Option<bool>,
 }
 
 /// Restrictive rate limit config for rate limit tests.
@@ -99,11 +101,17 @@ async fn create_test_server_and_db_inner(
             if std::env::var_os("ENCRYPTION_KEY").is_none() {
                 std::env::set_var("ENCRYPTION_KEY", TEST_ENCRYPTION_KEY);
             }
+            if std::env::var_os("DB_ENCRYPTION_KEY").is_none() {
+                std::env::set_var("DB_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY);
+            }
         })
         .await;
 
     // Load configuration
     let mut config = config::Config::from_env();
+    if let Some(enabled) = test_config.database_encryption_write_enabled {
+        config.database_encryption.write_enabled = enabled;
+    }
     if let Some(base_url) = test_config.email_resend_base_url.clone() {
         config.email_auth.resend_base_url = base_url;
     }
@@ -115,6 +123,14 @@ async fn create_test_server_and_db_inner(
     let db = database::Database::from_config(&config.database)
         .await
         .expect("Failed to connect to database");
+    let key = database::field_encryption::parse_key(&config.database_encryption.key)
+        .expect("test database encryption key must be valid");
+    db.pool()
+        .set_field_encryption(services::db_pool::FieldEncryptionConfig {
+            key,
+            key_id: config.database_encryption.key_id.clone(),
+            write_enabled: config.database_encryption.write_enabled,
+        });
 
     // Run migrations only once, even when tests run in parallel
     MIGRATIONS_INITIALIZED
@@ -223,7 +239,6 @@ async fn create_test_server_and_db_inner(
         system_configs_service.clone()
             as Arc<dyn services::system_configs::ports::SystemConfigsService>,
         config.agent.channel_relay_url.clone(),
-        config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
     // Initialize subscription service for testing
@@ -372,6 +387,7 @@ async fn create_test_server_and_db_inner(
 
     // Create application state
     let app_state = AppState {
+        db_pool: db.pool().clone(),
         oauth_service,
         email_auth_service,
         email_auth_trusted_proxy_count: config.email_auth.trusted_proxy_count,
@@ -774,6 +790,13 @@ pub async fn cleanup_user(db: &database::Database, user_email: &str) {
         .execute("DELETE FROM sessions WHERE user_id = $1", &[&user.id])
         .await
         .expect("delete user sessions");
+    client
+        .execute(
+            "DELETE FROM user_passkey_credentials WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("delete user passkey credentials");
     client
         .execute("DELETE FROM users WHERE id = $1", &[&user.id])
         .await

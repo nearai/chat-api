@@ -914,54 +914,6 @@ impl From<FileData> for FileGetResponse {
 // Agent Models
 // ============================================================================
 
-/// Request to create an agent instance (proxied to Agent API).
-/// The chat-api creates an API key on behalf of the user and configures the agent to use it.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct CreateInstanceRequest {
-    /// Image to use for the instance (null for default)
-    #[serde(default)]
-    pub image: Option<String>,
-    /// Instance name (null for auto-generated)
-    #[serde(default)]
-    pub name: Option<String>,
-    /// SSH public key
-    #[serde(default)]
-    pub ssh_pubkey: Option<String>,
-}
-
-/// Request to update an agent instance
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateInstanceRequest {
-    /// New instance name (optional)
-    pub name: Option<String>,
-    /// New public SSH key (optional)
-    pub public_ssh_key: Option<String>,
-}
-
-/// Agent API instance response (deserialized from external Agent API)
-#[derive(Debug, Deserialize)]
-pub struct AgentApiResponse {
-    pub instance: AgentApiInstance,
-    pub message: String,
-    pub stage: String,
-}
-
-/// Agent API instance data (deserialized from external Agent API)
-#[derive(Debug, Deserialize)]
-pub struct AgentApiInstance {
-    pub dashboard_url: String,
-    pub gateway_port: i32,
-    pub image: String,
-    pub image_digest: Option<String>,
-    pub name: String,
-    pub ssh_command: String,
-    pub ssh_port: i32,
-    pub token: String,
-    pub url: String,
-    #[serde(default)]
-    pub ssh_pubkey: Option<String>,
-}
-
 /// Instance status derived from connection info (dashboard_url indicates running instance)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]

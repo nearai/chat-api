@@ -30,6 +30,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
 
         let activity_type = request.activity_type.as_str();
         let auth_method = request.auth_method.map(|m| m.as_str().to_string());
+        let metadata = request.metadata;
 
         client
             .execute(
@@ -37,12 +38,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                 INSERT INTO user_activity_log (user_id, activity_type, auth_method, metadata)
                 VALUES ($1, $2, $3, $4)
                 "#,
-                &[
-                    &request.user_id,
-                    &activity_type,
-                    &auth_method,
-                    &request.metadata,
-                ],
+                &[&request.user_id, &activity_type, &auth_method, &metadata],
             )
             .await?;
 
@@ -65,6 +61,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
 
         let client = self.pool.get().await?;
         let activity_type = request.activity_type.as_str();
+        let metadata = request.metadata;
 
         // Use a single query to atomically:
         // 1. Count activities in the sliding window
@@ -102,7 +99,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                     &activity_type,
                     &request.window_duration.num_seconds(),
                     &(request.limit as i64),
-                    &request.metadata,
+                    &metadata,
                 ],
             )
             .await?;
@@ -356,17 +353,19 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
             )
             .await?;
 
-        Ok(rows
-            .iter()
-            .map(|row| ActivityLogEntry {
-                id: row.get(0),
-                user_id: row.get(1),
-                activity_type: row.get(2),
-                auth_method: row.get(3),
-                metadata: row.get(4),
-                created_at: row.get(5),
+        rows.iter()
+            .map(|row| {
+                let id = row.get(0);
+                Ok(ActivityLogEntry {
+                    id,
+                    user_id: row.get(1),
+                    activity_type: row.get(2),
+                    auth_method: row.get(3),
+                    metadata: row.get(4),
+                    created_at: row.get(5),
+                })
             })
-            .collect())
+            .collect()
     }
 
     async fn get_top_active_users(

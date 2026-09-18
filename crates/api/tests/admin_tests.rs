@@ -9,6 +9,113 @@ use services::user::ports::UserRepository;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn database_encryption_routes_require_admin() {
+    let server = create_test_server().await;
+    let response = server
+        .post("/v1/admin/database-encryption/scan")
+        .json(&json!({"scope": {}}))
+        .await;
+    assert_eq!(response.status_code(), 401);
+}
+
+#[tokio::test]
+async fn database_encryption_scan_and_write_gate_are_admin_only_and_safe() {
+    let server = create_test_server().await;
+    let token = mock_login(&server, "db-encryption-admin@admin.org").await;
+    let auth = http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
+    let scan = server
+        .post("/v1/admin/database-encryption/scan")
+        .add_header(http::HeaderName::from_static("authorization"), auth.clone())
+        .json(&json!({"scope":{"tables":["files"]},"include_approved_plaintext":true}))
+        .await;
+    assert_eq!(scan.status_code(), 200);
+    let body: serde_json::Value = scan.json();
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["unclassified"], json!([]), "{body}");
+    assert_eq!(body["legacy_confidential"], json!([]), "{body}");
+    assert!(body.get("encryption_required").is_none(), "{body}");
+    assert!(body["approved_plaintext"]
+        .as_array()
+        .is_some_and(|fields| fields.iter().any(|field| field["table"] == "users"
+            && field["column"] == "email"
+            && field["classification"] == "approved_plaintext")));
+    assert!(body["fields"]
+        .as_array()
+        .is_some_and(|fields| fields.iter().all(|field| field.get("sample").is_none())));
+
+    let bounded_verify = server
+        .post("/v1/admin/database-encryption/jobs")
+        .add_header(http::HeaderName::from_static("authorization"), auth.clone())
+        .json(
+            &json!({"mode":"verify","scope":{},"batch_size":10,"max_rows":1,"actions":["verify"]}),
+        )
+        .await;
+    assert_eq!(bounded_verify.status_code(), 400);
+    assert_eq!(
+        bounded_verify.json::<serde_json::Value>()["error"]["message"],
+        "verify jobs cannot set max_rows"
+    );
+
+    let execute = server
+        .post("/v1/admin/database-encryption/jobs")
+        .add_header(http::HeaderName::from_static("authorization"), auth)
+        .json(&json!({"mode":"execute","scope":{"tables":["files"]},"batch_size":10,"actions":["encrypt"]}))
+        .await;
+    assert_eq!(execute.status_code(), 400);
+}
+
+#[tokio::test]
+async fn database_encryption_job_backfills_and_verifies_without_values_in_progress() {
+    let (server, db) = create_test_server_and_db(common::TestServerConfig {
+        database_encryption_write_enabled: Some(true),
+        ..Default::default()
+    })
+    .await;
+    let user_id = Uuid::new_v4();
+    let file_id = format!("file-{user_id}");
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "INSERT INTO users(id,email) VALUES($1,$2)",
+            &[&user_id, &format!("backfill-{user_id}@example.com")],
+        )
+        .await
+        .unwrap();
+    client.execute("INSERT INTO files(id,user_id,bytes,file_created_at,filename,purpose) VALUES($1,$2,1,1,'backfill-secret.txt','assistants')", &[&file_id, &user_id]).await.unwrap();
+    drop(client);
+    let token = mock_login(&server, "db-backfill-admin@admin.org").await;
+    let auth = http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
+    let response = server.post("/v1/admin/database-encryption/jobs").add_header(http::HeaderName::from_static("authorization"), auth.clone()).json(&json!({"mode":"execute","scope":{"tables":["files"]},"batch_size":10,"actions":["encrypt"]})).await;
+    assert_eq!(response.status_code(), 202);
+    let accepted: serde_json::Value = response.json();
+    let job_id = accepted["job_id"].as_str().unwrap().to_string();
+    let mut completed = None;
+    for _ in 0..100 {
+        let response = server
+            .get(&format!("/v1/admin/database-encryption/jobs/{job_id}"))
+            .add_header(http::HeaderName::from_static("authorization"), auth.clone())
+            .await;
+        let body: serde_json::Value = response.json();
+        if body["status"] == "completed" || body["status"] == "failed" {
+            completed = Some(body);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let completed = completed.expect("job completed");
+    assert_eq!(completed["status"], "completed", "{completed}");
+    assert_eq!(completed["progress"]["encrypted"], 1, "{completed}");
+    assert!(!completed.to_string().contains("backfill-secret.txt"));
+    let client = db.pool().get().await.unwrap();
+    let stored: String = client
+        .query_one("SELECT filename FROM files WHERE id=$1", &[&file_id])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!stored.contains("backfill-secret.txt"));
+}
+
+#[tokio::test]
 async fn test_admin_users_list_with_admin_account() {
     let server = create_test_server().await;
 
@@ -764,103 +871,4 @@ async fn test_admin_lifecycle_change_reason_too_long_returns_400() {
         "Expected change_reason length validation error, got: {}",
         message
     );
-}
-
-#[tokio::test]
-async fn test_admin_patch_instance_config_requires_admin() {
-    let server = create_test_server().await;
-    let user_token = mock_login(&server, "patch_config_not_admin@example.com").await;
-
-    let response = server
-        .patch(&format!(
-            "/v1/admin/agents/instances/{}/config",
-            Uuid::new_v4()
-        ))
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
-        )
-        .json(&json!({"service_type": "ironclaw"}))
-        .await;
-
-    assert_eq!(response.status_code(), 403);
-}
-
-#[tokio::test]
-async fn test_admin_get_instance_config_requires_admin() {
-    let server = create_test_server().await;
-    let user_token = mock_login(&server, "get_config_not_admin@example.com").await;
-
-    let response = server
-        .get(&format!(
-            "/v1/admin/agents/instances/{}/config",
-            Uuid::new_v4()
-        ))
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
-        )
-        .await;
-
-    assert_eq!(response.status_code(), 403);
-}
-
-#[tokio::test]
-async fn test_admin_get_instance_config_validates_before_reaching_compose_api() {
-    let server = create_test_server().await;
-    let admin_token = mock_login(&server, "get_config_admin@admin.org").await;
-    let auth = |req: axum_test::TestRequest| {
-        req.add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
-    };
-
-    // Malformed id is rejected before any lookup.
-    let response = auth(server.get("/v1/admin/agents/instances/not-a-uuid/config")).await;
-    assert_eq!(response.status_code(), 400);
-
-    // A well-formed id for an instance that does not exist is a 404, not a forward.
-    let response = auth(server.get(&format!(
-        "/v1/admin/agents/instances/{}/config",
-        Uuid::new_v4()
-    )))
-    .await;
-    assert_eq!(response.status_code(), 404);
-}
-
-#[tokio::test]
-async fn test_admin_patch_instance_config_validates_before_reaching_compose_api() {
-    let server = create_test_server().await;
-    let admin_token = mock_login(&server, "patch_config_admin@admin.org").await;
-    let auth = |req: axum_test::TestRequest| {
-        req.add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
-    };
-
-    // Malformed id is rejected before any lookup.
-    let response = auth(server.patch("/v1/admin/agents/instances/not-a-uuid/config"))
-        .json(&json!({"service_type": "ironclaw"}))
-        .await;
-    assert_eq!(response.status_code(), 400);
-
-    // A non-object body cannot be a valid compose-api patch, so it never leaves chat-api.
-    let response = auth(server.patch(&format!(
-        "/v1/admin/agents/instances/{}/config",
-        Uuid::new_v4()
-    )))
-    .json(&json!("not-an-object"))
-    .await;
-    assert_eq!(response.status_code(), 400);
-
-    // A well-formed id for an instance that does not exist is a 404, not a forward.
-    let response = auth(server.patch(&format!(
-        "/v1/admin/agents/instances/{}/config",
-        Uuid::new_v4()
-    )))
-    .json(&json!({"service_type": "ironclaw"}))
-    .await;
-    assert_eq!(response.status_code(), 404);
 }
