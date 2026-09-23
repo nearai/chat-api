@@ -6,7 +6,7 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "NEAR AI Chat API",
-        description = "A comprehensive chat API for Private Chat.",
+        description = "An authenticated OpenAI-compatible inference proxy with temporary Private Chat read views and established DELETE operations for migration and export.",
         version = "1.0.0",
         contact(name = "NEAR AI Team", email = "support@near.ai"),
         license(name = "MIT",)
@@ -25,34 +25,21 @@ use utoipa::OpenApi;
         crate::routes::users::get_user_status,
         crate::routes::users::delete_current_user,
         crate::routes::users::get_my_usage,
-        // Conversation endpoints
-        crate::routes::api::create_conversation,
+        // Temporary Stage I Conversation read endpoints and retained DELETE operations
         crate::routes::api::list_conversations,
         crate::routes::api::get_conversation,
-        crate::routes::api::update_conversation,
-        crate::routes::api::delete_conversation,
-        crate::routes::api::create_conversation_share,
-        crate::routes::api::list_conversation_shares,
-        crate::routes::api::delete_conversation_share,
-        crate::routes::api::create_conversation_items,
         crate::routes::api::list_conversation_items,
-        crate::routes::api::pin_conversation,
-        crate::routes::api::unpin_conversation,
-        crate::routes::api::archive_conversation,
-        crate::routes::api::unarchive_conversation,
-        crate::routes::api::clone_conversation,
-        // Share group endpoints
-        crate::routes::api::create_share_group,
+        crate::routes::api::list_conversation_shares,
+        crate::routes::api::delete_conversation,
+        crate::routes::api::delete_conversation_share,
         crate::routes::api::list_share_groups,
-        crate::routes::api::update_share_group,
         crate::routes::api::delete_share_group,
         crate::routes::api::list_shared_with_me,
-        // File endpoints
-        crate::routes::api::upload_file,
+        // Temporary Stage I File read endpoints and retained DELETE operation
         crate::routes::api::list_files,
         crate::routes::api::get_file,
-        crate::routes::api::delete_file,
         crate::routes::api::get_file_content,
+        crate::routes::api::delete_file,
         // Proxy endpoints
         crate::routes::api::proxy_responses,
         crate::routes::api::proxy_chat_completions,
@@ -170,20 +157,8 @@ use utoipa::OpenApi;
         // Admin usage models (UserUsageResponse shared with /users/me/usage)
         crate::models::UserUsageResponse,
         crate::routes::admin::TopUsageResponse,
-        // Conversation share models
         crate::routes::api::ErrorResponse,
-        crate::routes::api::ShareRecipientPayload,
-        crate::routes::api::ShareTargetPayload,
-        crate::routes::api::CreateConversationShareRequest,
-        crate::routes::api::ConversationShareResponse,
-        crate::routes::api::OwnerInfo,
-        crate::routes::api::ConversationSharesListResponse,
-        // Share group models
-        crate::routes::api::CreateShareGroupRequest,
-        crate::routes::api::UpdateShareGroupRequest,
-        crate::routes::api::ShareGroupResponse,
-        crate::routes::api::SharedConversationInfo,
-        // File models
+        // Temporary Conversation and File migration models
         crate::models::FileListResponse,
         crate::models::FileGetResponse,
         crate::routes::api::ListFilesParams,
@@ -262,9 +237,9 @@ use utoipa::OpenApi;
         (name = "Health", description = "Health check and service status endpoints"),
         (name = "Auth", description = "OAuth authentication endpoints"),
         (name = "Users", description = "User profile management endpoints"),
-        (name = "Conversations", description = "Conversation management endpoints (supports optional authentication for public sharing)"),
-        (name = "Share Groups", description = "Share group management endpoints"),
-        (name = "Files", description = "File management endpoints"),
+        (name = "Conversations", description = "Temporary Conversation reads, including existing public/shared access where its ACL permits it, and established DELETE operations remain available for migration/export. Other Conversation mutations and unsupported legacy paths return 410 Gone."),
+        (name = "Share Groups", description = "Existing sharing reads and DELETE /v1/share-groups/{group_id} remain available during Stage I. Share/group creation and updates return 410 Gone."),
+        (name = "Files", description = "Temporary owner-only File views and DELETE /v1/files/{file_id} remain available for migration/export. File uploads, other mutations, and unsupported legacy paths return 410 Gone."),
         (name = "Proxy", description = "Proxy endpoints for OpenAI-compatible APIs"),
         (name = "Credits", description = "Credit purchase and balance endpoints"),
         (name = "Subscriptions", description = "Subscription management endpoints"),
@@ -292,6 +267,87 @@ impl utoipa::Modify for SecurityAddon {
                         .build(),
                 ),
             )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiDoc;
+    use utoipa::OpenApi;
+
+    #[test]
+    fn documents_stage_one_views_and_retained_delete_operations() {
+        let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serialization");
+
+        for path in [
+            "/v1/conversations",
+            "/v1/conversations/{conversation_id}",
+            "/v1/conversations/{conversation_id}/items",
+            "/v1/conversations/{conversation_id}/shares",
+            "/v1/share-groups",
+            "/v1/shared-with-me",
+            "/v1/files",
+            "/v1/files/{file_id}",
+            "/v1/files/{file_id}/content",
+        ] {
+            let operation = spec["paths"]
+                .get(path)
+                .and_then(|operations| operations.get("get"));
+            assert!(
+                operation.is_some(),
+                "retained GET operation {path} must be in OpenAPI"
+            );
+            assert!(
+                operation.unwrap()["responses"]["200"]["headers"]["Cache-Control"].is_object(),
+                "retained GET operation {path} must document Cache-Control: no-store"
+            );
+        }
+
+        for (path, method, status) in [
+            ("/v1/conversations/{conversation_id}", "delete", "200"),
+            (
+                "/v1/conversations/{conversation_id}/shares/{share_id}",
+                "delete",
+                "204",
+            ),
+            ("/v1/share-groups/{group_id}", "delete", "204"),
+            ("/v1/files/{file_id}", "delete", "200"),
+        ] {
+            let operation = spec["paths"]
+                .get(path)
+                .and_then(|operations| operations.get(method));
+            assert!(
+                operation.is_some(),
+                "retained {method} operation {path} must be in OpenAPI"
+            );
+            assert!(
+                operation.unwrap()["responses"][status]["headers"]["Cache-Control"].is_object(),
+                "retained {method} operation {path} must document Cache-Control: no-store"
+            );
+        }
+
+        for (path, method) in [
+            (
+                "/v1/conversations/{conversation_id}/shares/{share_id}",
+                "post",
+            ),
+            ("/v1/conversations/{conversation_id}/pin", "post"),
+            ("/v1/conversations/{conversation_id}/pin", "delete"),
+            ("/v1/conversations/{conversation_id}/archive", "post"),
+            ("/v1/conversations/{conversation_id}/archive", "delete"),
+            ("/v1/conversations/{conversation_id}/clone", "post"),
+            ("/v1/share-groups", "post"),
+            ("/v1/share-groups/{group_id}", "patch"),
+            ("/v1/shared-with-me", "post"),
+        ] {
+            assert!(
+                spec["paths"]
+                    .get(path)
+                    .and_then(|operations| operations.get(method))
+                    .is_none(),
+                "disabled stateful or sharing operation must not be in OpenAPI: {method} {path}"
+            );
         }
     }
 }
