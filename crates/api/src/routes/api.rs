@@ -297,13 +297,13 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-/// Message returned by every disabled stateful mutation route.
+/// Message returned by every disabled Stage I stateful endpoint.
 ///
 /// Temporary stateful read views remain available for the Stage I export
-/// window. Disabled mutations return this clear migration signal rather than a
+/// window. Disabled endpoints return this clear migration signal rather than a
 /// proxy error from Cloud API.
 pub const STATEFUL_API_RETIRED_MESSAGE: &str =
-    "This stateful API has been retired. Use /v1/responses with store: false and include all context in each request.";
+    "This stateful API has been retired. For inference, use /v1/responses with store: false and include all context in each request. Only documented owner-scoped migration/export views remain temporarily available.";
 
 fn with_no_store_cache_control(mut response: Response) -> Response {
     response.headers_mut().insert(
