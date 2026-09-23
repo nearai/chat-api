@@ -524,6 +524,24 @@ async fn test_responses_endpoint_respects_model_allowlist() {
         error.contains("gpt-4o") && error.contains("not available"),
         "Error message should mention the model"
     );
+
+    // Stable machine-readable contract clients rely on to render an "upgrade
+    // your plan" prompt instead of a generic "model failed to respond" error.
+    assert_eq!(
+        body.get("code").and_then(|value| value.as_str()),
+        Some("model_not_allowed_in_plan"),
+        "Plan-gated 403 must carry the stable `code`"
+    );
+    assert_eq!(
+        body.get("model").and_then(|value| value.as_str()),
+        Some("gpt-4o"),
+        "Plan-gated 403 must echo the requested `model`"
+    );
+    assert_eq!(
+        body.get("plan").and_then(|value| value.as_str()),
+        Some("basic"),
+        "Plan-gated 403 must include the user's `plan`"
+    );
 }
 
 #[tokio::test]
