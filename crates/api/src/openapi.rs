@@ -6,7 +6,7 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "NEAR AI Chat API",
-        description = "An authenticated OpenAI-compatible inference proxy with temporary owner-only Private Chat views and established DELETE operations for migration and export.",
+        description = "An authenticated OpenAI-compatible inference proxy with temporary Private Chat read views and established DELETE operations for migration and export.",
         version = "1.0.0",
         contact(name = "NEAR AI Team", email = "support@near.ai"),
         license(name = "MIT",)
@@ -25,14 +25,17 @@ use utoipa::OpenApi;
         crate::routes::users::get_user_status,
         crate::routes::users::delete_current_user,
         crate::routes::users::get_my_usage,
-        // Temporary Stage I owner-only Conversation endpoints and retained DELETE operations
+        // Temporary Stage I Conversation read endpoints and retained DELETE operations
         crate::routes::api::list_conversations,
         crate::routes::api::get_conversation,
         crate::routes::api::list_conversation_items,
+        crate::routes::api::list_conversation_shares,
         crate::routes::api::delete_conversation,
         crate::routes::api::delete_conversation_share,
+        crate::routes::api::list_share_groups,
         crate::routes::api::delete_share_group,
-        // Temporary Stage I owner-only File endpoints and retained DELETE operation
+        crate::routes::api::list_shared_with_me,
+        // Temporary Stage I File read endpoints and retained DELETE operation
         crate::routes::api::list_files,
         crate::routes::api::get_file,
         crate::routes::api::get_file_content,
@@ -155,7 +158,7 @@ use utoipa::OpenApi;
         crate::models::UserUsageResponse,
         crate::routes::admin::TopUsageResponse,
         crate::routes::api::ErrorResponse,
-        // Temporary owner-only Conversation and File models
+        // Temporary Conversation and File migration models
         crate::models::FileListResponse,
         crate::models::FileGetResponse,
         crate::routes::api::ListFilesParams,
@@ -234,8 +237,8 @@ use utoipa::OpenApi;
         (name = "Health", description = "Health check and service status endpoints"),
         (name = "Auth", description = "OAuth authentication endpoints"),
         (name = "Users", description = "User profile management endpoints"),
-        (name = "Conversations", description = "Temporary owner-only Conversation views and established DELETE operations remain available for migration/export. Other Conversation mutations, all sharing routes except DELETE /v1/conversations/{conversation_id}/shares/{share_id}, and unsupported legacy paths return 410 Gone."),
-        (name = "Share Groups", description = "Only DELETE /v1/share-groups/{group_id} remains available during Stage I. Other share-group routes return 410 Gone."),
+        (name = "Conversations", description = "Temporary Conversation reads, including existing public/shared access where its ACL permits it, and established DELETE operations remain available for migration/export. Other Conversation mutations and unsupported legacy paths return 410 Gone."),
+        (name = "Share Groups", description = "Existing sharing reads and DELETE /v1/share-groups/{group_id} remain available during Stage I. Share/group creation and updates return 410 Gone."),
         (name = "Files", description = "Temporary owner-only File views and DELETE /v1/files/{file_id} remain available for migration/export. File uploads, other mutations, and unsupported legacy paths return 410 Gone."),
         (name = "Proxy", description = "Proxy endpoints for OpenAI-compatible APIs"),
         (name = "Credits", description = "Credit purchase and balance endpoints"),
@@ -281,13 +284,23 @@ mod tests {
             "/v1/conversations",
             "/v1/conversations/{conversation_id}",
             "/v1/conversations/{conversation_id}/items",
+            "/v1/conversations/{conversation_id}/shares",
+            "/v1/share-groups",
+            "/v1/shared-with-me",
             "/v1/files",
             "/v1/files/{file_id}",
             "/v1/files/{file_id}/content",
         ] {
+            let operation = spec["paths"]
+                .get(path)
+                .and_then(|operations| operations.get("get"));
             assert!(
-                spec["paths"].get(path).is_some(),
-                "temporary read path {path} must be in OpenAPI"
+                operation.is_some(),
+                "retained GET operation {path} must be in OpenAPI"
+            );
+            assert!(
+                operation.unwrap()["responses"]["200"]["headers"]["Cache-Control"].is_object(),
+                "retained GET operation {path} must document Cache-Control: no-store"
             );
         }
 
@@ -315,7 +328,6 @@ mod tests {
         }
 
         for (path, method) in [
-            ("/v1/conversations/{conversation_id}/shares", "get"),
             (
                 "/v1/conversations/{conversation_id}/shares/{share_id}",
                 "post",
@@ -327,7 +339,7 @@ mod tests {
             ("/v1/conversations/{conversation_id}/clone", "post"),
             ("/v1/share-groups", "post"),
             ("/v1/share-groups/{group_id}", "patch"),
-            ("/v1/shared-with-me", "get"),
+            ("/v1/shared-with-me", "post"),
         ] {
             assert!(
                 spec["paths"]

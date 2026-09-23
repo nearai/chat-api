@@ -120,7 +120,7 @@ async fn stage_one_fixture() -> (TestServer, MockServer, String, String) {
 }
 
 #[tokio::test]
-async fn stage_one_owner_conversation_views_remain_readable() {
+async fn stage_one_conversation_views_remain_readable() {
     let (server, _upstream, token, conversation_id) = stage_one_fixture().await;
     let auth = bearer(&token);
 
@@ -144,16 +144,10 @@ async fn stage_one_owner_conversation_views_remain_readable() {
         assert_eq!(response.status_code(), StatusCode::OK, "GET {path}");
         assert_no_store(&response);
     }
-
-    let unauthenticated = server
-        .get(&format!("/v1/conversations/{conversation_id}"))
-        .await;
-    assert_eq!(unauthenticated.status_code(), StatusCode::UNAUTHORIZED);
-    assert_no_store(&unauthenticated);
 }
 
 #[tokio::test]
-async fn conversation_detail_and_items_are_owner_only() {
+async fn conversation_detail_and_items_honor_existing_access_checks() {
     let (server, _upstream, _owner_token, conversation_id) = stage_one_fixture().await;
     let other_email = format!("stage-one-non-owner-{}@example.com", Uuid::new_v4());
     let other_token = mock_login(&server, &other_email).await;
@@ -173,12 +167,19 @@ async fn conversation_detail_and_items_are_owner_only() {
 }
 
 #[tokio::test]
-async fn anonymous_conversation_reads_require_session_auth() {
+async fn anonymous_private_or_session_scoped_reads_do_not_gain_access() {
     let (server, _upstream, _token, conversation_id) = stage_one_fixture().await;
 
     for path in [
         format!("/v1/conversations/{conversation_id}"),
         format!("/v1/conversations/{conversation_id}/items"),
+    ] {
+        let response = server.get(&path).await;
+        assert_eq!(response.status_code(), StatusCode::NOT_FOUND, "GET {path}");
+        assert_no_store(&response);
+    }
+
+    for path in [
         format!("/v1/conversations/{conversation_id}/unknown-child"),
         format!("/v1/conversations/{conversation_id}/shares"),
         "/v1/conversations/".to_string(),
@@ -196,6 +197,105 @@ async fn anonymous_conversation_reads_require_session_auth() {
 }
 
 #[tokio::test]
+async fn stage_one_shared_and_public_reads_remain_available() {
+    let (server, _upstream, db, owner_token, conversation_id, owner_user_id) =
+        stage_one_fixture_with_db().await;
+    let sharee_email = format!("stage-one-sharee-{}@example.com", Uuid::new_v4());
+    let sharee_token = mock_login(&server, &sharee_email).await;
+    let shares = db.conversation_share_repository();
+
+    shares
+        .create_share(NewConversationShare {
+            conversation_id: conversation_id.clone(),
+            owner_user_id,
+            share_type: ShareType::Direct,
+            permission: SharePermission::Read,
+            recipient: Some(ShareRecipient {
+                kind: ShareRecipientKind::Email,
+                value: sharee_email,
+            }),
+            group_id: None,
+            org_email_pattern: None,
+        })
+        .await
+        .expect("seed direct share");
+
+    let sharee_auth = bearer(&sharee_token);
+    for path in [
+        format!("/v1/conversations/{conversation_id}"),
+        format!("/v1/conversations/{conversation_id}/items"),
+    ] {
+        let response = server
+            .get(&path)
+            .add_header(sharee_auth.0.clone(), sharee_auth.1.clone())
+            .await;
+        assert_eq!(response.status_code(), StatusCode::OK, "shared GET {path}");
+        assert_no_store(&response);
+    }
+
+    shares
+        .create_share(NewConversationShare {
+            conversation_id: conversation_id.clone(),
+            owner_user_id,
+            share_type: ShareType::Public,
+            permission: SharePermission::Read,
+            recipient: None,
+            group_id: None,
+            org_email_pattern: None,
+        })
+        .await
+        .expect("seed public share");
+
+    for path in [
+        format!("/v1/conversations/{conversation_id}"),
+        format!("/v1/conversations/{conversation_id}/items"),
+    ] {
+        let response = server.get(&path).await;
+        assert_eq!(response.status_code(), StatusCode::OK, "public GET {path}");
+        assert_no_store(&response);
+    }
+
+    shares
+        .create_group(
+            owner_user_id,
+            &format!("stage-one-readable-group-{}", Uuid::new_v4()),
+            &[ShareRecipient {
+                kind: ShareRecipientKind::Email,
+                value: format!("stage-one-group-member-{}@example.com", Uuid::new_v4()),
+            }],
+        )
+        .await
+        .expect("seed share group");
+
+    let owner_auth = bearer(&owner_token);
+    for path in [
+        format!("/v1/conversations/{conversation_id}/shares"),
+        "/v1/share-groups".to_string(),
+    ] {
+        let response = server
+            .get(&path)
+            .add_header(owner_auth.0.clone(), owner_auth.1.clone())
+            .await;
+        assert_eq!(response.status_code(), StatusCode::OK, "owner GET {path}");
+        assert_no_store(&response);
+    }
+
+    let response = server
+        .get("/v1/shared-with-me")
+        .add_header(sharee_auth.0, sharee_auth.1)
+        .await;
+    assert_eq!(response.status_code(), StatusCode::OK);
+    assert_no_store(&response);
+    let shared: Vec<Value> = response.json();
+    assert!(
+        shared
+            .iter()
+            .any(|conversation| conversation["conversation_id"] == conversation_id),
+        "shared-with-me response should include the directly shared conversation"
+    );
+}
+
+#[tokio::test]
 async fn stage_one_retired_conversation_and_sharing_surfaces_are_gone() {
     let (server, _upstream, token, conversation_id) = stage_one_fixture().await;
     let auth = bearer(&token);
@@ -209,10 +309,6 @@ async fn stage_one_retired_conversation_and_sharing_surfaces_are_gone() {
         ),
         (
             Method::POST,
-            format!("/v1/conversations/{conversation_id}/shares"),
-        ),
-        (
-            Method::GET,
             format!("/v1/conversations/{conversation_id}/shares"),
         ),
         (
@@ -236,7 +332,6 @@ async fn stage_one_retired_conversation_and_sharing_surfaces_are_gone() {
             format!("/v1/conversations/{conversation_id}/clone"),
         ),
         (Method::POST, "/v1/share-groups".to_string()),
-        (Method::GET, "/v1/share-groups".to_string()),
         (
             Method::PATCH,
             format!("/v1/share-groups/{}", Uuid::new_v4()),
@@ -263,7 +358,6 @@ async fn stage_one_retired_conversation_and_sharing_surfaces_are_gone() {
             format!("/v1/share-groups/{}/unknown-child", Uuid::new_v4()),
         ),
         (Method::POST, "/v1/shared-with-me".to_string()),
-        (Method::GET, "/v1/shared-with-me".to_string()),
         (Method::GET, "/v1/shared-with-me/unknown-child".to_string()),
         // Axum nesting does not cover the trailing-slash prefix, so those
         // exact legacy namespace paths are explicitly reserved too.

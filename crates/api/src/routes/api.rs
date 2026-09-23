@@ -95,12 +95,25 @@ mod openapi_errors {
 use openapi_errors::*;
 use openapi_tags::*;
 
+/// Create read routes that preserve the existing optional-auth sharing contract.
+///
+/// Authenticated callers retain their owner/share/public access checks, while
+/// unauthenticated callers may read only publicly shared Conversations.
+pub fn create_optional_auth_router() -> Router<crate::state::AppState> {
+    Router::new()
+        .route("/v1/conversations/{conversation_id}", get(get_conversation))
+        .route(
+            "/v1/conversations/{conversation_id}/items",
+            get(list_conversation_items),
+        )
+}
+
 /// Create the Stage I stateful API surface.
 ///
-/// Owner-only Conversation and File views remain available temporarily for
-/// private-chat export, along with four established DELETE operations. All
-/// other sharing routes and stateful mutations return the migration response.
-/// This router keeps that response scoped to the legacy stateful namespaces, so
+/// Existing Conversation, File, and sharing read views remain available
+/// temporarily for private-chat export, along with four established DELETE
+/// operations. Other stateful mutations return the migration response. This
+/// router keeps that response scoped to the legacy stateful namespaces, so
 /// unsupported methods and descendants cannot fall through to unrelated app
 /// routes.
 fn create_stage_one_stateful_router() -> Router<crate::state::AppState> {
@@ -116,21 +129,23 @@ fn create_stage_one_stateful_router() -> Router<crate::state::AppState> {
         .route("/batch", any(retired_stateful_api))
         .route(
             "/{conversation_id}",
-            get(get_conversation)
-                .post(retired_stateful_api)
+            post(retired_stateful_api)
                 .delete(delete_conversation)
                 .fallback(retired_stateful_api),
         )
-        .route("/{conversation_id}/shares", any(retired_stateful_api))
+        .route(
+            "/{conversation_id}/shares",
+            get(list_conversation_shares)
+                .post(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
         .route(
             "/{conversation_id}/shares/{share_id}",
             delete(delete_conversation_share).fallback(retired_stateful_api),
         )
         .route(
             "/{conversation_id}/items",
-            get(list_conversation_items)
-                .post(retired_stateful_api)
-                .fallback(retired_stateful_api),
+            post(retired_stateful_api).fallback(retired_stateful_api),
         )
         .route(
             "/{conversation_id}/pin",
@@ -151,7 +166,12 @@ fn create_stage_one_stateful_router() -> Router<crate::state::AppState> {
         .fallback(retired_stateful_api);
 
     let share_groups_router = Router::new()
-        .route("/", any(retired_stateful_api))
+        .route(
+            "/",
+            get(list_share_groups)
+                .post(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
         .route(
             "/{group_id}",
             patch(retired_stateful_api)
@@ -180,7 +200,7 @@ fn create_stage_one_stateful_router() -> Router<crate::state::AppState> {
         .fallback(retired_stateful_api);
 
     let shared_with_me_router = Router::new()
-        .route("/", any(retired_stateful_api))
+        .route("/", get(list_shared_with_me).fallback(retired_stateful_api))
         .fallback(retired_stateful_api);
 
     Router::new()
@@ -200,9 +220,9 @@ fn create_stage_one_stateful_router() -> Router<crate::state::AppState> {
 /// - Chat completions and images: dual auth + subscription + rate limited
 /// - Responses: dual auth + subscription + rate limited, always no-store
 /// - Model list, models, signature: dual auth only (not rate limited)
-/// - Temporary owner-only Conversation and File views plus established DELETE
-///   operations: session auth; pin/archive and other mutations, all other
-///   sharing routes, and unsupported legacy paths return 410
+/// - Temporary Conversation, File, and sharing read views plus established
+///   DELETE operations: their historical auth/ACL boundaries remain; all other
+///   mutations and unsupported legacy paths return 410
 pub fn create_api_router(
     rate_limit_state: crate::middleware::RateLimitState,
     dual_auth_state: crate::middleware::DualAuthState,
@@ -300,10 +320,10 @@ pub struct ErrorResponse {
 /// Message returned by every disabled Stage I stateful endpoint.
 ///
 /// Temporary stateful read views remain available for the Stage I export
-/// window. Disabled endpoints return this clear migration signal rather than a
-/// proxy error from Cloud API.
+/// window. Retired mutations and unsupported legacy paths return this clear
+/// migration signal rather than a proxy error from Cloud API.
 pub const STATEFUL_API_RETIRED_MESSAGE: &str =
-    "This stateful API has been retired. For inference, use /v1/responses with store: false and include all context in each request. Only documented owner-scoped migration/export views remain temporarily available.";
+    "This stateful API has been retired. For inference, use /v1/responses with store: false and include all context in each request. Documented migration/export read views remain temporarily available.";
 
 fn with_no_store_cache_control(mut response: Response) -> Response {
     response.headers_mut().insert(
@@ -826,7 +846,9 @@ async fn update_conversation(
     path = "/v1/conversations",
     tag = CONVERSATIONS,
     responses(
-        (status = 200, description = "List of conversations retrieved successfully", body = Vec<serde_json::Value>),
+        (status = 200, description = "List of conversations retrieved successfully", body = Vec<serde_json::Value>,
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
@@ -868,13 +890,12 @@ async fn list_conversations(
     Ok(Json(conversations).into_response())
 }
 
-/// Get a conversation for an authenticated user and fetch details via service/OpenAI.
-///
-/// Only the Conversation owner may use this temporary export view during the
-/// Stage I window. Public and shared access are not exposed here.
+/// Get a Conversation through its existing optional-auth read contract.
 ///
 /// # Authentication
-/// Returns the conversation only when the session user owns it.
+/// - Authenticated callers may read Conversations they own, that are shared
+///   with them, or that are public.
+/// - Unauthenticated callers may read only publicly shared Conversations.
 #[utoipa::path(
     get,
     path = "/v1/conversations/{conversation_id}",
@@ -883,27 +904,36 @@ async fn list_conversations(
         ("conversation_id" = String, Path, description = "ID of the conversation to retrieve")
     ),
     responses(
-        (status = 200, description = "Conversation retrieved successfully", body = serde_json::Value),
-        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 200, description = "Conversation retrieved successfully", body = serde_json::Value,
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
+        (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared", body = ErrorResponse),
         (status = 404, description = CONVERSATION_NOT_FOUND)
     ),
     security(
+        (),
         ("session_token" = [])
     )
 )]
 async fn get_conversation(
     State(state): State<crate::state::AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<Option<AuthenticatedUser>>,
     Path(conversation_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, Response> {
     tracing::info!(
-        "get_conversation called for user_id={}, conversation_id={}",
-        user.user_id,
+        "get_conversation called for user_id={:?}, conversation_id={}",
+        user.as_ref().map(|user| user.user_id),
         conversation_id
     );
 
-    validate_owner_conversation(&state, &user, &conversation_id).await?;
+    validate_conversation_access_optional_auth(
+        &state,
+        user.as_ref(),
+        &conversation_id,
+        SharePermission::Read,
+    )
+    .await?;
 
     let conversation =
         fetch_conversation_from_proxy(&state, &conversation_id, headers.clone()).await?;
@@ -1098,7 +1128,9 @@ async fn create_conversation_share(
         ("conversation_id" = String, Path, description = "ID of the conversation to list shares for")
     ),
     responses(
-        (status = 200, description = "List of shares retrieved successfully", body = ConversationSharesListResponse),
+        (status = 200, description = "List of shares retrieved successfully", body = ConversationSharesListResponse,
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
         (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse)
@@ -1107,7 +1139,6 @@ async fn create_conversation_share(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)] // Sharing reads are removed from the Stage I surface.
 async fn list_conversation_shares(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1290,7 +1321,9 @@ async fn create_share_group(
     path = "/v1/share-groups",
     tag = SHARE_GROUPS,
     responses(
-        (status = 200, description = "List of share groups retrieved successfully", body = Vec<ShareGroupResponse>),
+        (status = 200, description = "List of share groups retrieved successfully", body = Vec<ShareGroupResponse>,
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
@@ -1298,7 +1331,6 @@ async fn create_share_group(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)] // Sharing reads are removed from the Stage I surface.
 async fn list_share_groups(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1491,7 +1523,9 @@ const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
     path = "/v1/shared-with-me",
     tag = SHARE_GROUPS,
     responses(
-        (status = 200, description = "List of shared conversations retrieved successfully", body = Vec<SharedConversationInfo>),
+        (status = 200, description = "List of shared conversations retrieved successfully", body = Vec<SharedConversationInfo>,
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
@@ -1499,7 +1533,6 @@ const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)] // Sharing reads are removed from the Stage I surface.
 async fn list_shared_with_me(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1688,11 +1721,13 @@ async fn create_conversation_items(
     .await
 }
 
-/// List conversation items for an authenticated user.
+/// List Conversation items through their existing optional-auth read contract.
 ///
 /// # Authentication
-/// Only the Conversation owner may use this temporary export view during the
-/// Stage I window.
+/// - Authenticated callers may read items they own, that are shared with them,
+///   or that are public.
+/// - Unauthenticated callers may read items only from publicly shared
+///   Conversations.
 #[utoipa::path(
     get,
     path = "/v1/conversations/{conversation_id}/items",
@@ -1701,32 +1736,38 @@ async fn create_conversation_items(
         ("conversation_id" = String, Path, description = "ID of the conversation to list items from")
     ),
     responses(
-        (status = 200, description = "Conversation items retrieved successfully"),
-        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 200, description = "Conversation items retrieved successfully",
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
+        (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared", body = ErrorResponse),
         (status = 404, description = CONVERSATION_NOT_FOUND)
     ),
     security(
+        (),
         ("session_token" = [])
     )
 )]
 async fn list_conversation_items(
     State(state): State<crate::state::AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<Option<AuthenticatedUser>>,
     Path(conversation_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "list_conversation_items called for user_id={}, conversation_id={}",
-        user.user_id,
+        "list_conversation_items called for user_id={:?}, conversation_id={}",
+        user.as_ref().map(|user| user.user_id),
         conversation_id
     );
 
-    validate_owner_conversation(&state, &user, &conversation_id).await?;
+    validate_conversation_access_optional_auth(
+        &state,
+        user.as_ref(),
+        &conversation_id,
+        SharePermission::Read,
+    )
+    .await?;
 
-    tracing::debug!(
-        "Forwarding conversation items list request to OpenAI for user_id={}",
-        user.user_id
-    );
+    tracing::debug!("Forwarding conversation items list request to OpenAI");
 
     // Forward to OpenAI
     let proxy_response = state
@@ -2204,7 +2245,9 @@ async fn upload_file(
         ("purpose" = Option<String>, Query, description = "Filter by file purpose")
     ),
     responses(
-        (status = 200, description = "List of files retrieved successfully", body = crate::models::FileListResponse),
+        (status = 200, description = "List of files retrieved successfully", body = crate::models::FileListResponse,
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 400, description = "Bad request - invalid query parameters", body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 404, description = "File not found", body = ErrorResponse),
@@ -2273,7 +2316,9 @@ async fn list_files(
         ("file_id" = String, Path, description = "ID of the file to retrieve")
     ),
     responses(
-        (status = 200, description = "File retrieved successfully", body = crate::models::FileGetResponse),
+        (status = 200, description = "File retrieved successfully", body = crate::models::FileGetResponse,
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 404, description = "File not found", body = ErrorResponse),
         (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
@@ -2389,7 +2434,9 @@ async fn delete_file(
         ("file_id" = String, Path, description = "ID of the file to get content for")
     ),
     responses(
-        (status = 200, description = "File content retrieved successfully"),
+        (status = 200, description = "File content retrieved successfully",
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
         (status = 404, description = "File not found", body = ErrorResponse),
@@ -4917,6 +4964,32 @@ async fn validate_user_conversation(
         .ensure_access(conversation_id, user.user_id, required_permission)
         .await
         .map_err(map_share_error)
+}
+
+/// Validate Conversation access with optional authentication.
+///
+/// Authenticated callers use their existing owner/share/public access checks;
+/// anonymous callers may access only a public share.
+async fn validate_conversation_access_optional_auth(
+    state: &crate::state::AppState,
+    user: Option<&AuthenticatedUser>,
+    conversation_id: &str,
+    required_permission: SharePermission,
+) -> Result<(), Response> {
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
+
+    if let Some(user) = user {
+        validate_user_or_public_conversation(state, user, conversation_id, required_permission)
+            .await
+    } else {
+        state
+            .conversation_share_service
+            .get_public_access_by_conversation_id(conversation_id, required_permission)
+            .await
+            .map(|_| ())
+            .map_err(map_share_error)
+    }
 }
 
 /// Validate user has access OR the conversation is publicly shared

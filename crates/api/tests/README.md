@@ -12,18 +12,21 @@ database.
 - `responses_stateless_tests` verifies `store: false` forwarding, including
   client-managed function replay. Tool and input-item shapes are forwarded to
   Cloud for capability validation.
-- `conversations_tests` verifies that owner-only Conversation GET views and the
+- `conversations_tests` verifies that existing Conversation and sharing GET
+  views, including the optional-auth public/shared Conversation reads, and the
   established conversation/share/share-group DELETE operations remain
-  available, while unpin/unarchive, other sharing APIs, and disabled stateful
-  operations return `410 Gone`.
+  available, while writes such as pin/unpin and archive/unarchive return
+  `410 Gone`.
 - `files_tests` verifies that existing File GET views and file deletion remain
   available while upload and other unsupported operations return `410 Gone`.
 
-Temporary views require session authentication and ownership of the requested
-Conversation or File. They, retained DELETE operations, and migration responses use
-`Cache-Control: no-store`. Other sharing APIs, unsupported methods, and
-descendants within the legacy Conversation, File, and sharing namespaces return
-the same authenticated `410 Gone` migration response.
+Temporary views retain their existing authentication and authorization behavior:
+Conversation detail/item reads support the existing optional-auth public-share
+access, while other views retain their session/ACL checks. They, retained DELETE
+operations, and migration responses use `Cache-Control: no-store`. Retired
+writes, unsupported methods, and unknown descendants within the legacy
+Conversation, File, and sharing namespaces return the same authenticated `410
+Gone` migration response.
 
 ## Running tests
 
