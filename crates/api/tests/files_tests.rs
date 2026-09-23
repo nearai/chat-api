@@ -96,6 +96,14 @@ async fn stage_one_fixture() -> (TestServer, MockServer, String, String) {
         .respond_with(ResponseTemplate::new(200).set_body_string("temporary file content"))
         .mount(&upstream)
         .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/files/{file_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": file_id.clone(),
+            "deleted": true
+        })))
+        .mount(&upstream)
+        .await;
 
     let (server, db) = create_test_server_and_db(TestServerConfig {
         proxy_base_url: Some(upstream.uri()),
@@ -178,13 +186,12 @@ async fn stage_one_file_views_remain_readable() {
 }
 
 #[tokio::test]
-async fn stage_one_file_mutations_and_fallbacks_are_gone() {
+async fn stage_one_non_delete_file_mutations_and_fallbacks_are_gone() {
     let (server, _upstream, token, file_id) = stage_one_fixture().await;
     let auth = bearer(&token);
 
     for (method, path) in [
         (Method::POST, "/v1/files".to_string()),
-        (Method::DELETE, format!("/v1/files/{file_id}")),
         // Unsupported methods on retained views and unlisted descendants must
         // remain inside the authenticated migration namespace.
         (Method::PATCH, format!("/v1/files/{file_id}")),
@@ -199,4 +206,20 @@ async fn stage_one_file_mutations_and_fallbacks_are_gone() {
                 .await,
         );
     }
+}
+
+#[tokio::test]
+async fn stage_one_file_delete_remains_available() {
+    let (server, _upstream, token, file_id) = stage_one_fixture().await;
+    let auth = bearer(&token);
+
+    let response = server
+        .delete(&format!("/v1/files/{file_id}"))
+        .add_header(auth.0, auth.1)
+        .await;
+    assert_eq!(response.status_code(), StatusCode::OK);
+    assert_no_store(&response);
+    let body: Value = response.json();
+    assert_eq!(body["id"], file_id);
+    assert_eq!(body["deleted"], true);
 }

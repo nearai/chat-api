@@ -98,11 +98,12 @@ use openapi_tags::*;
 /// Create the Stage I stateful API surface.
 ///
 /// Owner-only Conversation and File views remain available temporarily for
-/// private-chat export. Sharing surfaces and every established mutation return
-/// the migration response. This router keeps that response scoped to the
-/// legacy stateful namespaces, so unsupported methods and descendants cannot
-/// fall through to unrelated app routes.
-fn create_read_only_stateful_router() -> Router<crate::state::AppState> {
+/// private-chat export, along with four established DELETE operations. All
+/// other sharing routes and stateful mutations return the migration response.
+/// This router keeps that response scoped to the legacy stateful namespaces, so
+/// unsupported methods and descendants cannot fall through to unrelated app
+/// routes.
+fn create_stage_one_stateful_router() -> Router<crate::state::AppState> {
     let conversations_router = Router::new()
         .route(
             "/",
@@ -117,13 +118,13 @@ fn create_read_only_stateful_router() -> Router<crate::state::AppState> {
             "/{conversation_id}",
             get(get_conversation)
                 .post(retired_stateful_api)
-                .delete(retired_stateful_api)
+                .delete(delete_conversation)
                 .fallback(retired_stateful_api),
         )
         .route("/{conversation_id}/shares", any(retired_stateful_api))
         .route(
             "/{conversation_id}/shares/{share_id}",
-            delete(retired_stateful_api).fallback(retired_stateful_api),
+            delete(delete_conversation_share).fallback(retired_stateful_api),
         )
         .route(
             "/{conversation_id}/items",
@@ -154,7 +155,7 @@ fn create_read_only_stateful_router() -> Router<crate::state::AppState> {
         .route(
             "/{group_id}",
             patch(retired_stateful_api)
-                .delete(retired_stateful_api)
+                .delete(delete_share_group)
                 .fallback(retired_stateful_api),
         )
         .fallback(retired_stateful_api);
@@ -169,7 +170,7 @@ fn create_read_only_stateful_router() -> Router<crate::state::AppState> {
         .route(
             "/{file_id}",
             get(get_file)
-                .delete(retired_stateful_api)
+                .delete(delete_file)
                 .fallback(retired_stateful_api),
         )
         .route(
@@ -199,8 +200,9 @@ fn create_read_only_stateful_router() -> Router<crate::state::AppState> {
 /// - Chat completions and images: dual auth + subscription + rate limited
 /// - Responses: dual auth + subscription + rate limited, always no-store
 /// - Model list, models, signature: dual auth only (not rate limited)
-/// - Temporary owner-only Conversation and File views: session auth; sharing,
-///   mutations, and unsupported legacy paths return 410
+/// - Temporary owner-only Conversation and File views plus established DELETE
+///   operations: session auth; pin/archive and other mutations, all other
+///   sharing routes, and unsupported legacy paths return 410
 pub fn create_api_router(
     rate_limit_state: crate::middleware::RateLimitState,
     dual_auth_state: crate::middleware::DualAuthState,
@@ -262,10 +264,10 @@ pub fn create_api_router(
                 crate::middleware::dual_auth_middleware,
             ));
 
-    // Temporary stateful read views retain their existing session-auth
-    // boundary. Wrap the whole layer so reads, migration responses, and auth
-    // errors are never cached.
-    let session_auth_routes = create_read_only_stateful_router()
+    // Temporary stateful views and established DELETE operations retain their
+    // existing session-auth boundary. Wrap the whole layer so reads, retained
+    // deletes, migration responses, and auth errors are never cached.
+    let session_auth_routes = create_stage_one_stateful_router()
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             crate::middleware::auth_middleware,
@@ -918,7 +920,9 @@ async fn get_conversation(
         ("conversation_id" = String, Path, description = "ID of the conversation to delete")
     ),
     responses(
-        (status = 200, description = "Conversation deleted successfully", body = serde_json::Value),
+        (status = 200, description = "Conversation deleted successfully", body = serde_json::Value,
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
         (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
@@ -928,7 +932,6 @@ async fn get_conversation(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
 async fn delete_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1177,7 +1180,9 @@ async fn list_conversation_shares(
         ("share_id" = Uuid, Path, description = "ID of the share to delete")
     ),
     responses(
-        (status = 204, description = "Share deleted successfully"),
+        (status = 204, description = "Share deleted successfully",
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
         (status = 404, description = CONVERSATION_OR_SHARE_NOT_FOUND, body = ErrorResponse)
@@ -1186,7 +1191,6 @@ async fn list_conversation_shares(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
 async fn delete_conversation_share(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1441,7 +1445,9 @@ async fn update_share_group(
         ("group_id" = Uuid, Path, description = "ID of the share group to delete")
     ),
     responses(
-        (status = 204, description = "Share group deleted successfully"),
+        (status = 204, description = "Share group deleted successfully",
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
         (status = 404, description = SHARE_GROUP_NOT_FOUND, body = ErrorResponse)
@@ -1450,7 +1456,6 @@ async fn update_share_group(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
 async fn delete_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2322,7 +2327,9 @@ async fn get_file(
         ("file_id" = String, Path, description = "ID of the file to delete")
     ),
     responses(
-        (status = 200, description = "File deleted successfully", body = serde_json::Value),
+        (status = 200, description = "File deleted successfully", body = serde_json::Value,
+            headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
+        ),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 404, description = "File not found", body = ErrorResponse),
         (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
@@ -2331,7 +2338,6 @@ async fn get_file(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
 async fn delete_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -5492,7 +5498,7 @@ async fn collect_stream_to_bytes(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_read_only_stateful_router, decompress_if_encoded, ensure_stream_usage_options,
+        create_stage_one_stateful_router, decompress_if_encoded, ensure_stream_usage_options,
         has_only_identity_content_encoding, normalize_stateless_response_body,
         validate_proxy_path_segment, validate_stateless_response_body,
     };
@@ -5531,7 +5537,7 @@ mod tests {
     fn stage_one_stateful_router_has_non_overlapping_scoped_fallbacks() {
         // Router construction catches overlapping nested and exact routes,
         // including the explicit trailing-slash namespace reservations.
-        let _router = create_read_only_stateful_router();
+        let _router = create_stage_one_stateful_router();
     }
 
     fn gzip_encode(input: &[u8]) -> Vec<u8> {

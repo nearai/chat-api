@@ -5,6 +5,10 @@ use axum_test::{TestResponse, TestServer};
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
 use http::{HeaderName, HeaderValue, Method, StatusCode};
 use serde_json::{json, Value};
+use services::conversation::ports::{
+    ConversationShareRepository, NewConversationShare, SharePermission, ShareRecipient,
+    ShareRecipientKind, ShareType,
+};
 use services::user::ports::UserRepository;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
@@ -37,7 +41,14 @@ fn assert_retired_mutation(response: TestResponse) {
     );
 }
 
-async fn stage_one_fixture() -> (TestServer, MockServer, String, String) {
+async fn stage_one_fixture_with_db() -> (
+    TestServer,
+    MockServer,
+    database::Database,
+    String,
+    String,
+    services::UserId,
+) {
     let upstream = MockServer::start().await;
     let conversation_id = format!("conv_stage1_{}", Uuid::new_v4());
 
@@ -69,6 +80,14 @@ async fn stage_one_fixture() -> (TestServer, MockServer, String, String) {
         })))
         .mount(&upstream)
         .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/conversations/{conversation_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": conversation_id.clone(),
+            "deleted": true
+        })))
+        .mount(&upstream)
+        .await;
     let (server, db) = create_test_server_and_db(TestServerConfig {
         proxy_base_url: Some(upstream.uri()),
         ..Default::default()
@@ -91,6 +110,12 @@ async fn stage_one_fixture() -> (TestServer, MockServer, String, String) {
         )
         .await
         .expect("insert conversation");
+    (server, upstream, db, token, conversation_id, user.id)
+}
+
+async fn stage_one_fixture() -> (TestServer, MockServer, String, String) {
+    let (server, upstream, _db, token, conversation_id, _owner_user_id) =
+        stage_one_fixture_with_db().await;
     (server, upstream, token, conversation_id)
 }
 
@@ -171,17 +196,13 @@ async fn anonymous_conversation_reads_require_session_auth() {
 }
 
 #[tokio::test]
-async fn stage_one_stateful_conversation_and_sharing_surfaces_are_gone() {
+async fn stage_one_retired_conversation_and_sharing_surfaces_are_gone() {
     let (server, _upstream, token, conversation_id) = stage_one_fixture().await;
     let auth = bearer(&token);
 
     for (method, path) in [
         (Method::POST, "/v1/conversations".to_string()),
         (Method::POST, format!("/v1/conversations/{conversation_id}")),
-        (
-            Method::DELETE,
-            format!("/v1/conversations/{conversation_id}"),
-        ),
         (
             Method::POST,
             format!("/v1/conversations/{conversation_id}/items"),
@@ -193,13 +214,6 @@ async fn stage_one_stateful_conversation_and_sharing_surfaces_are_gone() {
         (
             Method::GET,
             format!("/v1/conversations/{conversation_id}/shares"),
-        ),
-        (
-            Method::DELETE,
-            format!(
-                "/v1/conversations/{conversation_id}/shares/{}",
-                Uuid::new_v4()
-            ),
         ),
         (
             Method::POST,
@@ -225,10 +239,6 @@ async fn stage_one_stateful_conversation_and_sharing_surfaces_are_gone() {
         (Method::GET, "/v1/share-groups".to_string()),
         (
             Method::PATCH,
-            format!("/v1/share-groups/{}", Uuid::new_v4()),
-        ),
-        (
-            Method::DELETE,
             format!("/v1/share-groups/{}", Uuid::new_v4()),
         ),
         // Unsupported methods on a retained read view and unlisted legacy
@@ -273,4 +283,113 @@ async fn stage_one_stateful_conversation_and_sharing_surfaces_are_gone() {
                 .await,
         );
     }
+}
+
+#[tokio::test]
+async fn stage_one_established_delete_operations_remain_available() {
+    let (server, _upstream, db, token, conversation_id, owner_user_id) =
+        stage_one_fixture_with_db().await;
+    let auth = bearer(&token);
+
+    let shares = db.conversation_share_repository();
+    let direct_share = shares
+        .create_share(NewConversationShare {
+            conversation_id: conversation_id.clone(),
+            owner_user_id,
+            share_type: ShareType::Direct,
+            permission: SharePermission::Read,
+            recipient: Some(ShareRecipient {
+                kind: ShareRecipientKind::Email,
+                value: format!("stage-one-share-{}@example.com", Uuid::new_v4()),
+            }),
+            group_id: None,
+            org_email_pattern: None,
+        })
+        .await
+        .expect("seed direct share");
+    let group = shares
+        .create_group(
+            owner_user_id,
+            &format!("stage-one-group-{}", Uuid::new_v4()),
+            &[ShareRecipient {
+                kind: ShareRecipientKind::Email,
+                value: format!("stage-one-member-{}@example.com", Uuid::new_v4()),
+            }],
+        )
+        .await
+        .expect("seed share group");
+    let group_share = shares
+        .create_share(NewConversationShare {
+            conversation_id: conversation_id.clone(),
+            owner_user_id,
+            share_type: ShareType::Group,
+            permission: SharePermission::Read,
+            recipient: None,
+            group_id: Some(group.id),
+            org_email_pattern: None,
+        })
+        .await
+        .expect("seed group share");
+
+    let response = server
+        .delete(&format!(
+            "/v1/conversations/{conversation_id}/shares/{}",
+            direct_share.id
+        ))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(response.status_code(), StatusCode::NO_CONTENT);
+    assert_no_store(&response);
+
+    let response = server
+        .delete(&format!("/v1/share-groups/{}", group.id))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(response.status_code(), StatusCode::NO_CONTENT);
+    assert_no_store(&response);
+
+    let client = db.pool().get().await.expect("db client");
+    for (table, column, id) in [
+        ("conversation_shares", "id", direct_share.id),
+        ("conversation_share_groups", "id", group.id),
+        ("conversation_share_group_members", "group_id", group.id),
+        ("conversation_shares", "id", group_share.id),
+    ] {
+        let query = format!("SELECT 1 FROM {table} WHERE {column} = $1");
+        assert!(
+            client
+                .query_opt(&query, &[&id])
+                .await
+                .expect("query deleted share state")
+                .is_none(),
+            "{table}.{column} should be removed"
+        );
+    }
+
+    let missing_share = server
+        .delete(&format!(
+            "/v1/conversations/{conversation_id}/shares/{}",
+            Uuid::new_v4()
+        ))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(missing_share.status_code(), StatusCode::NOT_FOUND);
+    assert_no_store(&missing_share);
+
+    let missing_group = server
+        .delete(&format!("/v1/share-groups/{}", Uuid::new_v4()))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(missing_group.status_code(), StatusCode::NOT_FOUND);
+    assert_no_store(&missing_group);
+
+    let response = server
+        .delete(&format!("/v1/conversations/{conversation_id}"))
+        .add_header(auth.0, auth.1)
+        .await;
+    assert_eq!(response.status_code(), StatusCode::OK);
+    assert_no_store(&response);
+    let body: Value = response.json();
+    assert_eq!(body["id"], conversation_id);
+    assert_eq!(body["deleted"], true);
 }

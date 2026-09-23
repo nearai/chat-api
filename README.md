@@ -30,14 +30,14 @@ crates/
 - **Repository Pattern**: Database access through trait-based repositories (`PostgresUserRepository`, etc.)
 - **Service Layer**: Business logic in `services` crate, injected into `AppState`
 - **NEAR AI Cloud API Proxy**: OpenAI-compatible inference routes forward to NEAR AI Cloud API with auth; Responses requests are stateless
-- **Temporary Read Views**: Owner-only Conversation and File GET endpoints remain available for the Stage I migration/export window. Ordinary Conversation, File, and sharing writes return `410 Gone`; the existing `DELETE /v1/users/me` account-deletion flow remains available.
+- **Temporary Migration Surface**: Owner-only Conversation and File GET endpoints, plus four pre-existing Conversation/File/sharing `DELETE` operations, remain available for the Stage I migration/export window. Other ordinary Conversation, File, and sharing writes return `410 Gone`; the existing `DELETE /v1/users/me` account-deletion flow remains available.
 - **PostgreSQL deployment modes**: Optional Patroni discovery via `DATABASE_PRIMARY_APP_ID`, plus verified direct TLS connections for managed endpoints such as RDS
 
 ### Request Flow
 
 1. Request → its historical authentication boundary → route handler
 2. `/v1/responses` → validate stateless linkage fields → forward to NEAR AI Cloud API with `store: false`
-3. Temporary owner-only Conversation/File GET views → local ownership lookup and, where needed, Cloud read view
+3. Temporary owner-only Conversation/File views and established DELETE operations → local ownership lookup and, where needed, Cloud read/delete API
 4. Usage, subscription, rate-limit, and attestation-related proxy behavior remain local to Chat API
 
 ## Development
@@ -189,13 +189,13 @@ OpenAPI docs available at `/docs`.
 **Key endpoints**:
 - `/v1/auth/*` - OAuth authentication
 - `/v1/responses` - OpenAI-compatible, stateless Responses API (proxied to NEAR AI Cloud API)
-- `/v1/conversations/*` - Temporary owner-only Conversation views for migration/export
-- `/v1/files/*` - Temporary read-only File views for migration/export
+- `/v1/conversations/*` - Temporary owner-only Conversation views and established DELETE operations for migration/export
+- `/v1/files/*` - Temporary owner-only File views and file deletion for migration/export
 - `/v1/attestation/report` - TEE attestation reports
 - `/v1/users/*` - User management
 - `/v1/admin/*` - Admin operations
 
-**Stage I migration**: owner-only Conversation and File GET views remain temporarily available for authenticated private-chat data export. Ordinary Conversation, File, and sharing state writes (create/update/delete, item creation, upload, pin/archive, clone, and share-group mutation), plus unsupported methods and descendants within those legacy namespaces, return `410 Gone` with `Cache-Control: no-store` after session authentication. These views will be removed in Stage III.
+**Stage I migration**: owner-only Conversation and File GET views remain temporarily available for authenticated private-chat data export. The pre-existing `DELETE /v1/conversations/{id}`, `DELETE /v1/files/{id}`, conversation-share delete, and share-group delete operations also remain available. Other Conversation, File, and sharing state writes (create/update, item creation, upload, pin/unpin, archive/unarchive, clone, and share-group mutation), plus unsupported methods and descendants within those legacy namespaces, return `410 Gone` with `Cache-Control: no-store` after session authentication. These views and retained delete operations will be removed in Stage III.
 
 **Account-deletion exception**: `DELETE /v1/users/me` remains available. Its existing asynchronous worker continues Cloud Conversation/File cleanup through Cloud API's retained, API-key/workspace-scoped resource DELETE endpoints before it performs local finalization; this flow is outside the retired session-proxy write surface.
 

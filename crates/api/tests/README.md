@@ -1,7 +1,7 @@
 # API Tests
 
 These integration tests exercise Chat API's authentication, billing, proxy,
-stateless Responses, and temporary Stage I read-only data views. They use the
+stateless Responses, and the temporary Stage I migration data surface. They use the
 `test` feature to enable the mock-login endpoint and require a PostgreSQL test
 database.
 
@@ -12,17 +12,18 @@ database.
 - `responses_stateless_tests` verifies `store: false` forwarding, including
   client-managed function replay. Tool and input-item shapes are forwarded to
   Cloud for capability validation.
-- `conversations_tests` verifies that owner-only Conversation GET views remain
-  available for export while sharing APIs and all disabled stateful operations
-  return `410 Gone`.
-- `files_tests` verifies that existing File GET views remain available for
-  export while upload and delete return `410 Gone`.
+- `conversations_tests` verifies that owner-only Conversation GET views and the
+  established conversation/share/share-group DELETE operations remain
+  available, while unpin/unarchive, other sharing APIs, and disabled stateful
+  operations return `410 Gone`.
+- `files_tests` verifies that existing File GET views and file deletion remain
+  available while upload and other unsupported operations return `410 Gone`.
 
 Temporary views require session authentication and ownership of the requested
-Conversation or File. They and their migration responses use
-`Cache-Control: no-store`. Sharing APIs, unsupported methods, and descendants
-within the legacy Conversation, File, and sharing namespaces return the same
-authenticated `410 Gone` migration response.
+Conversation or File. They, retained DELETE operations, and migration responses use
+`Cache-Control: no-store`. Other sharing APIs, unsupported methods, and
+descendants within the legacy Conversation, File, and sharing namespaces return
+the same authenticated `410 Gone` migration response.
 
 ## Running tests
 
