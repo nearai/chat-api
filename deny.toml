@@ -4,6 +4,18 @@
 [advisories]
 # Defaults apply (vulnerabilities + unmaintained/unsound are surfaced). Report-only is enforced by the
 # workflow's continue-on-error, not by downgrading severities here.
+#
+# accept-with-reason (no-fix / unmaintained advisories): no-fix / unmaintained advisories with a documented exception in the
+# exception register (SOC 2 CC.3.1.6; Vuln Mgmt Policy s3.5 / Secure SDLC s7). These are tracked, not silently
+# suppressed - each carries a rationale + a review date in the register. This lets the cargo-deny gate move to
+# blocking without these (which have no available fix) tripping it.
+ignore = [
+  { id = "RUSTSEC-2026-0118", reason = "hickory-proto NSEC3 DoS; no fixed release. DNS-response DoS only, needs a malicious/hostile resolver; chat-api resolves against trusted infrastructure. Monitor upstream." },
+  { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained (archived). Compile-time proc-macro; not in the runtime binary. No drop-in replacement." },
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile: unmaintained (folded into rustls). Parses local PEM at startup; input is operator-provided, not attacker-controlled." },
+  { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2: unmaintained. Compile-time only; not in the runtime binary." },
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: unmaintained. Compile-time only; not in the runtime binary." },
+]
 
 [bans]
 multiple-versions = "warn"
