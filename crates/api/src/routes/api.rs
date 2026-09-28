@@ -1,6 +1,6 @@
 use crate::consts::{
-    LIST_FILES_LIMIT_MAX, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE, MAX_REQUEST_BODY_SIZE,
-    MAX_RESPONSE_BODY_SIZE,
+    LIST_CONVERSATION_ITEMS_LIMIT_MAX, LIST_FILES_LIMIT_MAX, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE,
+    MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BODY_SIZE,
 };
 use crate::middleware::auth::{AuthenticatedApiKey, AuthenticatedUser};
 use crate::usage_parsing::{
@@ -646,6 +646,75 @@ impl ListFilesParams {
             order,
             purpose: self.purpose,
         })
+    }
+}
+
+/// Query parameters for listing Conversation items.
+///
+/// Only these fields are forwarded to Cloud API; any other client parameter is
+/// dropped rather than passed through. `include` is deliberately not accepted:
+/// Cloud API does not use it and cannot parse a single `include=` value.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct ListConversationItemsParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
+}
+
+impl ListConversationItemsParams {
+    fn validate(&self) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+        if let Some(limit) = self.limit {
+            if !(1..=LIST_CONVERSATION_ITEMS_LIMIT_MAX).contains(&limit) {
+                return Err(invalid_query_parameter(format!(
+                    "Invalid limit parameter. Must be between 1 and {LIST_CONVERSATION_ITEMS_LIMIT_MAX}"
+                )));
+            }
+        }
+
+        if let Some(order) = self.order.as_deref() {
+            if order != "asc" && order != "desc" {
+                return Err(invalid_query_parameter(
+                    "Invalid order parameter. Must be 'asc' or 'desc'",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn invalid_query_parameter(error: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: error.into(),
+        }),
+    )
+}
+
+/// Append validated query parameters to an upstream proxy path. The path is
+/// returned unchanged when there are no parameters to forward.
+fn with_upstream_query<T: Serialize>(
+    path: String,
+    params: &T,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let query = serde_urlencoded::to_string(params).map_err(|e| {
+        tracing::error!("Failed to encode upstream query parameters: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to encode query parameters".to_string(),
+            }),
+        )
+    })?;
+
+    if query.is_empty() {
+        Ok(path)
+    } else {
+        Ok(format!("{path}?{query}"))
     }
 }
 
@@ -1733,12 +1802,16 @@ async fn create_conversation_items(
     path = "/v1/conversations/{conversation_id}/items",
     tag = CONVERSATIONS,
     params(
-        ("conversation_id" = String, Path, description = "ID of the conversation to list items from")
+        ("conversation_id" = String, Path, description = "ID of the conversation to list items from"),
+        ("after" = Option<String>, Query, description = "Item ID to start listing after"),
+        ("limit" = Option<i64>, Query, description = "Maximum number of items to return (1-1000)"),
+        ("order" = Option<String>, Query, description = "Sort order: 'asc' or 'desc'")
     ),
     responses(
         (status = 200, description = "Conversation items retrieved successfully",
             headers(("Cache-Control" = String, description = "Always no-store for the Stage I migration surface"))
         ),
+        (status = 400, description = "Bad request - invalid query parameters", body = ErrorResponse),
         (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared", body = ErrorResponse),
         (status = 404, description = CONVERSATION_NOT_FOUND)
     ),
@@ -1751,6 +1824,7 @@ async fn list_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<Option<AuthenticatedUser>>,
     Path(conversation_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<ListConversationItemsParams>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
@@ -1758,6 +1832,8 @@ async fn list_conversation_items(
         user.as_ref().map(|user| user.user_id),
         conversation_id
     );
+
+    params.validate().map_err(IntoResponse::into_response)?;
 
     validate_conversation_access_optional_auth(
         &state,
@@ -1767,17 +1843,17 @@ async fn list_conversation_items(
     )
     .await?;
 
+    // Forward the pagination cursor so clients can page past the first
+    // upstream page (e.g. conversation export).
+    let path = with_upstream_query(format!("conversations/{conversation_id}/items"), &params)
+        .map_err(IntoResponse::into_response)?;
+
     tracing::debug!("Forwarding conversation items list request to OpenAI");
 
     // Forward to OpenAI
     let proxy_response = state
         .proxy_service
-        .forward_request(
-            Method::GET,
-            &format!("conversations/{conversation_id}/items"),
-            headers.clone(),
-            None,
-        )
+        .forward_request(Method::GET, &path, headers.clone(), None)
         .await
         .map_err(|e| {
             tracing::error!("OpenAI API error during conversation items list: {}", e);
@@ -5573,7 +5649,8 @@ mod tests {
     use super::{
         create_stage_one_stateful_router, decompress_if_encoded, ensure_stream_usage_options,
         has_only_identity_content_encoding, normalize_stateless_response_body,
-        validate_proxy_path_segment, validate_stateless_response_body,
+        validate_proxy_path_segment, validate_stateless_response_body, with_upstream_query,
+        ListConversationItemsParams,
     };
     use bytes::Bytes;
     use flate2::{write::DeflateEncoder, write::GzEncoder, write::ZlibEncoder, Compression};
@@ -5891,5 +5968,32 @@ mod tests {
         );
         let out = decompress_if_encoded(bytes, &hdrs).unwrap();
         assert_eq!(out.as_ref(), b"{\"ok\":1}");
+    }
+
+    #[test]
+    fn upstream_query_is_omitted_when_empty() {
+        let path = with_upstream_query(
+            "conversations/conv_1/items".to_string(),
+            &ListConversationItemsParams::default(),
+        )
+        .map_err(|(status, _)| status)
+        .unwrap();
+        assert_eq!(path, "conversations/conv_1/items");
+    }
+
+    #[test]
+    fn upstream_query_encodes_cursor_as_a_single_parameter() {
+        let params = ListConversationItemsParams {
+            after: Some("msg_1&limit=1#frag".to_string()),
+            limit: Some(100),
+            order: Some("asc".to_string()),
+        };
+        let path = with_upstream_query("conversations/conv_1/items".to_string(), &params)
+            .map_err(|(status, _)| status)
+            .unwrap();
+        assert_eq!(
+            path,
+            "conversations/conv_1/items?after=msg_1%26limit%3D1%23frag&limit=100&order=asc"
+        );
     }
 }
