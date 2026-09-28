@@ -686,6 +686,32 @@ impl ListConversationItemsParams {
     }
 }
 
+/// Query parameters for fetching a completion signature, mirroring Cloud API's
+/// `GET /v1/signature/{chat_id}`.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct SignatureParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_algo: Option<String>,
+}
+
+impl SignatureParams {
+    fn validate(&self) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+        if let Some(signing_algo) = self.signing_algo.as_deref() {
+            if !signing_algo.eq_ignore_ascii_case("ecdsa")
+                && !signing_algo.eq_ignore_ascii_case("ed25519")
+            {
+                return Err(invalid_query_parameter(
+                    "Invalid signing_algo parameter. Must be 'ecdsa' or 'ed25519'",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 fn invalid_query_parameter(error: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::BAD_REQUEST,
@@ -3311,10 +3337,13 @@ async fn proxy_model_list(
     path = "/v1/signature/{chat_id}",
     tag = PROXY,
     params(
-        ("chat_id" = String, Path, description = "Chat ID to get signature for")
+        ("chat_id" = String, Path, description = "Chat ID to get signature for"),
+        ("model" = Option<String>, Query, description = "Model that produced the completion"),
+        ("signing_algo" = Option<String>, Query, description = "Signing algorithm: 'ecdsa' or 'ed25519'")
     ),
     responses(
         (status = 200, description = "Signature retrieved successfully"),
+        (status = 400, description = "Bad request - invalid query parameters", body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
@@ -3326,10 +3355,12 @@ async fn proxy_signature(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(chat_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<SignatureParams>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     validate_proxy_path_segment(&chat_id)
         .map_err(|_| invalid_proxy_path_segment_response("chat_id"))?;
+    params.validate().map_err(IntoResponse::into_response)?;
 
     tracing::info!(
         "proxy_signature: GET /v1/signature/{} for user_id={}, session_id={}",
@@ -3338,7 +3369,8 @@ async fn proxy_signature(
         user.session_id
     );
 
-    let path = format!("signature/{}", chat_id);
+    let path = with_upstream_query(format!("signature/{}", chat_id), &params)
+        .map_err(IntoResponse::into_response)?;
 
     // Forward the request to OpenAI
     let proxy_response = state
