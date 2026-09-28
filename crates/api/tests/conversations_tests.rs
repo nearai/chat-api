@@ -11,7 +11,7 @@ use services::conversation::ports::{
 };
 use services::user::ports::UserRepository;
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn bearer(token: &str) -> (HeaderName, HeaderValue) {
@@ -486,4 +486,159 @@ async fn stage_one_established_delete_operations_remain_available() {
     let body: Value = response.json();
     assert_eq!(body["id"], conversation_id);
     assert_eq!(body["deleted"], true);
+}
+
+/// Query pairs of every upstream GET for this Conversation's items, in order.
+async fn upstream_item_list_queries(
+    upstream: &MockServer,
+    conversation_id: &str,
+) -> Vec<Vec<(String, String)>> {
+    let items_path = format!("/conversations/{conversation_id}/items");
+    upstream
+        .received_requests()
+        .await
+        .expect("mock upstream should record requests")
+        .into_iter()
+        .filter(|request| request.method == Method::GET && request.url.path() == items_path)
+        .map(|request| {
+            request
+                .url
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect()
+        })
+        .collect()
+}
+
+fn query_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn conversation_items_forward_pagination_to_cloud_api() {
+    let (server, upstream, token, conversation_id) = stage_one_fixture().await;
+    let auth = bearer(&token);
+    let items_path = format!("/conversations/{conversation_id}/items");
+
+    // Cloud API pages by cursor; these take precedence over the fixture's
+    // catch-all items mock.
+    Mock::given(method("GET"))
+        .and(path(items_path.clone()))
+        .and(query_param_is_missing("after"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"id": "item_a", "type": "message"}],
+            "first_id": "item_a",
+            "last_id": "item_a",
+            "has_more": true
+        })))
+        .with_priority(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(items_path.clone()))
+        .and(query_param("after", "item_a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"id": "item_b", "type": "message"}],
+            "first_id": "item_b",
+            "last_id": "item_b",
+            "has_more": false
+        })))
+        .with_priority(1)
+        .mount(&upstream)
+        .await;
+
+    // Page through the way the export client does.
+    let first_page = server
+        .get(&format!(
+            "/v1/conversations/{conversation_id}/items?limit=1&order=asc"
+        ))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(first_page.status_code(), StatusCode::OK);
+    assert_no_store(&first_page);
+    let first_page: Value = first_page.json();
+    assert_eq!(first_page["last_id"], "item_a");
+    assert_eq!(first_page["has_more"], true);
+
+    // Parameters outside the allowlist are dropped, not forwarded.
+    let second_page = server
+        .get(&format!(
+            "/v1/conversations/{conversation_id}/items?after=item_a&limit=1&order=asc&include=message.output_text.logprobs&offset=5"
+        ))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(second_page.status_code(), StatusCode::OK);
+    assert_no_store(&second_page);
+    let second_page: Value = second_page.json();
+    assert_eq!(second_page["data"][0]["id"], "item_b");
+    assert_eq!(second_page["has_more"], false);
+
+    // A request without parameters keeps the bare upstream path.
+    let bare = server
+        .get(&format!("/v1/conversations/{conversation_id}/items"))
+        .add_header(auth.0, auth.1)
+        .await;
+    assert_eq!(bare.status_code(), StatusCode::OK);
+
+    assert_eq!(
+        upstream_item_list_queries(&upstream, &conversation_id).await,
+        vec![
+            query_pairs(&[("limit", "1"), ("order", "asc")]),
+            query_pairs(&[("after", "item_a"), ("limit", "1"), ("order", "asc")]),
+            vec![],
+        ]
+    );
+}
+
+#[tokio::test]
+async fn conversation_items_reject_invalid_pagination_query() {
+    let (server, upstream, token, conversation_id) = stage_one_fixture().await;
+    let auth = bearer(&token);
+
+    for (query, expected_error) in [
+        (
+            "order=sideways",
+            Some("Invalid order parameter. Must be 'asc' or 'desc'"),
+        ),
+        (
+            "limit=0",
+            Some("Invalid limit parameter. Must be between 1 and 1000"),
+        ),
+        (
+            "limit=1001",
+            Some("Invalid limit parameter. Must be between 1 and 1000"),
+        ),
+        // Non-numeric limits are rejected by the typed query extractor.
+        ("limit=ten", None),
+    ] {
+        let response = server
+            .get(&format!(
+                "/v1/conversations/{conversation_id}/items?{query}"
+            ))
+            .add_header(auth.0.clone(), auth.1.clone())
+            .await;
+        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST, "{query}");
+        assert_no_store(&response);
+        if let Some(expected_error) = expected_error {
+            let body: Value = response.json();
+            assert_eq!(
+                body.get("error").and_then(Value::as_str),
+                Some(expected_error),
+                "{query}"
+            );
+        }
+    }
+
+    assert!(
+        upstream_item_list_queries(&upstream, &conversation_id)
+            .await
+            .is_empty(),
+        "invalid queries must not reach Cloud API"
+    );
 }
