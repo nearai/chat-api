@@ -828,7 +828,8 @@ fn read_value(
         )
         .map(StoredValue::FieldEncrypted);
     }
-    if matches!(field.kind, Kind::AgentSecret) && raw.contains(':') {
+    if matches!(field.kind, Kind::AgentSecret) && database::agent_secrets::is_legacy_ciphertext(raw)
+    {
         return database::agent_secrets::decrypt_legacy(raw).map(StoredValue::LegacyEncrypted);
     }
     Ok(StoredValue::Plaintext(raw.to_owned()))
@@ -976,10 +977,6 @@ pub async fn create_job(
     if req.actions.as_slice() != [action] {
         return Err(bad("actions do not match mode"));
     }
-    req.scope.tables.sort();
-    req.scope.tables.dedup();
-    req.scope.fields.sort();
-    req.scope.fields.dedup();
     let fields = selected(&req.scope)?;
     if matches!(req.mode, Mode::Execute)
         && fields
@@ -991,6 +988,19 @@ pub async fn create_job(
             "execute for agent credentials requires DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED=true",
         ));
     }
+    // Freeze table/default scopes at creation. A later registry update must not
+    // add fields to an already-authorized job when it resumes.
+    req.scope = Scope {
+        tables: Vec::new(),
+        fields: fields
+            .iter()
+            .map(|field| FieldName {
+                table: field.table.into(),
+                column: field.column.into(),
+            })
+            .collect(),
+    };
+    req.scope.fields.sort();
     let mode = match req.mode {
         Mode::DryRun => "dry_run",
         Mode::Execute => "execute",
@@ -1068,6 +1078,18 @@ async fn run_locked_job(
     let Some(job)=client.query_opt("UPDATE database_encryption_jobs SET status='running',started_at=COALESCE(started_at,NOW()) WHERE id=$1 AND status IN ('queued','running') RETURNING mode,scope,batch_size,max_rows,cursor,progress",&[&id]).await? else { return Ok(()) };
     let mode: String = job.get(0);
     let scope: Scope = serde_json::from_value(job.get(1))?;
+    // Older jobs did not freeze table/default scopes. Their original field set
+    // cannot be recovered from the stored cursor, so require a new explicit job.
+    if !scope.tables.is_empty() || scope.fields.is_empty() {
+        mark_job_failed(
+            state,
+            id,
+            "scope_requires_confirmation",
+            "Legacy job scope is not pinned; review the fields and create a new job",
+        )
+        .await?;
+        return Ok(());
+    }
     let batch: i64 = job.get(2);
     let max: Option<i64> = job.get(3);
     let cursor: Value = job.get(4);

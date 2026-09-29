@@ -87,6 +87,18 @@ impl PostgresAgentRepository {
             .transpose()
     }
 
+    /// Listing metadata must not fail because one instance has an unreadable
+    /// token. Authentication lookups still use the strict decoder above.
+    fn decode_list_instance_token(&self, id: Uuid, value: Option<String>) -> Option<String> {
+        match self.decode_optional_field("instance_token", id, value) {
+            Ok(token) => token,
+            Err(_) => {
+                tracing::warn!(instance_id = %id, "Unreadable instance token omitted from list");
+                None
+            }
+        }
+    }
+
     async fn set_instance_status_with_audit(
         &self,
         instance_id: Uuid,
@@ -365,11 +377,7 @@ impl AgentRepository for PostgresAgentRepository {
                     name: r.get(3),
                     public_ssh_key: r.get(5),
                     instance_url: self.decode_optional_field("instance_url", r.get(0), r.get(6))?,
-                    instance_token: self.decode_optional_field(
-                        "instance_token",
-                        r.get(0),
-                        r.get(7),
-                    )?,
+                    instance_token: self.decode_list_instance_token(r.get(0), r.get(7)),
                     dashboard_url: self.decode_optional_field(
                         "dashboard_url",
                         r.get(0),
@@ -441,11 +449,7 @@ impl AgentRepository for PostgresAgentRepository {
                     name: r.get(3),
                     public_ssh_key: r.get(5),
                     instance_url: self.decode_optional_field("instance_url", r.get(0), r.get(6))?,
-                    instance_token: self.decode_optional_field(
-                        "instance_token",
-                        r.get(0),
-                        r.get(7),
-                    )?,
+                    instance_token: self.decode_list_instance_token(r.get(0), r.get(7)),
                     dashboard_url: self.decode_optional_field(
                         "dashboard_url",
                         r.get(0),
@@ -1285,11 +1289,7 @@ impl AgentRepository for PostgresAgentRepository {
                     name: r.get(3),
                     public_ssh_key: r.get(5),
                     instance_url: self.decode_optional_field("instance_url", id, r.get(6))?,
-                    instance_token: self.decode_optional_field(
-                        "instance_token",
-                        r.get(0),
-                        r.get(7),
-                    )?,
+                    instance_token: self.decode_list_instance_token(id, r.get(7)),
                     dashboard_url: self.decode_optional_field("dashboard_url", id, r.get(8))?,
                     agent_api_base_url: r.get(9),
                     service_type: r.get(4),

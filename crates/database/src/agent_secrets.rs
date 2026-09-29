@@ -55,11 +55,20 @@ pub fn decrypt(
     }
 }
 
+/// The legacy encoding starts with a 12-byte, hex-encoded nonce. A colon alone
+/// is not enough: historical plaintext credentials can contain colons too.
+/// Once this prefix is recognized, even a damaged ciphertext must be decrypted
+/// strictly instead of being treated as plaintext.
+pub fn is_legacy_ciphertext(value: &str) -> bool {
+    value.split_once(':').is_some_and(|(nonce, _)| {
+        nonce.len() == 24 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 /// Read historical plaintext or the legacy `nonce:ciphertext` format.
-/// A colon is reserved for the legacy encoding. Never treat a decryption
-/// failure as plaintext: that would hide a wrong key or double-encrypt data.
+/// Never fall back to plaintext when recognized ciphertext cannot be decrypted.
 pub fn decrypt_legacy(value: &str) -> Result<String> {
-    if value.contains(':') {
+    if is_legacy_ciphertext(value) {
         encryption::decrypt(value).map_err(|_| anyhow!("legacy agent secret decryption failed"))
     } else {
         Ok(value.to_owned())
@@ -73,7 +82,7 @@ mod tests {
     #[test]
     fn field_credentials_require_the_correct_key_and_row_context() {
         let config = FieldEncryptionConfig {
-            key: [7; 32],
+            key: rand::random(),
             key_id: "test-v1".into(),
             write_enabled: true,
             agent_secrets_write_enabled: true,
@@ -123,7 +132,7 @@ mod tests {
         )
         .is_err());
         let wrong_key = FieldEncryptionConfig {
-            key: [8; 32],
+            key: rand::random(),
             ..config
         };
         assert!(decrypt(
@@ -139,23 +148,18 @@ mod tests {
     #[test]
     fn plaintext_compatibility_does_not_hide_damaged_ciphertext() {
         let id = Uuid::new_v4();
-        assert_eq!(
-            decrypt(
-                None,
-                "agent_instances",
-                "instance_token",
-                id,
-                "historical-token"
-            )
-            .unwrap(),
-            "historical-token"
-        );
+        for plaintext in ["historical-token", "user:pass", "https://example.com/token"] {
+            assert_eq!(
+                decrypt(None, "agent_instances", "instance_token", id, plaintext).unwrap(),
+                plaintext
+            );
+        }
         assert!(decrypt(
             None,
             "agent_instances",
             "instance_token",
             id,
-            "bad-nonce:bad-ciphertext"
+            "0123456789abcdef01234567:bad-ciphertext"
         )
         .is_err());
         assert!(decrypt(
@@ -171,7 +175,7 @@ mod tests {
     #[test]
     fn agent_gate_cannot_bypass_the_global_write_gate() {
         let config = FieldEncryptionConfig {
-            key: [7; 32],
+            key: rand::random(),
             key_id: "test-v1".into(),
             write_enabled: false,
             agent_secrets_write_enabled: true,

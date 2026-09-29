@@ -37,7 +37,7 @@ be logged.
    capped scan as diagnostic; it is not the release gate for large tables.
 5. Create explicit-scope dry-run jobs, then execute jobs in small batches. Poll
    `GET /v1/admin/database-encryption/jobs/{job_id}`. Jobs resume from durable
-cursors after restart and can be cancelled at a transaction boundary.
+   cursors after restart and can be cancelled at a transaction boundary.
 6. Call `POST /v1/admin/database-encryption/verify` and poll its returned job.
    Do not move the database or backups outside the CVM boundary unless `pass` is
    true and plaintext, legacy-encrypted, and invalid-envelope counts are zero.
@@ -60,6 +60,14 @@ Suggested execute request:
 ```
 
 ## Recovery and rollback constraints
+
+Jobs resolve the requested tables into an explicit field list when created and
+return that list in `scope`. Recovery uses this saved list, so adding a registered
+field does not expand existing jobs. Older jobs with table-level or empty scopes
+stop with `last_error_class: "scope_requires_confirmation"` before processing
+another batch. Review the intended fields and create a new dry-run/execute job;
+do not edit the stored scope or reuse its cursor. Old jobs that already specify
+individual fields can resume normally.
 
 Jobs commit one bounded batch at a time. Retrying an interrupted job is safe:
 authenticated envelopes are detected and skipped, and cursor/progress state is
@@ -119,11 +127,17 @@ verification. A deployed legacy `conversations.title` column or
 `response_authors` table is reported as `legacy_confidential` and also fails
 verification.
 
-`pass=true` confirms compliance with this reviewed policy; it does not mean
-that every database value is encrypted. Verification requires a complete scan
-and fails for plaintext, legacy app-key ciphertext, or invalid envelopes in
-registered encrypted fields, unclassified columns, or legacy confidential
-conversation data.
+For completed jobs in every mode, invalid ciphertext or an invalid search token
+makes `progress.pass` false. A completed `dry_run` or `execute` job with `pass=true`
+only means no such errors were found in the processed rows; bounded jobs may
+leave rows unprocessed. Agent-credential decryption failures during `execute`
+fail the job and roll back its current batch.
+
+Only a completed, unbounded `verify` job with `pass=true` confirms compliance
+with the reviewed policy for its scope. It also rejects remaining plaintext,
+legacy app-key ciphertext, missing row contexts, unclassified columns, and
+legacy confidential conversation data. It does not mean that every database
+value is encrypted.
 
 ## Migrate legacy agent credentials
 
@@ -131,18 +145,20 @@ Complete this migration **under the existing app key before changing the KMS
 root**. It covers `agent_instances.instance_token` and both passkey fields listed
 above. It does not change routing or deploy a new KMS.
 
-1. Deploy this version to all API replicas and task workers with
-   `DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED=false`. Keep the existing
-   `DB_ENCRYPTION_KEY`, key ID, and `ENCRYPTION_KEY` unchanged. Do not turn off
-   already-enabled field encryption for other columns. Let existing backfill
-   jobs finish or cancel them before deployment.
-2. Confirm every old reader and writer has drained. New readers accept field
-   envelopes, legacy `nonce:ciphertext`, and historical plaintext credentials.
-   A legacy decryption failure is an error, not a plaintext fallback.
-3. Scan and dry-run the explicit scope below while the old app key is available.
-   Inspect `invalid_envelope` in scans and `invalid_envelopes` in job progress;
-   both must be zero. `legacy_encrypted` counts valid app-key ciphertext that
-   still needs conversion. Dry-run does not rewrite data.
+1. Finish or cancel existing backfill jobs. Start one new-version API canary
+   outside user traffic with `DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED=false`.
+   Keep the existing `DB_ENCRYPTION_KEY`, key ID, and `ENCRYPTION_KEY` unchanged.
+   Do not turn off already-enabled field encryption for other columns.
+2. Use the canary to scan and run an **unbounded dry-run** of the explicit scope
+   below before replacing the serving replicas. Require `status: "completed"`,
+   `progress.pass: true`, and zero `invalid_envelopes`. A capped scan alone is
+   not sufficient. Fix unreadable rows or key configuration before continuing.
+   `legacy_encrypted` counts valid app-key ciphertext still needing conversion;
+   dry-run does not rewrite data.
+3. Deploy this version to all API replicas and task workers, keeping the new
+   gate false. Confirm every old reader and writer has drained. Reads accept
+   field envelopes, legacy ciphertext, and historical plaintext. Test existing
+   agent authentication and passkey login/recovery before enabling new writes.
 4. Set both `DB_ENCRYPTION_WRITE_ENABLED=true` and
    `DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED=true` on all API replicas and
    workers. Ensure deployment configuration passes the new variable through to
@@ -177,6 +193,16 @@ Dry-run request for `POST /v1/admin/database-encryption/jobs`:
   "actions": ["encrypt"]
 }
 ```
+
+Legacy ciphertext is identified by its 24-character hexadecimal nonce followed
+by `:`. Other plaintext credentials may contain colons. Once that prefix or the
+field-envelope marker is recognized, malformed ciphertext and decryption errors
+are never treated as plaintext. Missing or incorrect keys fail authentication
+lookups and migration validation even while the new write gate is false.
+
+User/admin instance lists omit an unreadable `instance_token` and emit a warning
+containing only the instance ID, so one bad token does not hide the other rows.
+A successful list response is not proof that every credential is readable.
 
 Once new writes or backfills begin, rollback must retain dual-read support.
 Disabling the new gate under the old root resumes legacy writes; verification

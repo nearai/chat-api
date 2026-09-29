@@ -91,9 +91,10 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     server
 }
 
-async fn create_test_server_and_db_inner(
+/// Expose shared state for tests that exercise startup tasks such as job recovery.
+pub async fn create_test_server_with_state(
     test_config: TestServerConfig,
-) -> (TestServer, database::Database) {
+) -> (TestServer, database::Database, AppState) {
     // Load .env file
     dotenvy::dotenv().ok();
 
@@ -441,18 +442,19 @@ async fn create_test_server_and_db_inner(
     };
 
     // Create router
-    let app = create_router_with_cors(app_state, config::CorsConfig::default());
+    let app = create_router_with_cors(app_state.clone(), config::CorsConfig::default());
 
     // Create test server
     let server = TestServer::new(app).expect("Failed to create test server");
-    (server, db)
+    (server, db, app_state)
 }
 
 /// Create a test server and database for tests that need to pre-populate DB (e.g. token/cost rate limit).
 pub async fn create_test_server_and_db(
     test_config: TestServerConfig,
 ) -> (TestServer, database::Database) {
-    create_test_server_and_db_inner(test_config).await
+    let (server, db, _) = create_test_server_with_state(test_config).await;
+    (server, db)
 }
 
 /// Helper function to get/create a user and get a session token via mock login.

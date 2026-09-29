@@ -1,7 +1,7 @@
 mod common;
 
 use axum_test::TestServer;
-use common::{create_test_server_and_db, mock_login, TestServerConfig};
+use common::{create_test_server_with_state, mock_login, TestServerConfig};
 use database::{encryption, field_encryption, Database};
 use http::{HeaderName, HeaderValue};
 use serde_json::{json, Value};
@@ -21,6 +21,7 @@ fn scope() -> Value {
 struct Fixture {
     server: TestServer,
     db: Database,
+    state: api::AppState,
     auth: HeaderValue,
     user_id: UserId,
     instance_id: Uuid,
@@ -28,7 +29,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let (server, db) = create_test_server_and_db(TestServerConfig {
+        let (server, db, state) = create_test_server_with_state(TestServerConfig {
             database_encryption_write_enabled: Some(true),
             database_encryption_agent_secrets_write_enabled: Some(false),
             ..Default::default()
@@ -68,6 +69,7 @@ impl Fixture {
         Self {
             server,
             db,
+            state,
             auth: HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
             user_id,
             instance_id: instance.id,
@@ -113,6 +115,10 @@ impl Fixture {
         assert_eq!(response.status_code(), 202);
         let accepted: Value = response.json();
         let id = accepted["job_id"].as_str().unwrap();
+        self.wait_for_job(id).await
+    }
+
+    async fn wait_for_job(&self, id: &str) -> Value {
         for _ in 0..200 {
             let response = self
                 .server
@@ -230,7 +236,7 @@ async fn agent_credentials_roll_out_and_backfill_without_the_old_app_key() {
 
     // Historical plaintext is converted too; the other passkey field is still legacy ciphertext.
     fixture.db.pool().get().await.unwrap().execute(
-        "UPDATE user_passkey_credentials SET backup_passphrase='historical-plaintext' WHERE user_id=$1",
+        "UPDATE user_passkey_credentials SET backup_passphrase='historical:plaintext' WHERE user_id=$1",
         &[&fixture.user_id],
     ).await.unwrap();
     let migrated = fixture.job("execute").await;
@@ -255,7 +261,7 @@ async fn agent_credentials_roll_out_and_backfill_without_the_old_app_key() {
             "user_passkey_credentials",
             "backup_passphrase",
             fixture.user_id.0,
-            "historical-plaintext",
+            "historical:plaintext",
         ),
     ]
     .into_iter()
@@ -295,7 +301,7 @@ async fn agent_credentials_roll_out_and_backfill_without_the_old_app_key() {
             .get_user_passkey_credentials(fixture.user_id)
             .await
             .unwrap(),
-        Some(("auth-secret".into(), "historical-plaintext".into()))
+        Some(("auth-secret".into(), "historical:plaintext".into()))
     );
     repository
         .upsert_user_passkey_credentials(fixture.user_id, "new-auth", "new-backup")
@@ -337,11 +343,13 @@ async fn agent_credentials_roll_out_and_backfill_without_the_old_app_key() {
 async fn unreadable_credentials_fail_backfill_without_overwriting_data() {
     let fixture = Fixture::new().await;
     fixture.enable_new_writes();
-    let wrong_key_ciphertext = encryption::encrypt_with_key(&[99; 32], "unreadable-token").unwrap();
+    let wrong_key = rand::random::<[u8; 32]>();
+    let wrong_key_ciphertext =
+        encryption::encrypt_with_key(&wrong_key, "unreadable-token").unwrap();
     for invalid in [
         wrong_key_ciphertext,
         r#"{"__near_db_encrypted":1}"#.to_string(),
-        "bad-nonce:bad-ciphertext".to_string(),
+        "0123456789abcdef01234567:bad-ciphertext".to_string(),
     ] {
         fixture
             .db
@@ -387,5 +395,187 @@ async fn unreadable_credentials_fail_backfill_without_overwriting_data() {
         assert!(!failed.to_string().contains(&invalid));
         assert_eq!(fixture.job("verify").await["progress"]["pass"], false);
     }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn unreadable_tokens_do_not_hide_instance_lists_or_bypass_authentication() {
+    let fixture = Fixture::new().await;
+    let repository = fixture.db.agent_repository();
+    let healthy = repository
+        .create_instance(CreateInstanceParams {
+            user_id: fixture.user_id,
+            instance_id: Uuid::new_v4().to_string(),
+            name: "healthy-instance".into(),
+            public_ssh_key: None,
+            instance_url: None,
+            instance_token: Some("healthy-token".into()),
+            dashboard_url: None,
+            agent_api_base_url: None,
+            service_type: None,
+        })
+        .await
+        .unwrap();
+
+    let wrong_key = rand::random::<[u8; 32]>();
+    let unreadable = encryption::encrypt_with_key(&wrong_key, "unreadable-token").unwrap();
+    fixture
+        .db
+        .pool()
+        .get()
+        .await
+        .unwrap()
+        .execute(
+            "UPDATE agent_instances SET instance_token=$2 WHERE id=$1",
+            &[&fixture.instance_id, &unreadable],
+        )
+        .await
+        .unwrap();
+
+    // The write gate is still off: deploy-time reads must not break the lists.
+    let (user_instances, count) = repository
+        .list_user_instances(fixture.user_id, 100, 0)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    let (admin_instances, _) = repository.list_all_instances(100, 0).await.unwrap();
+    let (usage_instances, _, _) = repository
+        .list_all_instances_with_usage(100, 0)
+        .await
+        .unwrap();
+    for instances in [user_instances, admin_instances, usage_instances] {
+        let broken = instances
+            .iter()
+            .find(|row| row.id == fixture.instance_id)
+            .unwrap();
+        assert_eq!(broken.name, "credential-migration");
+        assert_eq!(broken.instance_token, None);
+        let working = instances.iter().find(|row| row.id == healthy.id).unwrap();
+        assert_eq!(working.instance_token.as_deref(), Some("healthy-token"));
+    }
+    assert!(repository.get_instance(fixture.instance_id).await.is_err());
+    assert!(repository
+        .get_instance_by_instance_id(&healthy.instance_id)
+        .await
+        .unwrap()
+        .is_some());
+
+    // Missing the old key never turns ciphertext into a usable credential.
+    {
+        let _old_key = AppKeyGuard::remove();
+        assert!(repository.get_instance(healthy.id).await.is_err());
+        assert!(repository
+            .get_user_passkey_credentials(fixture.user_id)
+            .await
+            .is_err());
+        let (instances, _) = repository
+            .list_user_instances(fixture.user_id, 100, 0)
+            .await
+            .unwrap();
+        assert!(instances
+            .iter()
+            .all(|instance| instance.instance_token.is_none()));
+    }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn recovery_never_expands_a_previously_accepted_job_scope() {
+    let fixture = Fixture::new().await;
+    let before = fixture.stored().await;
+
+    let response = fixture
+        .server
+        .post("/v1/admin/database-encryption/jobs")
+        .add_header(
+            HeaderName::from_static("authorization"),
+            fixture.auth.clone(),
+        )
+        .json(&json!({
+            "mode": "dry_run",
+            "scope": {"tables": ["agent_instances"]},
+            "actions": ["encrypt"]
+        }))
+        .await;
+    assert_eq!(response.status_code(), 202);
+    let accepted: Value = response.json();
+    let pinned_scope = json!({"tables": [], "fields": [
+        {"table": "agent_instances", "column": "auth_session_token"},
+        {"table": "agent_instances", "column": "dashboard_url"},
+        {"table": "agent_instances", "column": "instance_token"},
+        {"table": "agent_instances", "column": "instance_url"}
+    ]});
+    assert_eq!(accepted["scope"], pinned_scope);
+    let completed = fixture
+        .wait_for_job(accepted["job_id"].as_str().unwrap())
+        .await;
+    assert_eq!(completed["status"], "completed", "{completed}");
+    assert_eq!(completed["scope"], pinned_scope);
+
+    // Old table scopes cannot silently add instance_token, with either gate value.
+    // Old whole-database verify jobs also need a new, explicit snapshot.
+    for (mode, scope, status, enabled) in [
+        (
+            "execute",
+            json!({"tables": ["agent_instances"]}),
+            "queued",
+            false,
+        ),
+        (
+            "execute",
+            json!({"tables": ["agent_instances"]}),
+            "running",
+            true,
+        ),
+        ("verify", json!({}), "queued", true),
+    ] {
+        let mut config = fixture.db.pool().field_encryption().unwrap();
+        config.agent_secrets_write_enabled = enabled;
+        fixture.db.pool().set_field_encryption(config);
+        let id = Uuid::new_v4();
+        let cursor = json!({"field_index": 1, "after_id": fixture.instance_id});
+        let actions = if mode == "verify" {
+            json!(["verify"])
+        } else {
+            json!(["encrypt"])
+        };
+        fixture.db.pool().get().await.unwrap().execute(
+            "INSERT INTO database_encryption_jobs(id,mode,status,scope,actions,batch_size,cursor)
+             VALUES($1,$2,$3,$4,$5,1,$6)",
+            &[&id, &mode, &status, &scope, &actions, &cursor],
+        ).await.unwrap();
+        api::database_encryption::recover_jobs(fixture.state.clone()).await;
+        let failed = fixture.wait_for_job(&id.to_string()).await;
+        assert_eq!(failed["status"], "failed", "{failed}");
+        assert_eq!(failed["last_error_class"], "scope_requires_confirmation");
+        assert_eq!(failed["cursor"], cursor);
+        assert_eq!(fixture.stored().await, before);
+    }
+
+    // An old field-scoped job can still resume; it does not gain credentials.
+    let id = Uuid::new_v4();
+    let explicit_scope = json!({"fields": [
+        {"table": "agent_instances", "column": "instance_url"}
+    ]});
+    fixture
+        .db
+        .pool()
+        .get()
+        .await
+        .unwrap()
+        .execute(
+            "INSERT INTO database_encryption_jobs(id,mode,status,scope,actions,batch_size)
+         VALUES($1,'execute','running',$2,'[\"encrypt\"]',1)",
+            &[&id, &explicit_scope],
+        )
+        .await
+        .unwrap();
+    api::database_encryption::recover_jobs(fixture.state.clone()).await;
+    let completed = fixture.wait_for_job(&id.to_string()).await;
+    assert_eq!(completed["status"], "completed", "{completed}");
+    assert_eq!(completed["progress"]["pass"], true);
+    assert_eq!(fixture.stored().await, before);
     fixture.cleanup().await;
 }
