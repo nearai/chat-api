@@ -147,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
             key,
             key_id: config.database_encryption.key_id.clone(),
             write_enabled: config.database_encryption.write_enabled,
+            agent_secrets_write_enabled: config.database_encryption.agent_secrets_write_enabled,
         });
 
     tracing::info!("Running migrations...");

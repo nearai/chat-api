@@ -1,3 +1,4 @@
+pub mod agent_secrets;
 pub mod cluster_manager;
 pub mod encryption;
 pub mod field_encryption;

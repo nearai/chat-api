@@ -3495,20 +3495,13 @@ pub async fn admin_patch_instance(
 
     tracing::info!("Admin: Patching instance id={}", id);
 
-    // Encrypt instance_token if provided
-    let encrypted_token = match request.instance_token {
-        Some(ref token) if token.is_empty() => {
-            return Err(ApiError::bad_request("instance_token must not be empty"));
-        }
-        Some(ref token) => {
-            let encrypted = database::encryption::encrypt(token).map_err(|e| {
-                tracing::error!("Failed to encrypt instance token: error={}", e);
-                ApiError::internal_server_error("Failed to encrypt instance token")
-            })?;
-            Some(encrypted)
-        }
-        None => None,
-    };
+    if request
+        .instance_token
+        .as_ref()
+        .is_some_and(|token| token.is_empty())
+    {
+        return Err(ApiError::bad_request("instance_token must not be empty"));
+    }
 
     // Verify instance exists first
     let _existing = app_state
@@ -3527,7 +3520,7 @@ pub async fn admin_patch_instance(
             id,
             request.agent_api_base_url,
             request.instance_url,
-            encrypted_token,
+            request.instance_token,
             request.dashboard_url,
             None, // renaming is a migration concern, not something this patch endpoint exposes
         )

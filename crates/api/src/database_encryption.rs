@@ -21,6 +21,7 @@ fn worker() -> &'static Semaphore {
 #[derive(Clone, Copy)]
 enum Kind {
     Text,
+    AgentSecret,
 }
 
 #[derive(Clone, Copy)]
@@ -112,24 +113,34 @@ const FIELDS: &[Field] = &[
         reason: "Private agent dashboard URL",
         token: None,
     },
+    // Keep new entries at the end: in-flight jobs persist a field index.
+    Field {
+        table: "agent_instances",
+        column: "instance_token",
+        id_column: "id",
+        kind: Kind::AgentSecret,
+        reason: "Agent instance credential",
+        token: None,
+    },
+    Field {
+        table: "user_passkey_credentials",
+        column: "auth_secret",
+        id_column: "user_id",
+        kind: Kind::AgentSecret,
+        reason: "Agent provisioning credential",
+        token: None,
+    },
+    Field {
+        table: "user_passkey_credentials",
+        column: "backup_passphrase",
+        id_column: "user_id",
+        kind: Kind::AgentSecret,
+        reason: "Agent recovery credential",
+        token: None,
+    },
 ];
 
 const APPROVED: &[(&str, &str, &str)] = &[
-    (
-        "agent_instances",
-        "instance_token",
-        "Ciphertext managed by the legacy application encryption layer",
-    ),
-    (
-        "user_passkey_credentials",
-        "auth_secret",
-        "Ciphertext managed by the legacy application encryption layer",
-    ),
-    (
-        "user_passkey_credentials",
-        "backup_passphrase",
-        "Ciphertext managed by the legacy application encryption layer",
-    ),
     (
         "conversations",
         "id",
@@ -698,6 +709,7 @@ pub struct FieldCount {
     reason: &'static str,
     plaintext: i64,
     encrypted: i64,
+    legacy_encrypted: i64,
     empty: i64,
     invalid_envelope: i64,
     scanned: i64,
@@ -786,6 +798,43 @@ fn search_token_matches(
     .is_ok_and(|expected| expected == stored)
 }
 
+enum StoredValue {
+    FieldEncrypted(String),
+    LegacyEncrypted(String),
+    Plaintext(String),
+}
+
+/// Share format detection and decryption between the scan and migration worker.
+fn read_value(
+    config: &services::db_pool::FieldEncryptionConfig,
+    field: &Field,
+    id: Uuid,
+    raw: &str,
+) -> anyhow::Result<StoredValue> {
+    let is_envelope = if matches!(field.kind, Kind::AgentSecret) {
+        database::agent_secrets::is_field_envelope(raw)
+    } else {
+        serde_json::from_str::<Value>(raw)
+            .is_ok_and(|value| database::field_encryption::is_envelope(&value))
+    };
+    if is_envelope {
+        return database::field_encryption::decrypt(
+            &config.key,
+            &config.key_id,
+            field.table,
+            field.column,
+            id,
+            raw,
+        )
+        .map(StoredValue::FieldEncrypted);
+    }
+    if matches!(field.kind, Kind::AgentSecret) && database::agent_secrets::is_legacy_ciphertext(raw)
+    {
+        return database::agent_secrets::decrypt_legacy(raw).map(StoredValue::LegacyEncrypted);
+    }
+    Ok(StoredValue::Plaintext(raw.to_owned()))
+}
+
 async fn counts(
     state: &AppState,
     fields: &[&Field],
@@ -821,6 +870,7 @@ async fn counts(
             reason: field.reason,
             plaintext: 0,
             encrypted: 0,
+            legacy_encrypted: 0,
             empty: 0,
             invalid_envelope: 0,
             scanned: rows.len() as i64,
@@ -831,34 +881,19 @@ async fn counts(
                 count.empty += 1;
                 continue;
             };
-            match serde_json::from_str::<Value>(&raw) {
-                Ok(value) if database::field_encryption::is_envelope(&value) => {
-                    let id: Option<Uuid> = row.get(0);
+            match read_value(&config, field, row.get(0), &raw) {
+                Ok(StoredValue::FieldEncrypted(plaintext)) => {
                     let stored_token: Option<Vec<u8>> = row.get(2);
-                    if id.is_some_and(|id| {
-                        database::field_encryption::decrypt(
-                            &config.key,
-                            &config.key_id,
-                            field.table,
-                            field.column,
-                            id,
-                            &raw,
-                        )
-                        .is_ok_and(|plaintext| {
-                            search_token_matches(
-                                &config.key,
-                                field,
-                                &plaintext,
-                                stored_token.as_deref(),
-                            )
-                        })
-                    }) {
+                    if search_token_matches(&config.key, field, &plaintext, stored_token.as_deref())
+                    {
                         count.encrypted += 1
                     } else {
                         count.invalid_envelope += 1
                     }
                 }
-                _ => count.plaintext += 1,
+                Ok(StoredValue::LegacyEncrypted(_)) => count.legacy_encrypted += 1,
+                Ok(StoredValue::Plaintext(_)) => count.plaintext += 1,
+                Err(_) => count.invalid_envelope += 1,
             }
         }
         result.push(count);
@@ -877,6 +912,7 @@ pub async fn scan(
     let totals = json!({
         "plaintext": counts.iter().map(|c| c.plaintext).sum::<i64>(),
         "encrypted": counts.iter().map(|c| c.encrypted).sum::<i64>(),
+        "legacy_encrypted": counts.iter().map(|c| c.legacy_encrypted).sum::<i64>(),
         "empty": counts.iter().map(|c| c.empty).sum::<i64>(),
         "invalid_envelope": counts.iter().map(|c| c.invalid_envelope).sum::<i64>(),
         "scanned": counts.iter().map(|c| c.scanned).sum::<i64>(),
@@ -941,11 +977,30 @@ pub async fn create_job(
     if req.actions.as_slice() != [action] {
         return Err(bad("actions do not match mode"));
     }
-    req.scope.tables.sort();
-    req.scope.tables.dedup();
+    let fields = selected(&req.scope)?;
+    if matches!(req.mode, Mode::Execute)
+        && fields
+            .iter()
+            .any(|field| matches!(field.kind, Kind::AgentSecret))
+        && !config.agent_secrets_write_enabled
+    {
+        return Err(bad(
+            "execute for agent credentials requires DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED=true",
+        ));
+    }
+    // Freeze table/default scopes at creation. A later registry update must not
+    // add fields to an already-authorized job when it resumes.
+    req.scope = Scope {
+        tables: Vec::new(),
+        fields: fields
+            .iter()
+            .map(|field| FieldName {
+                table: field.table.into(),
+                column: field.column.into(),
+            })
+            .collect(),
+    };
     req.scope.fields.sort();
-    req.scope.fields.dedup();
-    selected(&req.scope)?;
     let mode = match req.mode {
         Mode::DryRun => "dry_run",
         Mode::Execute => "execute",
@@ -1022,11 +1077,19 @@ async fn run_locked_job(
         .ok_or_else(|| anyhow::anyhow!("database encryption is not configured"))?;
     let Some(job)=client.query_opt("UPDATE database_encryption_jobs SET status='running',started_at=COALESCE(started_at,NOW()) WHERE id=$1 AND status IN ('queued','running') RETURNING mode,scope,batch_size,max_rows,cursor,progress",&[&id]).await? else { return Ok(()) };
     let mode: String = job.get(0);
-    if write_gate_blocks(&mode, execute_writes_enabled(state)) {
-        fail_write_disabled_job(state, id).await?;
+    let scope: Scope = serde_json::from_value(job.get(1))?;
+    // Older jobs did not freeze table/default scopes. Their original field set
+    // cannot be recovered from the stored cursor, so require a new explicit job.
+    if !scope.tables.is_empty() || scope.fields.is_empty() {
+        mark_job_failed(
+            state,
+            id,
+            "scope_requires_confirmation",
+            "Legacy job scope is not pinned; review the fields and create a new job",
+        )
+        .await?;
         return Ok(());
     }
-    let scope: Scope = serde_json::from_value(job.get(1))?;
     let batch: i64 = job.get(2);
     let max: Option<i64> = job.get(3);
     let cursor: Value = job.get(4);
@@ -1040,9 +1103,10 @@ async fn run_locked_job(
     let mut processed = progress["processed"].as_i64().unwrap_or(0);
     let mut encrypted = progress["encrypted"].as_i64().unwrap_or(0);
     let mut plaintext = progress["plaintext"].as_i64().unwrap_or(0);
+    let mut legacy_encrypted = progress["legacy_encrypted"].as_i64().unwrap_or(0);
     let mut invalid = progress["invalid_envelopes"].as_i64().unwrap_or(0);
     while field_index < fields.len() && max.is_none_or(|limit| processed < limit) {
-        if write_gate_blocks(&mode, execute_writes_enabled(state)) {
+        if write_gate_blocks(&mode, execute_writes_enabled(state, &fields)) {
             fail_write_disabled_job(state, id).await?;
             return Ok(());
         }
@@ -1076,66 +1140,72 @@ async fn run_locked_job(
             processed += 1;
             let raw: Option<String> = row.get(1);
             let Some(raw) = raw else { continue };
-            match serde_json::from_str::<Value>(&raw) {
-                Ok(value) if database::field_encryption::is_envelope(&value) => {
+            let plaintext_value = match read_value(&config, field, row_id, &raw) {
+                Ok(StoredValue::FieldEncrypted(plaintext)) => {
                     let stored_token: Option<Vec<u8>> = row.get(2);
-                    let invalid_token_or_envelope = match database::field_encryption::decrypt(
+                    if !search_token_matches(
                         &config.key,
-                        &config.key_id,
-                        field.table,
-                        field.column,
-                        row_id,
-                        &raw,
+                        field,
+                        &plaintext,
+                        stored_token.as_deref(),
                     ) {
-                        Ok(plaintext) => !search_token_matches(
-                            &config.key,
-                            field,
-                            &plaintext,
-                            stored_token.as_deref(),
-                        ),
-                        Err(_) => true,
-                    };
-                    if invalid_token_or_envelope {
                         invalid += 1
                     }
+                    continue;
                 }
-                _ if mode == "execute" => {
-                    ids.push(row_id);
-                    if let Some((_, domain)) = field.token {
-                        let normalized = normalized_token_value(domain, &raw);
-                        tokens.push(database::field_encryption::search_token(
-                            &config.key,
-                            domain,
-                            &normalized,
-                        )?);
+                Ok(StoredValue::LegacyEncrypted(value)) => {
+                    if mode != "execute" {
+                        legacy_encrypted += 1;
                     }
-                    values.push(database::field_encryption::encrypt(
+                    value
+                }
+                Ok(StoredValue::Plaintext(value)) => {
+                    if mode != "execute" {
+                        plaintext += 1;
+                    }
+                    value
+                }
+                Err(error) => {
+                    if mode == "execute" && matches!(field.kind, Kind::AgentSecret) {
+                        // Roll back the batch instead of wrapping unreadable legacy ciphertext.
+                        return Err(error);
+                    }
+                    invalid += 1;
+                    continue;
+                }
+            };
+            if mode == "execute" {
+                ids.push(row_id);
+                if let Some((_, domain)) = field.token {
+                    let normalized = normalized_token_value(domain, &plaintext_value);
+                    tokens.push(database::field_encryption::search_token(
                         &config.key,
-                        &config.key_id,
-                        field.table,
-                        field.column,
-                        row_id,
-                        &raw,
+                        domain,
+                        &normalized,
                     )?);
                 }
-                _ => plaintext += 1,
+                values.push(database::field_encryption::encrypt(
+                    &config.key,
+                    &config.key_id,
+                    field.table,
+                    field.column,
+                    row_id,
+                    &plaintext_value,
+                )?);
             }
         }
         if mode == "execute" && !ids.is_empty() {
-            let expression = match field.kind {
-                Kind::Text => "batch.value",
-            };
             if let Some((token_column, _)) = field.token {
                 let target_id = row_id_expression(field, Some("target"));
-                let update=format!("UPDATE {table} target SET {column}={expression},{token_column}=batch.token FROM UNNEST($1::uuid[],$2::text[],$3::bytea[]) batch(id,value,token) WHERE {target_id}=batch.id",table=field.table,column=field.column);
+                let update=format!("UPDATE {table} target SET {column}=batch.value,{token_column}=batch.token FROM UNNEST($1::uuid[],$2::text[],$3::bytea[]) batch(id,value,token) WHERE {target_id}=batch.id",table=field.table,column=field.column);
                 encrypted += tx.execute(&update, &[&ids, &values, &tokens]).await? as i64;
             } else {
                 let target_id = row_id_expression(field, Some("target"));
-                let update=format!("UPDATE {table} target SET {column}={expression} FROM UNNEST($1::uuid[],$2::text[]) batch(id,value) WHERE {target_id}=batch.id",table=field.table,column=field.column);
+                let update=format!("UPDATE {table} target SET {column}=batch.value FROM UNNEST($1::uuid[],$2::text[]) batch(id,value) WHERE {target_id}=batch.id",table=field.table,column=field.column);
                 encrypted += tx.execute(&update, &[&ids, &values]).await? as i64;
             }
         }
-        tx.execute("UPDATE database_encryption_jobs SET progress=$2,cursor=$3 WHERE id=$1",&[&id,&json!({"processed":processed,"encrypted":encrypted,"plaintext":plaintext,"invalid_envelopes":invalid}),&json!({"field_index":field_index,"after_id":after})]).await?;
+        tx.execute("UPDATE database_encryption_jobs SET progress=$2,cursor=$3 WHERE id=$1",&[&id,&json!({"processed":processed,"encrypted":encrypted,"plaintext":plaintext,"legacy_encrypted":legacy_encrypted,"invalid_envelopes":invalid}),&json!({"field_index":field_index,"after_id":after})]).await?;
         tx.commit().await?;
     }
     let inventory = if mode == "verify" {
@@ -1153,12 +1223,13 @@ async fn run_locked_job(
         );
         missing_encryption_contexts += client.query_one(&query, &[]).await?.get::<_, i64>(0);
     }
-    let pass = mode != "verify"
-        || plaintext == 0
-            && invalid == 0
-            && missing_encryption_contexts == 0
-            && inventory.unclassified.is_empty()
-            && inventory.legacy_confidential.is_empty();
+    let pass = invalid == 0
+        && (mode != "verify"
+            || plaintext == 0
+                && legacy_encrypted == 0
+                && missing_encryption_contexts == 0
+                && inventory.unclassified.is_empty()
+                && inventory.legacy_confidential.is_empty());
     client.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1",&[&id,&json!({"pass":pass,"missing_encryption_contexts":missing_encryption_contexts,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
     Ok(())
 }
@@ -1175,11 +1246,14 @@ fn row_id_expression(field: &Field, qualifier: Option<&str>) -> String {
     }
 }
 
-fn execute_writes_enabled(state: &AppState) -> bool {
-    state
-        .db_pool
-        .field_encryption()
-        .is_some_and(|config| config.write_enabled)
+fn execute_writes_enabled(state: &AppState, fields: &[&Field]) -> bool {
+    state.db_pool.field_encryption().is_some_and(|config| {
+        config.write_enabled
+            && (config.agent_secrets_write_enabled
+                || !fields
+                    .iter()
+                    .any(|field| matches!(field.kind, Kind::AgentSecret)))
+    })
 }
 
 fn write_gate_blocks(mode: &str, write_enabled: bool) -> bool {
@@ -1191,7 +1265,7 @@ async fn fail_write_disabled_job(state: &AppState, id: Uuid) -> anyhow::Result<(
         state,
         id,
         "write_disabled",
-        "DB_ENCRYPTION_WRITE_ENABLED is disabled",
+        "Database encryption writes are disabled for the selected scope",
     )
     .await
 }
@@ -1385,18 +1459,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_application_cipher_fields_are_not_double_encrypted() {
+    fn agent_credentials_use_the_legacy_aware_migration() {
         for (table, column) in [
             ("agent_instances", "instance_token"),
             ("user_passkey_credentials", "auth_secret"),
             ("user_passkey_credentials", "backup_passphrase"),
         ] {
-            let (kind, reason) = classification(table, column, "text").unwrap();
-            assert_eq!(kind, "approved_plaintext");
-            assert!(reason.contains("legacy application encryption"));
-            assert!(!FIELDS
+            let (kind, _) = classification(table, column, "text").unwrap();
+            assert_eq!(kind, "encrypt");
+            let field = FIELDS
                 .iter()
-                .any(|field| field.table == table && field.column == column));
+                .find(|field| field.table == table && field.column == column)
+                .unwrap();
+            assert!(matches!(field.kind, Kind::AgentSecret));
+            if table == "user_passkey_credentials" {
+                assert_eq!(row_id_expression(field, None), "user_id");
+            }
         }
     }
 

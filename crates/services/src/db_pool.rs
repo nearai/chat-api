@@ -25,6 +25,8 @@ pub struct FieldEncryptionConfig {
     pub key: [u8; 32],
     pub key_id: String,
     pub write_enabled: bool,
+    /// Separate rollout gate for fields previously encrypted by the dstack app key.
+    pub agent_secrets_write_enabled: bool,
 }
 
 impl DbPool {
