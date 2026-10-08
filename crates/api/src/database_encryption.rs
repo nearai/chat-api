@@ -377,6 +377,31 @@ const REVIEWED_PLAINTEXT_FIELDS: &[(&str, &str, &str)] = &[
         "frontend_callback",
         "User-controlled callback URL",
     ),
+    (
+        "oauth_states",
+        "frontend_response_mode",
+        "Queryable callback protocol enum",
+    ),
+    (
+        "oauth_states",
+        "frontend_code_challenge",
+        "Public PKCE challenge derived from a browser-held verifier",
+    ),
+    (
+        "oauth_states",
+        "frontend_state",
+        "Short-lived random OAuth client correlation value returned to the same client",
+    ),
+    (
+        "oauth_callback_codes",
+        "code_hash",
+        "One-way hash of a short-lived one-time callback code",
+    ),
+    (
+        "oauth_callback_codes",
+        "code_challenge",
+        "Public PKCE challenge derived from a browser-held verifier",
+    ),
     ("user_settings", "content", "Arbitrary user settings JSON"),
     (
         "app_config",
@@ -582,6 +607,7 @@ const CLASSIFIED_TABLES: &[&str] = &[
     "models",
     "near_used_nonces",
     "oauth_accounts",
+    "oauth_callback_codes",
     "oauth_states",
     "oauth_tokens",
     "payment_webhooks",

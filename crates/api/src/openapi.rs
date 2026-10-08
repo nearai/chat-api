@@ -18,6 +18,7 @@ use utoipa::OpenApi;
         crate::routes::oauth::google_login,
         crate::routes::oauth::github_login,
         crate::routes::oauth::oauth_callback,
+        crate::routes::oauth::exchange_oauth_callback_code,
         crate::routes::oauth::near_auth,
         crate::routes::oauth::logout,
         // User endpoints

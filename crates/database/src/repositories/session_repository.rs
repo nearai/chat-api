@@ -12,21 +12,19 @@ pub struct PostgresSessionRepository {
     pool: DbPool,
 }
 
+pub(crate) fn generate_session_token() -> String {
+    format!("sess_{}", Uuid::new_v4().to_string().replace("-", ""))
+}
+
+pub(crate) fn hash_session_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 impl PostgresSessionRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
-    }
-
-    /// Generate a new session token
-    fn generate_session_token() -> String {
-        format!("sess_{}", Uuid::new_v4().to_string().replace("-", ""))
-    }
-
-    /// Hash a session token for storage
-    fn hash_session_token(token: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        format!("{:x}", hasher.finalize())
     }
 }
 
@@ -44,8 +42,8 @@ impl SessionRepository for PostgresSessionRepository {
         tracing::debug!("Session expiry set to: {} (30 days from now)", expires_at);
 
         // Generate token and hash it
-        let token = Self::generate_session_token();
-        let token_hash = Self::hash_session_token(&token);
+        let token = generate_session_token();
+        let token_hash = hash_session_token(&token);
 
         tracing::debug!("Generated session token and hash for user_id={}", user_id);
 

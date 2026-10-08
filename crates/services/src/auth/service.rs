@@ -1,5 +1,6 @@
 use anyhow::Context;
 use async_trait::async_trait;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use near_api::signer::NEP413Payload;
@@ -14,9 +15,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::ports::{
-    EmailAuthService, EmailAuthSuccess, EmailVerificationChallengeRepository, OAuthRepository,
-    OAuthService, OAuthState, OAuthTokens, OAuthUserInfo, RequestEmailCodeError, SessionRepository,
-    UserSession, VerifyEmailCodeError,
+    EmailAuthService, EmailAuthSuccess, EmailVerificationChallengeRepository, OAuthCallbackCode,
+    OAuthCallbackSuccess, OAuthCodeExchangeError, OAuthCodeExchangeSuccess,
+    OAuthFrontendResponseMode, OAuthRepository, OAuthService, OAuthState, OAuthTokens,
+    OAuthUserInfo, RequestEmailCodeError, SessionRepository, UserSession, VerifyEmailCodeError,
 };
 use super::{NearAuthService, NearNonceRepository};
 use crate::types::{SessionId, UserId};
@@ -24,6 +26,15 @@ use crate::user::ports::{OAuthProvider, UserRepository};
 
 type HmacSha256 = Hmac<Sha256>;
 const TURNSTILE_SITEVERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+const FRONTEND_CALLBACK_CODE_TTL_MINUTES: i64 = 2;
+
+fn sha256_hex(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+fn pkce_s256_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
 
 /// Custom error type for HTTP client
 #[derive(Debug, thiserror::Error)]
@@ -332,13 +343,14 @@ impl OAuthServiceImpl {
     }
 
     /// Internal implementation that handles the callback with a pre-validated state
-    /// Returns (UserSession, frontend_callback_url, is_new_user, provider)
+    /// Returns the authenticated session and the frontend handoff metadata that
+    /// was fixed at OAuth initiation time.
     async fn handle_callback_impl(
         &self,
         provider: OAuthProvider,
         code: String,
         oauth_state: OAuthState,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)> {
+    ) -> anyhow::Result<OAuthCallbackSuccess> {
         tracing::info!(
             provider = ?provider,
             redirect_uri_len = oauth_state.redirect_uri.len(),
@@ -417,12 +429,15 @@ impl OAuthServiceImpl {
             session.session_id
         );
 
-        Ok((
+        Ok(OAuthCallbackSuccess {
             session,
-            oauth_state.frontend_callback,
+            frontend_callback: oauth_state.frontend_callback,
+            frontend_response_mode: oauth_state.frontend_response_mode,
+            frontend_code_challenge: oauth_state.frontend_code_challenge,
+            frontend_state: oauth_state.frontend_state,
             is_new_user,
             provider,
-        ))
+        })
     }
 }
 
@@ -813,6 +828,9 @@ impl OAuthService for OAuthServiceImpl {
         provider: OAuthProvider,
         redirect_uri: String,
         frontend_callback: Option<String>,
+        frontend_response_mode: OAuthFrontendResponseMode,
+        frontend_code_challenge: Option<String>,
+        frontend_state: Option<String>,
     ) -> anyhow::Result<String> {
         tracing::info!(
             provider = ?provider,
@@ -863,6 +881,9 @@ impl OAuthService for OAuthServiceImpl {
             provider,
             redirect_uri: redirect_uri.clone(),
             frontend_callback: frontend_callback.clone(),
+            frontend_response_mode,
+            frontend_code_challenge,
+            frontend_state,
             created_at: Utc::now(),
         };
 
@@ -943,7 +964,7 @@ impl OAuthService for OAuthServiceImpl {
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)> {
+    ) -> anyhow::Result<OAuthCallbackSuccess> {
         let state_present = !state.is_empty();
         let state_len = state.len();
         tracing::info!(state_present, state_len, "Handling unified OAuth callback");
@@ -956,6 +977,52 @@ impl OAuthService for OAuthServiceImpl {
 
         self.handle_callback_impl(oauth_state.provider, code, oauth_state)
             .await
+    }
+
+    async fn create_frontend_callback_code(
+        &self,
+        session_id: SessionId,
+        code_challenge: String,
+        is_new_user: bool,
+    ) -> anyhow::Result<String> {
+        let mut code_bytes = [0_u8; 32];
+        rand::rng().fill(&mut code_bytes);
+        let code = URL_SAFE_NO_PAD.encode(code_bytes);
+        let callback_code = OAuthCallbackCode {
+            session_id,
+            code_challenge,
+            is_new_user,
+            expires_at: Utc::now() + chrono::Duration::minutes(FRONTEND_CALLBACK_CODE_TTL_MINUTES),
+        };
+
+        if let Err(error) = self
+            .oauth_repository
+            .store_callback_code(&sha256_hex(&code), &callback_code)
+            .await
+        {
+            if let Err(cleanup_error) = self.session_repository.delete_session(session_id).await {
+                tracing::error!(
+                    %session_id,
+                    error = %cleanup_error,
+                    "Failed to remove session after OAuth callback-code storage failure"
+                );
+            }
+            return Err(error);
+        }
+
+        Ok(code)
+    }
+
+    async fn exchange_frontend_callback_code(
+        &self,
+        code: String,
+        code_verifier: String,
+    ) -> Result<OAuthCodeExchangeSuccess, OAuthCodeExchangeError> {
+        self.oauth_repository
+            .exchange_callback_code(&sha256_hex(&code), &pkce_s256_challenge(&code_verifier))
+            .await
+            .map_err(OAuthCodeExchangeError::Internal)?
+            .ok_or(OAuthCodeExchangeError::InvalidOrExpired)
     }
 
     async fn revoke_session(&self, session_id: SessionId) -> anyhow::Result<()> {
