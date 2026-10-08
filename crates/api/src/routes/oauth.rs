@@ -565,10 +565,13 @@ fn validate_oauth_frontend_callback(
     })
 }
 
-/// Request body for logout
+/// Legacy logout request body retained for generated-client compatibility.
+///
+/// The server ignores this value and revokes the session authenticated by the
+/// bearer token. New clients do not need to supply it.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct LogoutRequest {
-    /// Session ID to revoke
+    /// Legacy session ID; ignored by the server.
     pub session_id: SessionId,
 }
 
@@ -1138,40 +1141,16 @@ pub async fn github_login(
 pub async fn logout(
     State(app_state): State<AppState>,
     Extension(authenticated_user): Extension<AuthenticatedUser>,
-    Json(request): Json<LogoutRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let session_id = request.session_id;
+    // The authentication middleware resolved this ID from the bearer token.
+    // Do not trust a client-supplied copy: it can be missing in legacy clients
+    // or stale after another tab signs in, and could revoke the wrong session.
+    let session_id = authenticated_user.session_id;
     tracing::info!(
-        "Logout requested for session_id: {} by user_id: {}",
+        "Logout requested for authenticated session_id: {} by user_id: {}",
         session_id,
         authenticated_user.user_id
     );
-
-    // Verify that the session belongs to the authenticated user
-    let session = app_state
-        .session_repository
-        .get_session_by_id(session_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get session {}: {}", session_id, e);
-            ApiError::logout_failed()
-        })?;
-
-    let session = session.ok_or_else(|| {
-        tracing::warn!("Session {} not found", session_id);
-        ApiError::session_id_not_found()
-    })?;
-
-    // Verify that the session belongs to the authenticated user
-    if session.user_id != authenticated_user.user_id {
-        tracing::warn!(
-            "User {} attempted to logout session {} which belongs to user {}",
-            authenticated_user.user_id,
-            session_id,
-            session.user_id
-        );
-        return Err(ApiError::forbidden("You can only logout your own sessions"));
-    }
 
     app_state
         .oauth_service
