@@ -62,6 +62,10 @@ pub struct AppState {
     pub agent_repository: Arc<dyn services::agent::ports::AgentRepository>,
     pub agent_proxy_service: Arc<dyn services::agent::AgentProxyService>,
     pub redirect_uri: String,
+    /// Whether callers may initiate the PKCE-bound frontend callback-code flow.
+    /// This is deliberately independent of legacy token callbacks so code mode
+    /// can be activated only after older API instances have drained.
+    pub oauth_frontend_code_mode_enabled: bool,
     /// Exact frontend origins allowed for user-provided OAuth frontend callbacks.
     /// None means origin restrictions are disabled.
     pub frontend_callback_allowed_origins: Option<Arc<Vec<String>>>,

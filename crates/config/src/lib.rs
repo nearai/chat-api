@@ -123,6 +123,9 @@ pub struct OAuthConfig {
     pub github_client_id: String,
     pub github_client_secret: String,
     pub redirect_uri: String,
+    /// Enables PKCE-bound frontend callback codes. Keep disabled until every
+    /// pre-code-mode API instance has drained from the deployment.
+    pub frontend_code_mode_enabled: bool,
 }
 
 impl Default for OAuthConfig {
@@ -134,6 +137,10 @@ impl Default for OAuthConfig {
             github_client_secret: std::env::var("GITHUB_CLIENT_SECRET").unwrap_or_default(),
             redirect_uri: std::env::var("REDIRECT_URI")
                 .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+            frontend_code_mode_enabled: std::env::var("OAUTH_FRONTEND_CODE_MODE_ENABLED")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(false),
         }
     }
 }
@@ -1034,6 +1041,24 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::ffi::OsString;
+
+    #[test]
+    #[serial]
+    fn oauth_frontend_code_mode_is_default_off_and_explicitly_enabled() {
+        const KEY: &str = "OAUTH_FRONTEND_CODE_MODE_ENABLED";
+        let original = std::env::var_os(KEY);
+
+        std::env::remove_var(KEY);
+        assert!(!OAuthConfig::default().frontend_code_mode_enabled);
+
+        std::env::set_var(KEY, "true");
+        assert!(OAuthConfig::default().frontend_code_mode_enabled);
+
+        match original {
+            Some(value) => std::env::set_var(KEY, value),
+            None => std::env::remove_var(KEY),
+        }
+    }
 
     #[test]
     fn database_connection_mode_requires_exact_values() {

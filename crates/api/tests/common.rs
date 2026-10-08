@@ -415,6 +415,7 @@ pub async fn create_test_server_with_state(
         agent_repository: agent_repo,
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
+        oauth_frontend_code_mode_enabled: config.oauth.frontend_code_mode_enabled,
         frontend_callback_allowed_origins: Some(Arc::new(
             vec!["http://localhost:3000".to_string()],
         )),

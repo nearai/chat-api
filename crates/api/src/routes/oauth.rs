@@ -586,6 +586,7 @@ pub struct OAuthInitQuery {
     pub frontend_state: Option<String>,
 }
 
+#[derive(Debug)]
 struct OAuthFrontendResponseOptions {
     mode: OAuthFrontendResponseMode,
     code_challenge: Option<String>,
@@ -607,6 +608,7 @@ fn is_pkce_verifier(value: &str) -> bool {
 
 fn validate_frontend_response_options(
     params: &OAuthInitQuery,
+    code_mode_enabled: bool,
 ) -> Result<OAuthFrontendResponseOptions, ApiError> {
     match params.frontend_response_mode.as_deref().unwrap_or("token") {
         "token" => {
@@ -625,6 +627,11 @@ fn validate_frontend_response_options(
             })
         }
         "code" => {
+            if !code_mode_enabled {
+                return Err(ApiError::service_unavailable(
+                    "OAuth frontend code mode is not enabled",
+                ));
+            }
             let challenge = params
                 .code_challenge
                 .as_deref()
@@ -949,6 +956,7 @@ pub async fn verify_email_code(
     ),
     responses(
         (status = 302, description = "Redirect to Google OAuth"),
+        (status = 503, description = "Frontend callback-code mode is not enabled", body = crate::error::ApiErrorResponse),
         (status = 502, description = "OAuth provider error", body = crate::error::ApiErrorResponse)
     )
 )]
@@ -970,7 +978,8 @@ pub async fn google_login(
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
     let frontend_callback =
         validate_oauth_frontend_callback(&params.frontend_callback, &app_state)?;
-    let frontend_response = validate_frontend_response_options(&params)?;
+    let frontend_response =
+        validate_frontend_response_options(&params, app_state.oauth_frontend_code_mode_enabled)?;
 
     tracing::debug!(
         provider = "google",
@@ -1269,6 +1278,7 @@ pub async fn exchange_oauth_callback_code(
     ),
     responses(
         (status = 302, description = "Redirect to Github OAuth"),
+        (status = 503, description = "Frontend callback-code mode is not enabled", body = crate::error::ApiErrorResponse),
         (status = 502, description = "OAuth provider error", body = crate::error::ApiErrorResponse)
     )
 )]
@@ -1290,7 +1300,8 @@ pub async fn github_login(
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
     let frontend_callback =
         validate_oauth_frontend_callback(&params.frontend_callback, &app_state)?;
-    let frontend_response = validate_frontend_response_options(&params)?;
+    let frontend_response =
+        validate_frontend_response_options(&params, app_state.oauth_frontend_code_mode_enabled)?;
 
     tracing::debug!(
         provider = "github",
@@ -1928,14 +1939,17 @@ mod tests {
 
     #[test]
     fn defaults_frontend_response_to_legacy_token_for_compatibility() {
-        let options = validate_frontend_response_options(&OAuthInitQuery {
-            redirect_uri: None,
-            frontend_callback: "https://app.near.ai".into(),
-            frontend_response_mode: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            frontend_state: None,
-        })
+        let options = validate_frontend_response_options(
+            &OAuthInitQuery {
+                redirect_uri: None,
+                frontend_callback: "https://app.near.ai".into(),
+                frontend_response_mode: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                frontend_state: None,
+            },
+            false,
+        )
         .unwrap();
 
         assert_eq!(options.mode, OAuthFrontendResponseMode::Token);
@@ -1943,14 +1957,17 @@ mod tests {
 
     #[test]
     fn validates_code_mode_pkce_and_frontend_state() {
-        let options = validate_frontend_response_options(&OAuthInitQuery {
-            redirect_uri: None,
-            frontend_callback: "https://app.near.ai".into(),
-            frontend_response_mode: Some("code".into()),
-            code_challenge: Some("A".repeat(43)),
-            code_challenge_method: Some("S256".into()),
-            frontend_state: Some("B".repeat(43)),
-        })
+        let options = validate_frontend_response_options(
+            &OAuthInitQuery {
+                redirect_uri: None,
+                frontend_callback: "https://app.near.ai".into(),
+                frontend_response_mode: Some("code".into()),
+                code_challenge: Some("A".repeat(43)),
+                code_challenge_method: Some("S256".into()),
+                frontend_state: Some("B".repeat(43)),
+            },
+            true,
+        )
         .unwrap();
 
         assert_eq!(options.mode, OAuthFrontendResponseMode::Code);
@@ -1961,6 +1978,28 @@ mod tests {
         assert_eq!(
             options.state.as_deref(),
             Some("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+        );
+    }
+
+    #[test]
+    fn rejects_code_mode_until_the_rollout_gate_is_enabled() {
+        let error = validate_frontend_response_options(
+            &OAuthInitQuery {
+                redirect_uri: None,
+                frontend_callback: "https://app.near.ai".into(),
+                frontend_response_mode: Some("code".into()),
+                code_challenge: Some("A".repeat(43)),
+                code_challenge_method: Some("S256".into()),
+                frontend_state: Some("B".repeat(43)),
+            },
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            error.response.message,
+            "OAuth frontend code mode is not enabled"
         );
     }
 
@@ -1984,7 +2023,7 @@ mod tests {
                 frontend_state: None,
             },
         ] {
-            assert!(validate_frontend_response_options(&params).is_err());
+            assert!(validate_frontend_response_options(&params, true).is_err());
         }
     }
 

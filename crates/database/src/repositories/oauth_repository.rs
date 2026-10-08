@@ -240,8 +240,15 @@ impl OAuthRepository for PostgresOAuthRepository {
                  RETURNING id, user_id, created_at, expires_at",
                 &[&session_id, &token_hash],
             )
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("OAuth callback session is missing or expired"))?;
+            .await?;
+
+        let Some(session_row) = session_row else {
+            // Roll back the callback-code DELETE as well. A missing or expired
+            // session is an invalid exchange, not an internal database error,
+            // and must not consume an otherwise matching callback code.
+            transaction.rollback().await?;
+            return Ok(None);
+        };
 
         transaction.commit().await?;
 

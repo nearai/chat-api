@@ -21,6 +21,31 @@ fn pkce_challenge(verifier: &str) -> String {
 }
 
 #[tokio::test]
+async fn code_mode_initiation_is_fail_closed_until_rollout_gate_is_enabled() {
+    let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let challenge = "A".repeat(43);
+    let frontend_state = "B".repeat(43);
+
+    for provider in ["google", "github"] {
+        let response = server
+            .get(&format!(
+                "/v1/auth/{provider}?frontend_callback=http%3A%2F%2Flocalhost%3A3000&frontend_response_mode=code&code_challenge={challenge}&code_challenge_method=S256&frontend_state={frontend_state}"
+            ))
+            .await;
+
+        assert_eq!(response.status_code(), 503);
+        let body: serde_json::Value = response.json();
+        assert_eq!(body["code"], "service_unavailable");
+        assert_eq!(body["message"], "OAuth frontend code mode is not enabled");
+    }
+
+    let legacy_response = server
+        .get("/v1/auth/google?frontend_callback=http%3A%2F%2Flocalhost%3A3000")
+        .await;
+    assert_eq!(legacy_response.status_code(), 307);
+}
+
+#[tokio::test]
 async fn callback_code_is_pkce_bound_single_use_and_rotates_the_session_token() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
     let user = db
@@ -195,6 +220,65 @@ async fn expired_callback_code_cannot_be_exchanged_and_is_cleaned_up() {
         .expect("count expired callback codes")
         .get(0);
     assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn expired_session_returns_unauthorized_without_consuming_callback_code() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let user = db
+        .user_repository()
+        .create_user(
+            format!("oauth-code-expired-session-{}@example.com", Uuid::new_v4()),
+            None,
+            None,
+        )
+        .await
+        .expect("create test user");
+    let session = db
+        .session_repository()
+        .create_session(user.id)
+        .await
+        .expect("create session");
+    let code = URL_SAFE_NO_PAD.encode(Sha256::digest(Uuid::new_v4().as_bytes()));
+    let verifier = "m".repeat(43);
+    let code_hash = sha256_hex(&code);
+    db.oauth_repository()
+        .store_callback_code(
+            &code_hash,
+            &OAuthCallbackCode {
+                session_id: session.session_id,
+                code_challenge: pkce_challenge(&verifier),
+                is_new_user: false,
+                expires_at: Utc::now() + Duration::minutes(2),
+            },
+        )
+        .await
+        .expect("store callback code");
+    let client = db.pool().get().await.expect("database client");
+    client
+        .execute(
+            "UPDATE sessions SET expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+            &[&session.session_id],
+        )
+        .await
+        .expect("expire session");
+
+    let response = server
+        .post("/v1/auth/exchange")
+        .json(&json!({ "code": code, "code_verifier": verifier }))
+        .await;
+    assert_eq!(response.status_code(), 401);
+    assert_eq!(response.header(CACHE_CONTROL), "no-store");
+
+    let remaining: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM oauth_callback_codes WHERE code_hash = $1",
+            &[&code_hash],
+        )
+        .await
+        .expect("count callback code after failed exchange")
+        .get(0);
+    assert_eq!(remaining, 1);
 }
 
 #[tokio::test]

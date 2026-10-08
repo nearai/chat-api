@@ -76,6 +76,7 @@ services:
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
       # Redirect URIs for local development
       REDIRECT_URI: ${REDIRECT_URI:-http://localhost:8080}
+      OAUTH_FRONTEND_CODE_MODE_ENABLED: ${OAUTH_FRONTEND_CODE_MODE_ENABLED:-false}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       NEAR_EXPECTED_RECIPIENTS: ${NEAR_EXPECTED_RECIPIENTS:-localhost:3000}
       # OpenAI/Cloud API proxy configuration
