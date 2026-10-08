@@ -1,7 +1,9 @@
 mod common;
 
 use axum_test::TestServer;
-use common::{create_test_server_with_state, mock_login, TestServerConfig};
+use common::{
+    cleanup_user_agent_instances, create_test_server_with_state, mock_login, TestServerConfig,
+};
 use database::{encryption, field_encryption, Database};
 use http::{HeaderName, HeaderValue};
 use serde_json::{json, Value};
@@ -135,6 +137,12 @@ impl Fixture {
     }
 
     async fn cleanup(&self) {
+        // V34 deliberately removed the users -> agent_instances cascade so
+        // account deletion can preserve audit data. Clean the fixture's agent
+        // rows explicitly; otherwise unreadable-token tests leak ciphertext
+        // into the shared integration-test database and make later full-scope
+        // encryption jobs fail depending on test order.
+        cleanup_user_agent_instances(&self.db, &format!("{}@example.com", self.user_id)).await;
         let client = self.db.pool().get().await.unwrap();
         client
             .execute(
