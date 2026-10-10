@@ -1,16 +1,21 @@
+#![cfg(feature = "test")]
+
 mod common;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration, Utc};
 use common::{create_test_server_and_db, TestServerConfig};
-use http::header::CACHE_CONTROL;
+use http::header::{CACHE_CONTROL, LOCATION};
 use serde_json::json;
 use services::auth::ports::{
     OAuthCallbackCode, OAuthFrontendResponseMode, OAuthRepository, SessionRepository,
 };
 use services::user::ports::UserRepository;
 use sha2::{Digest, Sha256};
+use url::Url;
 use uuid::Uuid;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn sha256_hex(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
@@ -43,6 +48,118 @@ async fn code_mode_initiation_is_fail_closed_until_rollout_gate_is_enabled() {
         .get("/v1/auth/google?frontend_callback=http%3A%2F%2Flocalhost%3A3000")
         .await;
     assert_eq!(legacy_response.status_code(), 307);
+}
+
+#[tokio::test]
+async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "mock-google-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600
+        })))
+        .mount(&provider)
+        .await;
+    let email = format!("oauth-provider-callback-{}@example.com", Uuid::new_v4());
+    Mock::given(method("GET"))
+        .and(path("/userinfo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": format!("google-{}", Uuid::new_v4()),
+            "email": email,
+            "verified_email": true,
+            "name": "OAuth provider callback test"
+        })))
+        .mount(&provider)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        oauth_frontend_code_mode_enabled: Some(true),
+        google_oauth_token_url: Some(format!("{}/token", provider.uri())),
+        google_oauth_user_info_url: Some(format!("{}/userinfo", provider.uri())),
+        ..Default::default()
+    })
+    .await;
+    let verifier = "provider-callback-verifier-abcdefghijklmnopqrstuvwxyz0123456789";
+    let challenge = pkce_challenge(verifier);
+    let frontend_state = URL_SAFE_NO_PAD.encode(Sha256::digest(b"frontend-state"));
+
+    let initiation = server
+        .get(&format!(
+            "/v1/auth/google?frontend_callback=http%3A%2F%2Flocalhost%3A3000&frontend_response_mode=code&code_challenge={challenge}&code_challenge_method=S256&frontend_state={frontend_state}"
+        ))
+        .await;
+    assert_eq!(initiation.status_code(), 307);
+    let provider_location = initiation.header(LOCATION);
+    let provider_redirect = Url::parse(
+        provider_location
+            .to_str()
+            .expect("provider redirect header value"),
+    )
+    .expect("provider redirect URL");
+    let provider_state = provider_redirect
+        .query_pairs()
+        .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        .expect("OAuth provider state");
+
+    let client = db.pool().get().await.expect("database client");
+    let stored_state = client
+        .query_one(
+            "SELECT frontend_response_mode, frontend_code_challenge, frontend_state
+             FROM oauth_states WHERE state = $1",
+            &[&provider_state],
+        )
+        .await
+        .expect("stored OAuth initiation state");
+    assert_eq!(stored_state.get::<_, String>(0), "code");
+    assert_eq!(
+        stored_state.get::<_, Option<String>>(1).as_deref(),
+        Some(challenge.as_str())
+    );
+    assert_eq!(
+        stored_state.get::<_, Option<String>>(2).as_deref(),
+        Some(frontend_state.as_str())
+    );
+
+    let callback = server
+        .get(&format!(
+            "/v1/auth/callback?code=mock-provider-code&state={provider_state}"
+        ))
+        .await;
+    assert_eq!(callback.status_code(), 302);
+    assert_eq!(callback.header(CACHE_CONTROL), "no-store");
+    let frontend_location = callback.header(LOCATION);
+    let frontend_redirect = Url::parse(
+        frontend_location
+            .to_str()
+            .expect("frontend callback header value"),
+    )
+    .expect("frontend callback redirect URL");
+    let query: std::collections::HashMap<_, _> = frontend_redirect.query_pairs().collect();
+    let callback_code = query
+        .get("code")
+        .expect("frontend callback code")
+        .to_string();
+    assert_eq!(
+        query.get("state").map(|value| value.as_ref()),
+        Some(frontend_state.as_str())
+    );
+    assert!(!query.contains_key("token"));
+    assert!(!query.contains_key("session_id"));
+
+    let exchange = server
+        .post("/v1/auth/exchange")
+        .json(&json!({ "code": callback_code, "code_verifier": verifier }))
+        .await;
+    assert_eq!(exchange.status_code(), 200);
+    assert_eq!(exchange.header(CACHE_CONTROL), "no-store");
+    let body: serde_json::Value = exchange.json();
+    assert!(body["token"]
+        .as_str()
+        .is_some_and(|token| token.starts_with("sess_")));
+    assert!(body["session_id"].as_str().is_some());
+    assert_eq!(body["is_new_user"], true);
 }
 
 #[tokio::test]

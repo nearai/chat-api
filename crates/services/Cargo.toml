@@ -51,6 +51,7 @@ stripe_client = { path = "../stripe_client" }
 
 [features]
 utoipa = ["dep:utoipa"]
+test = []
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -101,6 +101,8 @@ pub struct OAuthServiceImpl {
     near_auth: NearAuthService,
     google_client_id: String,
     google_client_secret: String,
+    google_token_url: String,
+    google_user_info_url: String,
     github_client_id: String,
     github_client_secret: String,
     redirect_uri: String,
@@ -134,17 +136,28 @@ impl OAuthServiceImpl {
             near_auth,
             google_client_id,
             google_client_secret,
+            google_token_url: "https://oauth2.googleapis.com/token".to_string(),
+            google_user_info_url: "https://www.googleapis.com/oauth2/v2/userinfo".to_string(),
             github_client_id,
             github_client_secret,
             redirect_uri,
         }
     }
 
+    /// Override Google endpoints for integration tests without contacting the
+    /// real provider. This is intentionally unavailable in production builds.
+    #[cfg(feature = "test")]
+    pub fn with_google_test_endpoints(mut self, token_url: String, user_info_url: String) -> Self {
+        self.google_token_url = token_url;
+        self.google_user_info_url = user_info_url;
+        self
+    }
+
     async fn fetch_google_user_info(&self, access_token: &str) -> anyhow::Result<OAuthUserInfo> {
         tracing::debug!("Fetching Google user info");
         let client = reqwest::Client::new();
         let response = client
-            .get("https://www.googleapis.com/oauth2/v2/userinfo")
+            .get(&self.google_user_info_url)
             .bearer_auth(access_token)
             .send()
             .await?;
@@ -364,7 +377,7 @@ impl OAuthServiceImpl {
                 &self.google_client_id,
                 &self.google_client_secret,
                 "https://accounts.google.com/o/oauth2/v2/auth",
-                "https://oauth2.googleapis.com/token",
+                self.google_token_url.as_str(),
             ),
             OAuthProvider::Github => (
                 &self.github_client_id,
@@ -846,7 +859,7 @@ impl OAuthService for OAuthServiceImpl {
                 &self.google_client_id,
                 &self.google_client_secret,
                 "https://accounts.google.com/o/oauth2/v2/auth",
-                "https://oauth2.googleapis.com/token",
+                self.google_token_url.as_str(),
                 vec!["openid", "email", "profile"],
             ),
             OAuthProvider::Github => (
@@ -915,7 +928,7 @@ impl OAuthService for OAuthServiceImpl {
                 &self.google_client_id,
                 &self.google_client_secret,
                 "https://accounts.google.com/o/oauth2/v2/auth",
-                "https://oauth2.googleapis.com/token",
+                self.google_token_url.as_str(),
             ),
             OAuthProvider::Github => (
                 &self.github_client_id,

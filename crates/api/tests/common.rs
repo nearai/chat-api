@@ -65,6 +65,11 @@ pub struct TestServerConfig {
     /// Enable confidential database writes/backfill for encryption tests.
     pub database_encryption_write_enabled: Option<bool>,
     pub database_encryption_agent_secrets_write_enabled: Option<bool>,
+    /// Override the OAuth callback-code rollout gate in integration tests.
+    pub oauth_frontend_code_mode_enabled: Option<bool>,
+    /// Local Google endpoints used by callback tests; both must be supplied together.
+    pub google_oauth_token_url: Option<String>,
+    pub google_oauth_user_info_url: Option<String>,
 }
 
 /// Restrictive rate limit config for rate limit tests.
@@ -119,6 +124,9 @@ pub async fn create_test_server_with_state(
     if let Some(enabled) = test_config.database_encryption_agent_secrets_write_enabled {
         config.database_encryption.agent_secrets_write_enabled = enabled;
     }
+    if let Some(enabled) = test_config.oauth_frontend_code_mode_enabled {
+        config.oauth.frontend_code_mode_enabled = enabled;
+    }
     if let Some(base_url) = test_config.email_resend_base_url.clone() {
         config.email_auth.resend_base_url = base_url;
     }
@@ -171,7 +179,7 @@ pub async fn create_test_server_with_state(
 
     // Create services
     let http_client = reqwest::Client::new();
-    let oauth_service = Arc::new(services::auth::OAuthServiceImpl::new(
+    let oauth_service = services::auth::OAuthServiceImpl::new(
         oauth_repo.clone(),
         session_repo.clone(),
         user_repo.clone(),
@@ -182,7 +190,19 @@ pub async fn create_test_server_with_state(
         config.oauth.github_client_secret.clone(),
         config.oauth.redirect_uri.clone(),
         config.near.rpc_url.clone(),
-    ));
+    );
+    #[cfg(feature = "test")]
+    let oauth_service = match (
+        test_config.google_oauth_token_url.clone(),
+        test_config.google_oauth_user_info_url.clone(),
+    ) {
+        (Some(token_url), Some(user_info_url)) => {
+            oauth_service.with_google_test_endpoints(token_url, user_info_url)
+        }
+        (None, None) => oauth_service,
+        _ => panic!("Google OAuth test token and user-info URLs must be configured together"),
+    };
+    let oauth_service = Arc::new(oauth_service);
 
     let email_auth_service: Arc<dyn services::auth::ports::EmailAuthService> =
         if let Some(turnstile_verify_url) = email_turnstile_verify_url {
