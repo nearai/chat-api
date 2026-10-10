@@ -100,10 +100,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!("Starting API server...");
-    tracing::info!(
-        enabled = config.oauth.frontend_code_mode_enabled,
-        "OAuth frontend callback-code mode rollout gate"
-    );
     let frontend_callback_allowed_origins = api::routes::oauth::frontend_callback_allowed_origins();
     match frontend_callback_allowed_origins.as_ref() {
         Some(origins)
@@ -463,7 +459,6 @@ async fn main() -> anyhow::Result<()> {
         agent_repository: agent_repo,
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
-        oauth_frontend_code_mode_enabled: config.oauth.frontend_code_mode_enabled,
         frontend_callback_allowed_origins: frontend_callback_allowed_origins.map(Arc::new),
         admin_domains: Arc::new(config.admin.admin_domains),
         admin_emails: Arc::new(config.admin.admin_emails),

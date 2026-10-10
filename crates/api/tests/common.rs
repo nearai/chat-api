@@ -65,8 +65,6 @@ pub struct TestServerConfig {
     /// Enable confidential database writes/backfill for encryption tests.
     pub database_encryption_write_enabled: Option<bool>,
     pub database_encryption_agent_secrets_write_enabled: Option<bool>,
-    /// Override the OAuth callback-code rollout gate in integration tests.
-    pub oauth_frontend_code_mode_enabled: Option<bool>,
     /// Local Google endpoints used by callback tests; both must be supplied together.
     pub google_oauth_token_url: Option<String>,
     pub google_oauth_user_info_url: Option<String>,
@@ -123,9 +121,6 @@ pub async fn create_test_server_with_state(
     }
     if let Some(enabled) = test_config.database_encryption_agent_secrets_write_enabled {
         config.database_encryption.agent_secrets_write_enabled = enabled;
-    }
-    if let Some(enabled) = test_config.oauth_frontend_code_mode_enabled {
-        config.oauth.frontend_code_mode_enabled = enabled;
     }
     if let Some(base_url) = test_config.email_resend_base_url.clone() {
         config.email_auth.resend_base_url = base_url;
@@ -435,7 +430,6 @@ pub async fn create_test_server_with_state(
         agent_repository: agent_repo,
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
-        oauth_frontend_code_mode_enabled: config.oauth.frontend_code_mode_enabled,
         frontend_callback_allowed_origins: Some(Arc::new(
             vec!["http://localhost:3000".to_string()],
         )),

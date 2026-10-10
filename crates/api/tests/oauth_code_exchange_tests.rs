@@ -26,7 +26,7 @@ fn pkce_challenge(verifier: &str) -> String {
 }
 
 #[tokio::test]
-async fn code_mode_initiation_is_fail_closed_until_rollout_gate_is_enabled() {
+async fn code_mode_initiation_accepts_valid_pkce_for_both_providers() {
     let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
     let challenge = "A".repeat(43);
     let frontend_state = "B".repeat(43);
@@ -38,10 +38,7 @@ async fn code_mode_initiation_is_fail_closed_until_rollout_gate_is_enabled() {
             ))
             .await;
 
-        assert_eq!(response.status_code(), 503);
-        let body: serde_json::Value = response.json();
-        assert_eq!(body["code"], "service_unavailable");
-        assert_eq!(body["message"], "OAuth frontend code mode is not enabled");
+        assert_eq!(response.status_code(), 307);
     }
 
     let legacy_response = server
@@ -75,7 +72,6 @@ async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
         .await;
 
     let (server, db) = create_test_server_and_db(TestServerConfig {
-        oauth_frontend_code_mode_enabled: Some(true),
         google_oauth_token_url: Some(format!("{}/token", provider.uri())),
         google_oauth_user_info_url: Some(format!("{}/userinfo", provider.uri())),
         ..Default::default()
