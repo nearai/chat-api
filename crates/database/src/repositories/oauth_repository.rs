@@ -1,9 +1,13 @@
 use crate::pool::DbPool;
+use crate::repositories::session_repository::{generate_session_token, hash_session_token};
 use async_trait::async_trait;
 use services::{
-    auth::ports::{OAuthRepository, OAuthState, OAuthTokens},
+    auth::ports::{
+        OAuthCallbackCode, OAuthCodeExchangeSuccess, OAuthFrontendResponseMode, OAuthRepository,
+        OAuthState, OAuthTokens, UserSession,
+    },
     user::ports::OAuthProvider,
-    UserId,
+    SessionId, UserId,
 };
 use uuid::Uuid;
 
@@ -67,13 +71,25 @@ impl OAuthRepository for PostgresOAuthRepository {
 
         client
             .execute(
-                "INSERT INTO oauth_states (state, provider, redirect_uri, frontend_callback, created_at) 
-                 VALUES ($1, $2, $3, $4, $5)",
+                "INSERT INTO oauth_states (
+                    state,
+                    provider,
+                    redirect_uri,
+                    frontend_callback,
+                    frontend_response_mode,
+                    frontend_code_challenge,
+                    frontend_state,
+                    created_at
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 &[
                     &state.state,
                     &provider_str,
                     &state.redirect_uri,
                     &state.frontend_callback,
+                    &state.frontend_response_mode.as_str(),
+                    &state.frontend_code_challenge,
+                    &state.frontend_state,
                     &state.created_at,
                 ],
             )
@@ -105,32 +121,41 @@ impl OAuthRepository for PostgresOAuthRepository {
         // Get and delete the state in one go
         let row = transaction
             .query_opt(
-                "DELETE FROM oauth_states 
-                 WHERE state = $1 
-                 RETURNING state, provider, redirect_uri, frontend_callback, created_at",
+                "DELETE FROM oauth_states
+                 WHERE state = $1
+                 RETURNING state, provider, redirect_uri, frontend_callback,
+                           frontend_response_mode, frontend_code_challenge,
+                           frontend_state, created_at",
                 &[&state],
             )
             .await?;
 
         transaction.commit().await?;
 
-        let result = row.map(|r| {
-            let provider_str: String = r.get(1);
-            let provider = match provider_str.as_str() {
-                "google" => OAuthProvider::Google,
-                "github" => OAuthProvider::Github,
-                "near" => OAuthProvider::Near,
-                _ => OAuthProvider::Google, // fallback
-            };
+        let result = row
+            .map(|r| -> anyhow::Result<OAuthState> {
+                let provider_str: String = r.get(1);
+                let provider = match provider_str.as_str() {
+                    "google" => OAuthProvider::Google,
+                    "github" => OAuthProvider::Github,
+                    "near" => OAuthProvider::Near,
+                    _ => OAuthProvider::Google, // fallback
+                };
 
-            OAuthState {
-                state: r.get(0),
-                provider,
-                redirect_uri: r.get(2),
-                frontend_callback: r.get(3),
-                created_at: r.get(4),
-            }
-        });
+                Ok(OAuthState {
+                    state: r.get(0),
+                    provider,
+                    redirect_uri: r.get(2),
+                    frontend_callback: r.get(3),
+                    frontend_response_mode: OAuthFrontendResponseMode::parse(
+                        &r.get::<_, String>(4),
+                    )?,
+                    frontend_code_challenge: r.get(5),
+                    frontend_state: r.get(6),
+                    created_at: r.get(7),
+                })
+            })
+            .transpose()?;
 
         if result.is_some() {
             tracing::debug!(
@@ -147,6 +172,96 @@ impl OAuthRepository for PostgresOAuthRepository {
         }
 
         Ok(result)
+    }
+
+    async fn store_callback_code(
+        &self,
+        code_hash: &str,
+        callback_code: &OAuthCallbackCode,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "INSERT INTO oauth_callback_codes (
+                    code_hash, session_id, code_challenge, is_new_user, expires_at
+                 ) VALUES ($1, $2, $3, $4, $5)",
+                &[
+                    &code_hash,
+                    &callback_code.session_id,
+                    &callback_code.code_challenge,
+                    &callback_code.is_new_user,
+                    &callback_code.expires_at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn exchange_callback_code(
+        &self,
+        code_hash: &str,
+        code_challenge: &str,
+    ) -> anyhow::Result<Option<OAuthCodeExchangeSuccess>> {
+        let token = generate_session_token();
+        let token_hash = hash_session_token(&token);
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+        // Opportunistic cleanup keeps abandoned/expired handoff codes from
+        // accumulating without introducing a separate maintenance job.
+        transaction
+            .execute(
+                "DELETE FROM oauth_callback_codes WHERE expires_at <= NOW()",
+                &[],
+            )
+            .await?;
+        let callback_row = transaction
+            .query_opt(
+                "DELETE FROM oauth_callback_codes
+                 WHERE code_hash = $1
+                   AND code_challenge = $2
+                   AND expires_at > NOW()
+                 RETURNING session_id, code_challenge, is_new_user, expires_at",
+                &[&code_hash, &code_challenge],
+            )
+            .await?;
+
+        let Some(callback_row) = callback_row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+
+        let session_id: SessionId = callback_row.get(0);
+        let is_new_user: bool = callback_row.get(2);
+        let session_row = transaction
+            .query_opt(
+                "UPDATE sessions
+                 SET token_hash = $2
+                 WHERE id = $1 AND expires_at > NOW()
+                 RETURNING id, user_id, created_at, expires_at",
+                &[&session_id, &token_hash],
+            )
+            .await?;
+
+        let Some(session_row) = session_row else {
+            // Roll back the callback-code DELETE as well. A missing or expired
+            // session is an invalid exchange, not an internal database error,
+            // and must not consume an otherwise matching callback code.
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+
+        transaction.commit().await?;
+
+        Ok(Some(OAuthCodeExchangeSuccess {
+            session: UserSession {
+                session_id: session_row.get(0),
+                user_id: session_row.get(1),
+                created_at: session_row.get(2),
+                expires_at: session_row.get(3),
+                token: Some(token),
+            },
+            is_new_user,
+        }))
     }
 
     async fn store_oauth_tokens(

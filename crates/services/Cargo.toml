@@ -39,6 +39,7 @@ rmcp = { version = "0.6", features = [
 hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
+base64 = "0.22"
 dstack-sdk = "0.1"
 # OpenTelemetry for metrics
 opentelemetry = { version = "0.31", features = ["metrics"] }
@@ -50,6 +51,7 @@ stripe_client = { path = "../stripe_client" }
 
 [features]
 utoipa = ["dep:utoipa"]
+test = []
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -58,4 +60,3 @@ futures = "0.3"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full"] }
 mockall = "0.13"
-base64 = "0.22"

@@ -4,7 +4,11 @@ use crate::{
 use axum::extract::Query;
 use axum::{
     extract::{ConnectInfo, Extension, FromRequestParts, State},
-    http::{header::LOCATION, request::Parts, HeaderMap, StatusCode},
+    http::{
+        header::{CACHE_CONTROL, LOCATION, REFERRER_POLICY},
+        request::Parts,
+        HeaderMap, HeaderValue, StatusCode,
+    },
     response::Redirect,
     routing::{get, post},
     Json, Router,
@@ -13,7 +17,10 @@ use near_api::signer::NEP413Payload;
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, AuthMethod, RecordActivityRequest};
 use services::auth::near::SignedMessage;
-use services::auth::ports::{OAuthProvider, RequestEmailCodeError, VerifyEmailCodeError};
+use services::auth::ports::{
+    OAuthCodeExchangeError, OAuthFrontendResponseMode, OAuthProvider, RequestEmailCodeError,
+    VerifyEmailCodeError,
+};
 use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
 };
@@ -197,6 +204,33 @@ fn build_oauth_frontend_redirect(
             query.append_pair("is_new_user", "true");
         }
     }
+
+    Ok(url.to_string())
+}
+
+fn build_oauth_frontend_code_redirect(
+    frontend_callback_url: &str,
+    code: &str,
+    state: &str,
+) -> Result<String, url::ParseError> {
+    let mut url = Url::parse(frontend_callback_url)?;
+
+    if !is_mobile_callback_base(&url) {
+        let base_path = url.path().trim_end_matches('/');
+        let callback_path = if base_path.is_empty() {
+            OAUTH_CALLBACK_PATH.to_string()
+        } else if base_path.ends_with(OAUTH_CALLBACK_PATH) {
+            base_path.to_string()
+        } else {
+            format!("{base_path}{OAUTH_CALLBACK_PATH}")
+        };
+        url.set_path(&callback_path);
+    }
+
+    url.query_pairs_mut()
+        .clear()
+        .append_pair("code", code)
+        .append_pair("state", state);
 
     Ok(url.to_string())
 }
@@ -546,6 +580,80 @@ pub struct OAuthCallbackQuery {
 pub struct OAuthInitQuery {
     pub redirect_uri: Option<String>,
     pub frontend_callback: String,
+    pub frontend_response_mode: Option<String>,
+    pub code_challenge: Option<String>,
+    pub code_challenge_method: Option<String>,
+    pub frontend_state: Option<String>,
+}
+
+#[derive(Debug)]
+struct OAuthFrontendResponseOptions {
+    mode: OAuthFrontendResponseMode,
+    code_challenge: Option<String>,
+    state: Option<String>,
+}
+
+fn is_base64url(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn is_pkce_verifier(value: &str) -> bool {
+    (43..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+}
+
+fn validate_frontend_response_options(
+    params: &OAuthInitQuery,
+) -> Result<OAuthFrontendResponseOptions, ApiError> {
+    match params.frontend_response_mode.as_deref().unwrap_or("token") {
+        "token" => {
+            if params.code_challenge.is_some()
+                || params.code_challenge_method.is_some()
+                || params.frontend_state.is_some()
+            {
+                return Err(ApiError::bad_request(
+                    "PKCE parameters require frontend_response_mode=code",
+                ));
+            }
+            Ok(OAuthFrontendResponseOptions {
+                mode: OAuthFrontendResponseMode::Token,
+                code_challenge: None,
+                state: None,
+            })
+        }
+        "code" => {
+            let challenge = params
+                .code_challenge
+                .as_deref()
+                .filter(|value| value.len() == 43 && is_base64url(value))
+                .ok_or_else(|| ApiError::bad_request("Invalid PKCE code_challenge"))?;
+            if params.code_challenge_method.as_deref() != Some("S256") {
+                return Err(ApiError::bad_request("code_challenge_method must be S256"));
+            }
+            let state = params
+                .frontend_state
+                .as_deref()
+                .filter(|value| (32..=128).contains(&value.len()) && is_base64url(value))
+                .ok_or_else(|| ApiError::bad_request("Invalid frontend_state"))?;
+
+            Ok(OAuthFrontendResponseOptions {
+                mode: OAuthFrontendResponseMode::Code,
+                code_challenge: Some(challenge.to_string()),
+                state: Some(state.to_string()),
+            })
+        }
+        _ => Err(ApiError::bad_request("Unsupported frontend_response_mode")),
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct OAuthCodeExchangeRequest {
+    pub code: String,
+    pub code_verifier: String,
 }
 
 fn validate_oauth_frontend_callback(
@@ -837,10 +945,15 @@ pub async fn verify_email_code(
     tag = "Auth",
     params(
         ("redirect_uri" = Option<String>, Query, description = "Optional OAuth redirect URI (usually your API callback)"),
-        ("frontend_callback" = String, Query, description = "Required frontend URL to redirect to after authentication")
+        ("frontend_callback" = String, Query, description = "Required frontend URL to redirect to after authentication"),
+        ("frontend_response_mode" = Option<String>, Query, description = "Use code for a PKCE-bound one-time callback; absence preserves legacy token redirects"),
+        ("code_challenge" = Option<String>, Query, description = "Frontend PKCE S256 challenge for code mode"),
+        ("code_challenge_method" = Option<String>, Query, description = "Must be S256 in code mode"),
+        ("frontend_state" = Option<String>, Query, description = "Frontend-generated state returned with the callback code")
     ),
     responses(
         (status = 302, description = "Redirect to Google OAuth"),
+        (status = 503, description = "Frontend callback-code mode is not enabled", body = crate::error::ApiErrorResponse),
         (status = 502, description = "OAuth provider error", body = crate::error::ApiErrorResponse)
     )
 )]
@@ -862,6 +975,7 @@ pub async fn google_login(
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
     let frontend_callback =
         validate_oauth_frontend_callback(&params.frontend_callback, &app_state)?;
+    let frontend_response = validate_frontend_response_options(&params)?;
 
     tracing::debug!(
         provider = "google",
@@ -876,6 +990,9 @@ pub async fn google_login(
             services::auth::ports::OAuthProvider::Google,
             redirect_uri.clone(),
             Some(frontend_callback),
+            frontend_response.mode,
+            frontend_response.code_challenge,
+            frontend_response.state,
         )
         .await
         .map_err(|e| {
@@ -903,7 +1020,7 @@ pub async fn google_login(
         ("state" = String, Query, description = "State parameter for CSRF protection")
     ),
     responses(
-        (status = 302, description = "Redirect to frontend with token"),
+        (status = 302, description = "Redirect to frontend with a legacy token or one-time code"),
         (status = 401, description = "Authentication failed", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     )
@@ -921,9 +1038,9 @@ pub async fn oauth_callback(
         "OAuth callback received"
     );
 
-    // The provider is determined from the state stored in the database
-    // Returns (session, frontend_callback_url, is_new_user, provider)
-    let (session, frontend_callback, is_new_user, provider) = app_state
+    // The provider and frontend handoff mode are determined only from the
+    // server-side state stored at OAuth initiation.
+    let callback = app_state
         .oauth_service
         .handle_callback_unified(params.code.clone(), params.state.clone())
         .await
@@ -934,13 +1051,13 @@ pub async fn oauth_callback(
 
     tracing::info!(
         "OAuth callback processed successfully - session_id: {}, user_id: {}, provider: {:?}",
-        session.session_id,
-        session.user_id,
-        provider
+        callback.session.session_id,
+        callback.session.user_id,
+        callback.provider
     );
 
     // Record metrics and analytics
-    let auth_method = match provider {
+    let auth_method = match callback.provider {
         OAuthProvider::Google => AuthMethod::Google,
         OAuthProvider::Github => AuthMethod::Github,
         OAuthProvider::Near => AuthMethod::Near,
@@ -948,14 +1065,14 @@ pub async fn oauth_callback(
     let auth_method_str = auth_method.as_str();
 
     // Record metrics
-    let metric_name = if is_new_user {
+    let metric_name = if callback.is_new_user {
         METRIC_USER_SIGNUP
     } else {
         METRIC_USER_LOGIN
     };
     let tags = [
         format!("{}:{}", TAG_AUTH_METHOD, auth_method_str),
-        format!("{}:{}", TAG_IS_NEW_USER, is_new_user),
+        format!("{}:{}", TAG_IS_NEW_USER, callback.is_new_user),
     ];
     let tags_str: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
     app_state
@@ -963,7 +1080,7 @@ pub async fn oauth_callback(
         .record_count(metric_name, 1, &tags_str);
 
     // Record analytics in database
-    let activity_type = if is_new_user {
+    let activity_type = if callback.is_new_user {
         ActivityType::Signup
     } else {
         ActivityType::Login
@@ -971,7 +1088,7 @@ pub async fn oauth_callback(
     if let Err(e) = app_state
         .analytics_service
         .record_activity(RecordActivityRequest {
-            user_id: session.user_id,
+            user_id: callback.session.user_id,
             activity_type,
             auth_method: Some(auth_method),
             metadata: None,
@@ -981,26 +1098,16 @@ pub async fn oauth_callback(
         tracing::warn!("Failed to record analytics for OAuth callback: {}", e);
     }
 
-    let token = session.token.ok_or_else(|| {
-        tracing::error!(
-            "Session token not returned from service for session_id: {}",
-            session.session_id
-        );
-        ApiError::internal_server_error("Failed to create session")
-    })?;
-
-    tracing::debug!("Session token generated, length: {}", token.len());
-
     // Set up gateway session (authenticate with compose-api) so the user's
     // instances are reachable immediately upon login
     let gateway_cookie = app_state
         .agent_service
-        .setup_gateway_session_for_user(session.user_id)
+        .setup_gateway_session_for_user(callback.session.user_id)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(
                 "Failed to set up gateway session for user in oauth_callback: user_id={}, error={}",
-                session.user_id,
+                callback.session.user_id,
                 e
             );
             None
@@ -1008,9 +1115,11 @@ pub async fn oauth_callback(
 
     let mut headers = HeaderMap::new();
     try_add_gateway_cookie(&mut headers, gateway_cookie, "oauth_callback");
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
 
     // Use the validated frontend_callback from OAuth state as the only redirect destination.
-    let frontend_url = match frontend_callback.as_deref() {
+    let frontend_url = match callback.frontend_callback.as_deref() {
         Some(callback) => {
             match validate_frontend_callback_url(
                 callback,
@@ -1034,13 +1143,47 @@ pub async fn oauth_callback(
 
     tracing::info!("Redirecting to validated OAuth frontend callback");
 
-    let callback_url = build_oauth_frontend_redirect(
-        &frontend_url,
-        &token,
-        &session.session_id.to_string(),
-        &session.expires_at.to_rfc3339(),
-        is_new_user,
-    )
+    let callback_url = match callback.frontend_response_mode {
+        OAuthFrontendResponseMode::Token => {
+            let token = callback.session.token.as_deref().ok_or_else(|| {
+                tracing::error!(
+                    "Session token not returned from service for session_id: {}",
+                    callback.session.session_id
+                );
+                ApiError::internal_server_error("Failed to create session")
+            })?;
+            build_oauth_frontend_redirect(
+                &frontend_url,
+                token,
+                &callback.session.session_id.to_string(),
+                &callback.session.expires_at.to_rfc3339(),
+                callback.is_new_user,
+            )
+        }
+        OAuthFrontendResponseMode::Code => {
+            let challenge = callback.frontend_code_challenge.ok_or_else(|| {
+                tracing::error!("Code-mode OAuth state is missing its PKCE challenge");
+                ApiError::internal_server_error("Invalid OAuth callback state")
+            })?;
+            let state = callback.frontend_state.as_deref().ok_or_else(|| {
+                tracing::error!("Code-mode OAuth state is missing its frontend state");
+                ApiError::internal_server_error("Invalid OAuth callback state")
+            })?;
+            let code = app_state
+                .oauth_service
+                .create_frontend_callback_code(
+                    callback.session.session_id,
+                    challenge,
+                    callback.is_new_user,
+                )
+                .await
+                .map_err(|err| {
+                    tracing::error!(error = %err, "Failed to create OAuth frontend callback code");
+                    ApiError::internal_server_error("Failed to create OAuth callback code")
+                })?;
+            build_oauth_frontend_code_redirect(&frontend_url, &code, state)
+        }
+    }
     .map_err(|err| {
         tracing::error!("Failed to build OAuth frontend callback URL: {}", err);
         ApiError::internal_server_error("Invalid callback URL")
@@ -1058,6 +1201,64 @@ pub async fn oauth_callback(
     Ok((StatusCode::FOUND, headers))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/exchange",
+    tag = "Auth",
+    request_body = OAuthCodeExchangeRequest,
+    responses(
+        (status = 200, description = "One-time callback code exchanged", body = NearAuthResponse),
+        (status = 400, description = "Malformed exchange request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Invalid, expired, replayed, or PKCE-mismatched code", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    )
+)]
+pub async fn exchange_oauth_callback_code(
+    State(app_state): State<AppState>,
+    Json(request): Json<OAuthCodeExchangeRequest>,
+) -> Result<(HeaderMap, Json<NearAuthResponse>), ApiError> {
+    if request.code.len() != 43 || !is_base64url(&request.code) {
+        return Err(ApiError::bad_request("Invalid OAuth callback code"));
+    }
+    if !is_pkce_verifier(&request.code_verifier) {
+        return Err(ApiError::bad_request("Invalid PKCE code_verifier"));
+    }
+
+    let exchanged = app_state
+        .oauth_service
+        .exchange_frontend_callback_code(request.code, request.code_verifier)
+        .await
+        .map_err(|error| match error {
+            OAuthCodeExchangeError::InvalidOrExpired => {
+                ApiError::unauthorized("Invalid or expired OAuth callback code")
+            }
+            OAuthCodeExchangeError::Internal(error) => {
+                tracing::error!(error = %error, "OAuth callback code exchange failed");
+                ApiError::internal_server_error("Failed to exchange OAuth callback code")
+            }
+        })?;
+
+    let token = exchanged.session.token.ok_or_else(|| {
+        tracing::error!(
+            session_id = %exchanged.session.session_id,
+            "Rotated session token was not returned from callback-code exchange"
+        );
+        ApiError::internal_server_error("Failed to exchange OAuth callback code")
+    })?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok((
+        headers,
+        Json(NearAuthResponse {
+            token,
+            session_id: exchanged.session.session_id.to_string(),
+            expires_at: exchanged.session.expires_at.to_rfc3339(),
+            is_new_user: exchanged.is_new_user,
+        }),
+    ))
+}
+
 /// Handler for initiating Github OAuth flow
 #[utoipa::path(
     get,
@@ -1065,10 +1266,15 @@ pub async fn oauth_callback(
     tag = "Auth",
     params(
         ("redirect_uri" = Option<String>, Query, description = "Optional OAuth redirect URI (usually your API callback)"),
-        ("frontend_callback" = String, Query, description = "Required frontend URL to redirect to after authentication")
+        ("frontend_callback" = String, Query, description = "Required frontend URL to redirect to after authentication"),
+        ("frontend_response_mode" = Option<String>, Query, description = "Use code for a PKCE-bound one-time callback; absence preserves legacy token redirects"),
+        ("code_challenge" = Option<String>, Query, description = "Frontend PKCE S256 challenge for code mode"),
+        ("code_challenge_method" = Option<String>, Query, description = "Must be S256 in code mode"),
+        ("frontend_state" = Option<String>, Query, description = "Frontend-generated state returned with the callback code")
     ),
     responses(
         (status = 302, description = "Redirect to Github OAuth"),
+        (status = 503, description = "Frontend callback-code mode is not enabled", body = crate::error::ApiErrorResponse),
         (status = 502, description = "OAuth provider error", body = crate::error::ApiErrorResponse)
     )
 )]
@@ -1090,6 +1296,7 @@ pub async fn github_login(
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
     let frontend_callback =
         validate_oauth_frontend_callback(&params.frontend_callback, &app_state)?;
+    let frontend_response = validate_frontend_response_options(&params)?;
 
     tracing::debug!(
         provider = "github",
@@ -1104,6 +1311,9 @@ pub async fn github_login(
             services::auth::ports::OAuthProvider::Github,
             redirect_uri.clone(),
             Some(frontend_callback),
+            frontend_response.mode,
+            frontend_response.code_challenge,
+            frontend_response.state,
         )
         .await
         .map_err(|e| {
@@ -1462,6 +1672,14 @@ pub async fn near_auth(
 
 /// Create OAuth router with all routes (excluding logout, which requires auth)
 pub fn create_oauth_router() -> Router<AppState> {
+    // Callback-code exchange responses may contain a session credential. Keep
+    // both success and error variants out of browser and intermediary caches.
+    let exchange_route = Router::new()
+        .route("/exchange", post(exchange_oauth_callback_code))
+        .layer(axum::middleware::map_response(
+            crate::routes::api::force_no_store_response,
+        ));
+
     let router = Router::new()
         // OAuth initiation routes
         .route("/google", get(google_login))
@@ -1471,7 +1689,8 @@ pub fn create_oauth_router() -> Router<AppState> {
         // NEAR wallet authentication
         .route("/near", post(near_auth))
         // Unified callback route for all providers
-        .route("/callback", get(oauth_callback));
+        .route("/callback", get(oauth_callback))
+        .merge(exchange_route);
 
     // Add mock login route only in test builds
     #[cfg(feature = "test")]
@@ -1483,8 +1702,10 @@ pub fn create_oauth_router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_oauth_frontend_redirect, extract_client_ip, frontend_callback_allowed_origins_from,
-        select_proxy_chain_ip, validate_frontend_callback_url, FrontendCallbackValidationError,
+        build_oauth_frontend_code_redirect, build_oauth_frontend_redirect, extract_client_ip,
+        frontend_callback_allowed_origins_from, select_proxy_chain_ip,
+        validate_frontend_callback_url, validate_frontend_response_options,
+        FrontendCallbackValidationError, OAuthFrontendResponseMode, OAuthInitQuery,
     };
     use axum::http::{HeaderMap, HeaderValue};
     use std::net::{IpAddr, SocketAddr};
@@ -1667,6 +1888,85 @@ mod tests {
                 redirect,
                 format!("{scheme}://auth?token=tok+en&session_id=session-1&expires_at=2026-05-27T00%3A00%3A00Z&state=mobile-state-1&is_new_user=true")
             );
+        }
+    }
+
+    #[test]
+    fn builds_pkce_bound_code_redirect_without_session_credentials() {
+        let redirect = build_oauth_frontend_code_redirect(
+            "https://app.near.ai/app",
+            "callback-code",
+            "frontend-state",
+        )
+        .unwrap();
+
+        assert_eq!(
+            redirect,
+            "https://app.near.ai/app/auth/callback?code=callback-code&state=frontend-state"
+        );
+        assert!(!redirect.contains("token="));
+        assert!(!redirect.contains("session_id="));
+    }
+
+    #[test]
+    fn defaults_frontend_response_to_legacy_token_for_compatibility() {
+        let options = validate_frontend_response_options(&OAuthInitQuery {
+            redirect_uri: None,
+            frontend_callback: "https://app.near.ai".into(),
+            frontend_response_mode: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            frontend_state: None,
+        })
+        .unwrap();
+
+        assert_eq!(options.mode, OAuthFrontendResponseMode::Token);
+    }
+
+    #[test]
+    fn validates_code_mode_pkce_and_frontend_state() {
+        let options = validate_frontend_response_options(&OAuthInitQuery {
+            redirect_uri: None,
+            frontend_callback: "https://app.near.ai".into(),
+            frontend_response_mode: Some("code".into()),
+            code_challenge: Some("A".repeat(43)),
+            code_challenge_method: Some("S256".into()),
+            frontend_state: Some("B".repeat(43)),
+        })
+        .unwrap();
+
+        assert_eq!(options.mode, OAuthFrontendResponseMode::Code);
+        assert_eq!(
+            options.code_challenge.as_deref(),
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        );
+        assert_eq!(
+            options.state.as_deref(),
+            Some("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_or_ambiguous_code_mode() {
+        for params in [
+            OAuthInitQuery {
+                redirect_uri: None,
+                frontend_callback: "https://app.near.ai".into(),
+                frontend_response_mode: Some("code".into()),
+                code_challenge: Some("A".repeat(43)),
+                code_challenge_method: Some("plain".into()),
+                frontend_state: Some("B".repeat(43)),
+            },
+            OAuthInitQuery {
+                redirect_uri: None,
+                frontend_callback: "https://app.near.ai".into(),
+                frontend_response_mode: None,
+                code_challenge: Some("A".repeat(43)),
+                code_challenge_method: None,
+                frontend_state: None,
+            },
+        ] {
+            assert!(validate_frontend_response_options(&params).is_err());
         }
     }
 
