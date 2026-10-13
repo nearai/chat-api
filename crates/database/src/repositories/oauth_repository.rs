@@ -64,6 +64,22 @@ impl PostgresOAuthRepository {
         self.encode_field("oauth_tokens", column, id, value)
     }
 
+    fn encode_provider_verifier(&self, id: Uuid, value: &str) -> anyhow::Result<String> {
+        // This new credential has no plaintext-write rollout phase. The global
+        // gate only controls migration of existing confidential fields.
+        let config = self.pool.field_encryption().ok_or_else(|| {
+            anyhow::anyhow!("field encryption configuration is required for provider PKCE")
+        })?;
+        crate::field_encryption::encrypt(
+            &config.key,
+            &config.key_id,
+            "oauth_states",
+            "provider_code_verifier",
+            id,
+            value,
+        )
+    }
+
     fn decode_token(&self, column: &str, id: Uuid, value: String) -> anyhow::Result<String> {
         self.decode_field("oauth_tokens", column, id, value)
     }
@@ -87,14 +103,7 @@ impl OAuthRepository for PostgresOAuthRepository {
         let provider_code_verifier = state
             .provider_code_verifier
             .as_ref()
-            .map(|verifier| {
-                self.encode_field(
-                    "oauth_states",
-                    "provider_code_verifier",
-                    id,
-                    verifier.secret(),
-                )
-            })
+            .map(|verifier| self.encode_provider_verifier(id, verifier.secret()))
             .transpose()?;
 
         let provider_str = match state.provider {

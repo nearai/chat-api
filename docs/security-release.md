@@ -6,6 +6,13 @@ remove the frontend wallet SDK's `script-src 'unsafe-inline'` requirement.
 
 ## Before production
 
+- Configure the same database encryption key and key ID on every replica.
+  Provider PKCE verifiers are always encrypted, even when
+  `DB_ENCRYPTION_WRITE_ENABLED=false`; missing encryption configuration rejects
+  new verifier writes. Other confidential fields retain their existing rollout
+  gates. Invalidate pending states containing plaintext verifiers at cutover
+  and require those logins to restart; previously stored plaintext verifiers
+  are not retroactively protected by this change.
 - Exercise Google and GitHub sign-in on staging using the registered callback
   URL and real provider configuration. Local tests validate provider parameters
   and the Google token exchange with a mock provider; they do not validate the

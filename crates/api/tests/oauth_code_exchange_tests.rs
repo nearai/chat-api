@@ -8,9 +8,9 @@ use common::{create_test_server_and_db, TestServerConfig};
 use http::header::{CACHE_CONTROL, LOCATION, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY};
 use serde_json::json;
 use services::auth::ports::{
-    OAuthCallbackCode, OAuthFrontendResponseMode, OAuthRepository, SessionRepository,
+    OAuthCallbackCode, OAuthFrontendResponseMode, OAuthRepository, OAuthTokens, SessionRepository,
 };
-use services::user::ports::UserRepository;
+use services::user::ports::{OAuthProvider, UserRepository};
 use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
@@ -123,7 +123,7 @@ async fn code_mode_initiation_accepts_valid_pkce_for_both_providers() {
 }
 
 #[tokio::test]
-async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
+async fn provider_callback_works_with_global_encryption_writes_disabled() {
     let provider = MockServer::start().await;
     let email = format!("oauth-provider-callback-{}@example.com", Uuid::new_v4());
     Mock::given(method("GET"))
@@ -138,7 +138,7 @@ async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
         .await;
 
     let (server, db) = create_test_server_and_db(TestServerConfig {
-        database_encryption_write_enabled: Some(true),
+        database_encryption_write_enabled: Some(false),
         google_oauth_token_url: Some(format!("{}/token", provider.uri())),
         google_oauth_user_info_url: Some(format!("{}/userinfo", provider.uri())),
         ..Default::default()
@@ -251,6 +251,161 @@ async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
     assert!(db
         .oauth_repository()
         .consume_oauth_state(&provider_state)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn provider_verifiers_are_encrypted_independently_of_the_write_gate() {
+    for write_enabled in [false, true] {
+        let (server, db) = create_test_server_and_db(TestServerConfig {
+            database_encryption_write_enabled: Some(write_enabled),
+            ..Default::default()
+        })
+        .await;
+        let client = db.pool().get().await.unwrap();
+        let encryption = db.pool().field_encryption().unwrap();
+        assert_eq!(encryption.write_enabled, write_enabled);
+
+        for provider in ["google", "github"] {
+            for code_mode in [false, true] {
+                let mode_query = if code_mode {
+                    format!(
+                        "&frontend_response_mode=code&code_challenge={}&code_challenge_method=S256&frontend_state={}",
+                        "A".repeat(43),
+                        "B".repeat(43)
+                    )
+                } else {
+                    String::new()
+                };
+                let response = server
+                    .get(&format!(
+                        "/v1/auth/{provider}?frontend_callback=http%3A%2F%2Flocalhost%3A3000{mode_query}"
+                    ))
+                    .await;
+                assert_eq!(response.status_code(), 307);
+                let redirect = Url::parse(response.header(LOCATION).to_str().unwrap()).unwrap();
+                let query: std::collections::HashMap<_, _> =
+                    redirect.query_pairs().into_owned().collect();
+                let state = &query["state"];
+                let row = client
+                    .query_one(
+                        "SELECT id, provider_code_verifier FROM oauth_states WHERE state = $1",
+                        &[state],
+                    )
+                    .await
+                    .unwrap();
+                let id: Uuid = row.get(0);
+                let stored: String = row.get(1);
+                let envelope: serde_json::Value = serde_json::from_str(&stored)
+                    .expect("provider verifier must never be stored as plaintext");
+                assert!(database::field_encryption::is_envelope(&envelope));
+                let verifier = database::field_encryption::decrypt(
+                    &encryption.key,
+                    &encryption.key_id,
+                    "oauth_states",
+                    "provider_code_verifier",
+                    id,
+                    &stored,
+                )
+                .unwrap();
+                assert_eq!(pkce_challenge(&verifier), query["code_challenge"]);
+                let consumed = db
+                    .oauth_repository()
+                    .consume_oauth_state(state)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(consumed.provider_code_verifier.unwrap().secret(), &verifier);
+                assert!(db
+                    .oauth_repository()
+                    .consume_oauth_state(state)
+                    .await
+                    .unwrap()
+                    .is_none());
+            }
+        }
+
+        // Existing token fields retain their rollout gate and dual-read behavior.
+        let user = db
+            .user_repository()
+            .create_user(
+                format!("oauth-storage-{}@example.com", Uuid::new_v4()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let tokens = OAuthTokens {
+            access_token: "storage-test-access-token".into(),
+            refresh_token: Some("storage-test-refresh-token".into()),
+            expires_at: None,
+        };
+        db.oauth_repository()
+            .store_oauth_tokens(user.id, OAuthProvider::Google, &tokens)
+            .await
+            .unwrap();
+        let row = client
+            .query_one(
+                "SELECT access_token, refresh_token FROM oauth_tokens WHERE user_id = $1 AND provider = 'google'",
+                &[&user.id],
+            )
+            .await
+            .unwrap();
+        for (index, plaintext) in [
+            (0, tokens.access_token.as_str()),
+            (1, "storage-test-refresh-token"),
+        ] {
+            let stored: String = row.get(index);
+            if write_enabled {
+                assert!(database::field_encryption::is_envelope(
+                    &serde_json::from_str(&stored).unwrap()
+                ));
+            } else {
+                assert_eq!(stored, plaintext);
+            }
+        }
+        let decoded = db
+            .oauth_repository()
+            .get_oauth_tokens(user.id, OAuthProvider::Google)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.access_token, tokens.access_token);
+        assert_eq!(decoded.refresh_token, tokens.refresh_token);
+    }
+}
+
+#[tokio::test]
+async fn provider_state_storage_fails_closed_without_encryption_configuration() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let response = server
+        .get("/v1/auth/google?frontend_callback=http%3A%2F%2Flocalhost%3A3000")
+        .await;
+    assert_eq!(response.status_code(), 307);
+    let redirect = Url::parse(response.header(LOCATION).to_str().unwrap()).unwrap();
+    let state = redirect
+        .query_pairs()
+        .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
+        .unwrap();
+    let oauth_state = db
+        .oauth_repository()
+        .consume_oauth_state(&state)
+        .await
+        .unwrap()
+        .unwrap();
+    let unconfigured_pool = database::pool::DbPool::new(db.pool().current().unwrap());
+    let unconfigured_repository =
+        database::repositories::PostgresOAuthRepository::new(unconfigured_pool);
+    let error = unconfigured_repository
+        .store_oauth_state(&oauth_state)
+        .await
+        .expect_err("missing key must not fall back to plaintext");
+    assert!(error.to_string().contains("field encryption configuration"));
+    assert!(db
+        .oauth_repository()
+        .consume_oauth_state(&state)
         .await
         .unwrap()
         .is_none());
