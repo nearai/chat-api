@@ -5,8 +5,8 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use near_api::signer::NEP413Payload;
 use oauth2::{
-    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl,
-    RefreshToken, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
+    PkceCodeChallenge, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 use rand::Rng;
 use serde::Deserialize;
@@ -398,8 +398,12 @@ impl OAuthServiceImpl {
             .set_token_uri(TokenUrl::new(token_url.to_string())?)
             .set_redirect_uri(RedirectUrl::new(oauth_state.redirect_uri.clone())?);
 
+        let provider_verifier = oauth_state.provider_code_verifier.ok_or_else(|| {
+            anyhow::anyhow!("OAuth state is missing provider PKCE; restart sign-in")
+        })?;
         let token_result = client
             .exchange_code(AuthorizationCode::new(code))
+            .set_pkce_verifier(provider_verifier)
             .request_async(&async_http_client)
             .await
             .map_err(|e| {
@@ -882,7 +886,10 @@ impl OAuthService for OAuthServiceImpl {
             .set_token_uri(TokenUrl::new(token_url.to_string())?)
             .set_redirect_uri(RedirectUrl::new(redirect_uri.clone())?);
 
-        let mut auth_request = client.authorize_url(CsrfToken::new_random);
+        let (provider_challenge, provider_verifier) = PkceCodeChallenge::new_random_sha256();
+        let mut auth_request = client
+            .authorize_url(CsrfToken::new_random)
+            .set_pkce_challenge(provider_challenge);
         for scope in scopes {
             auth_request = auth_request.add_scope(Scope::new(scope.to_string()));
         }
@@ -897,6 +904,7 @@ impl OAuthService for OAuthServiceImpl {
             frontend_response_mode,
             frontend_code_challenge,
             frontend_state,
+            provider_code_verifier: Some(provider_verifier),
             created_at: Utc::now(),
         };
 

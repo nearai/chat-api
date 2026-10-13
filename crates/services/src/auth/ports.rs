@@ -6,9 +6,10 @@ use crate::types::{SessionId, UserId};
 
 // Re-export OAuthProvider from user module for convenience
 pub use crate::user::ports::OAuthProvider;
+pub use oauth2::PkceCodeVerifier;
 
 /// Represents an OAuth session state
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct OAuthState {
     pub state: String,
     pub provider: OAuthProvider,
@@ -17,6 +18,9 @@ pub struct OAuthState {
     pub frontend_response_mode: OAuthFrontendResponseMode,
     pub frontend_code_challenge: Option<String>,
     pub frontend_state: Option<String>,
+    /// Secret for the provider authorization-code exchange, independent of the
+    /// browser's frontend callback verifier. Debug output is redacted by oauth2.
+    pub provider_code_verifier: Option<PkceCodeVerifier>,
     pub created_at: DateTime<Utc>,
 }
 

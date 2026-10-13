@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use services::{
     auth::ports::{
         OAuthCallbackCode, OAuthCodeExchangeSuccess, OAuthFrontendResponseMode, OAuthRepository,
-        OAuthState, OAuthTokens, UserSession,
+        OAuthState, OAuthTokens, PkceCodeVerifier, UserSession,
     },
     user::ports::OAuthProvider,
     SessionId, UserId,
@@ -20,12 +20,18 @@ impl PostgresOAuthRepository {
         Self { pool }
     }
 
-    fn encode_token(&self, column: &str, id: Uuid, value: &str) -> anyhow::Result<String> {
+    fn encode_field(
+        &self,
+        table: &str,
+        column: &str,
+        id: Uuid,
+        value: &str,
+    ) -> anyhow::Result<String> {
         match self.pool.field_encryption() {
             Some(config) if config.write_enabled => crate::field_encryption::encrypt(
                 &config.key,
                 &config.key_id,
-                "oauth_tokens",
+                table,
                 column,
                 id,
                 value,
@@ -34,18 +40,32 @@ impl PostgresOAuthRepository {
         }
     }
 
-    fn decode_token(&self, column: &str, id: Uuid, value: String) -> anyhow::Result<String> {
+    fn decode_field(
+        &self,
+        table: &str,
+        column: &str,
+        id: Uuid,
+        value: String,
+    ) -> anyhow::Result<String> {
         match self.pool.field_encryption() {
             Some(config) => crate::field_encryption::decrypt_if_encrypted(
                 &config.key,
                 &config.key_id,
-                "oauth_tokens",
+                table,
                 column,
                 id,
                 value,
             ),
             None => Ok(value),
         }
+    }
+
+    fn encode_token(&self, column: &str, id: Uuid, value: &str) -> anyhow::Result<String> {
+        self.encode_field("oauth_tokens", column, id, value)
+    }
+
+    fn decode_token(&self, column: &str, id: Uuid, value: String) -> anyhow::Result<String> {
+        self.decode_field("oauth_tokens", column, id, value)
     }
 }
 
@@ -63,6 +83,20 @@ impl OAuthRepository for PostgresOAuthRepository {
 
         let client = self.pool.get().await?;
 
+        let id = Uuid::new_v4();
+        let provider_code_verifier = state
+            .provider_code_verifier
+            .as_ref()
+            .map(|verifier| {
+                self.encode_field(
+                    "oauth_states",
+                    "provider_code_verifier",
+                    id,
+                    verifier.secret(),
+                )
+            })
+            .transpose()?;
+
         let provider_str = match state.provider {
             OAuthProvider::Google => "google",
             OAuthProvider::Github => "github",
@@ -79,9 +113,11 @@ impl OAuthRepository for PostgresOAuthRepository {
                     frontend_response_mode,
                     frontend_code_challenge,
                     frontend_state,
-                    created_at
+                    created_at,
+                    id,
+                    provider_code_verifier
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 &[
                     &state.state,
                     &provider_str,
@@ -91,6 +127,8 @@ impl OAuthRepository for PostgresOAuthRepository {
                     &state.frontend_code_challenge,
                     &state.frontend_state,
                     &state.created_at,
+                    &id,
+                    &provider_code_verifier,
                 ],
             )
             .await?;
@@ -125,7 +163,7 @@ impl OAuthRepository for PostgresOAuthRepository {
                  WHERE state = $1
                  RETURNING state, provider, redirect_uri, frontend_callback,
                            frontend_response_mode, frontend_code_challenge,
-                           frontend_state, created_at",
+                           frontend_state, created_at, id, provider_code_verifier",
                 &[&state],
             )
             .await?;
@@ -153,6 +191,18 @@ impl OAuthRepository for PostgresOAuthRepository {
                     frontend_code_challenge: r.get(5),
                     frontend_state: r.get(6),
                     created_at: r.get(7),
+                    provider_code_verifier: r
+                        .get::<_, Option<String>>(9)
+                        .map(|value| {
+                            self.decode_field(
+                                "oauth_states",
+                                "provider_code_verifier",
+                                r.get(8),
+                                value,
+                            )
+                            .map(PkceCodeVerifier::new)
+                        })
+                        .transpose()?,
                 })
             })
             .transpose()?;

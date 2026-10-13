@@ -1,6 +1,6 @@
 use api::middleware::RateLimitState;
 use api::stripe_client_adapter::StripeClientAdapter;
-use api::{create_router_with_cors, ApiDoc, AppState};
+use api::{create_router_with_cors, AppState};
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
@@ -23,8 +23,6 @@ use services::{
     vpc::{initialize_vpc_credentials, VpcAuthConfig},
 };
 use std::sync::Arc;
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 fn near_rpc_network_hint(host: Option<&str>) -> Option<&'static str> {
     match host?.to_ascii_lowercase().as_str() {
@@ -488,8 +486,7 @@ async fn main() -> anyhow::Result<()> {
     api::database_encryption::recover_jobs(app_state.clone()).await;
 
     // Create router with CORS support
-    let app = create_router_with_cors(app_state, config.cors.clone())
-        .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
+    let app = create_router_with_cors(app_state, config.cors.clone());
 
     // Start server
     let addr = format!("{}:{}", config.server.host, config.server.port);

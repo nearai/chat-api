@@ -5,7 +5,7 @@ mod common;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration, Utc};
 use common::{create_test_server_and_db, TestServerConfig};
-use http::header::{CACHE_CONTROL, LOCATION};
+use http::header::{CACHE_CONTROL, LOCATION, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY};
 use serde_json::json;
 use services::auth::ports::{
     OAuthCallbackCode, OAuthFrontendResponseMode, OAuthRepository, SessionRepository,
@@ -26,8 +26,67 @@ fn pkce_challenge(verifier: &str) -> String {
 }
 
 #[tokio::test]
+async fn security_headers_cover_the_complete_production_router() {
+    let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+    for (path, expected_status) in [
+        ("/health", 200),
+        ("/docs", 303),
+        ("/docs/", 200),
+        ("/docs/swagger-ui.css", 200),
+        ("/api-docs/openapi.json", 200),
+        ("/v1/auth/callback?code=invalid&state=invalid", 401),
+    ] {
+        let response = server.get(path).await;
+        assert_eq!(response.status_code(), expected_status, "{path}");
+        assert_eq!(
+            response.header(STRICT_TRANSPORT_SECURITY),
+            "max-age=31536000; includeSubDomains",
+            "{path}"
+        );
+        assert_eq!(
+            response.header(http::header::X_CONTENT_TYPE_OPTIONS),
+            "nosniff",
+            "{path}"
+        );
+        let policies: Vec<_> = response
+            .headers()
+            .get_all(http::header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            policies
+                .iter()
+                .filter(|p| **p == "frame-ancestors 'none'; script-src-attr 'none'")
+                .count(),
+            1,
+            "{path}"
+        );
+    }
+    let openapi = server.get("/api-docs/openapi.json").await;
+    let document: serde_json::Value = openapi.json();
+    assert!(document["paths"]["/health"].is_object());
+    let preflight = server
+        .method(http::Method::OPTIONS, "/v1/auth/google")
+        .add_header(http::header::ORIGIN, "https://agent.near.ai")
+        .add_header(http::header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .await;
+    assert_eq!(preflight.status_code(), 200);
+    assert_eq!(
+        preflight.header(STRICT_TRANSPORT_SECURITY),
+        "max-age=31536000; includeSubDomains"
+    );
+}
+
+#[tokio::test]
 async fn code_mode_initiation_accepts_valid_pkce_for_both_providers() {
     let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let health = server.get("/health").await;
+    assert_eq!(health.status_code(), 200);
+    assert_eq!(
+        health.header(STRICT_TRANSPORT_SECURITY),
+        "max-age=31536000; includeSubDomains"
+    );
     let challenge = "A".repeat(43);
     let frontend_state = "B".repeat(43);
 
@@ -39,26 +98,33 @@ async fn code_mode_initiation_accepts_valid_pkce_for_both_providers() {
             .await;
 
         assert_eq!(response.status_code(), 307);
+        let redirect = Url::parse(response.header(LOCATION).to_str().unwrap()).unwrap();
+        let query: std::collections::HashMap<_, _> = redirect.query_pairs().collect();
+        assert_eq!(
+            query.get("code_challenge_method").map(|v| v.as_ref()),
+            Some("S256")
+        );
+        let provider_challenge = query
+            .get("code_challenge")
+            .expect("provider PKCE challenge");
+        assert_eq!(provider_challenge.len(), 43);
+        assert_ne!(provider_challenge.as_ref(), challenge);
+        assert!(!query.contains_key("code_verifier"));
     }
 
     let legacy_response = server
         .get("/v1/auth/google?frontend_callback=http%3A%2F%2Flocalhost%3A3000")
         .await;
     assert_eq!(legacy_response.status_code(), 307);
+    let redirect = Url::parse(legacy_response.header(LOCATION).to_str().unwrap()).unwrap();
+    assert!(redirect
+        .query_pairs()
+        .any(|(key, value)| key == "code_challenge_method" && value == "S256"));
 }
 
 #[tokio::test]
 async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
     let provider = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/token"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "access_token": "mock-google-access-token",
-            "token_type": "Bearer",
-            "expires_in": 3600
-        })))
-        .mount(&provider)
-        .await;
     let email = format!("oauth-provider-callback-{}@example.com", Uuid::new_v4());
     Mock::given(method("GET"))
         .and(path("/userinfo"))
@@ -72,6 +138,7 @@ async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
         .await;
 
     let (server, db) = create_test_server_and_db(TestServerConfig {
+        database_encryption_write_enabled: Some(true),
         google_oauth_token_url: Some(format!("{}/token", provider.uri())),
         google_oauth_user_info_url: Some(format!("{}/userinfo", provider.uri())),
         ..Default::default()
@@ -94,6 +161,27 @@ async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
             .expect("provider redirect header value"),
     )
     .expect("provider redirect URL");
+    let provider_challenge = provider_redirect
+        .query_pairs()
+        .find_map(|(key, value)| (key == "code_challenge").then(|| value.into_owned()))
+        .expect("provider PKCE challenge");
+    assert_ne!(provider_challenge, challenge);
+    let expected_challenge = provider_challenge.clone();
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(move |request: &wiremock::Request| {
+            let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&request.body).collect();
+            if form.get("code_verifier").is_some_and(|verifier| pkce_challenge(verifier) == expected_challenge) {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "access_token": "mock-google-access-token", "token_type": "Bearer", "expires_in": 3600
+                }))
+            } else {
+                ResponseTemplate::new(400).set_body_json(json!({"error": "invalid_grant"}))
+            }
+        })
+        .expect(1)
+        .mount(&provider)
+        .await;
     let provider_state = provider_redirect
         .query_pairs()
         .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
@@ -102,7 +190,7 @@ async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
     let client = db.pool().get().await.expect("database client");
     let stored_state = client
         .query_one(
-            "SELECT frontend_response_mode, frontend_code_challenge, frontend_state
+            "SELECT frontend_response_mode, frontend_code_challenge, frontend_state, provider_code_verifier
              FROM oauth_states WHERE state = $1",
             &[&provider_state],
         )
@@ -117,6 +205,9 @@ async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
         stored_state.get::<_, Option<String>>(2).as_deref(),
         Some(frontend_state.as_str())
     );
+    let stored_verifier: String = stored_state.get(3);
+    let envelope: serde_json::Value = serde_json::from_str(&stored_verifier).unwrap();
+    assert!(database::field_encryption::is_envelope(&envelope));
 
     let callback = server
         .get(&format!(
@@ -125,6 +216,7 @@ async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
         .await;
     assert_eq!(callback.status_code(), 302);
     assert_eq!(callback.header(CACHE_CONTROL), "no-store");
+    assert_eq!(callback.header(REFERRER_POLICY), "no-referrer");
     let frontend_location = callback.header(LOCATION);
     let frontend_redirect = Url::parse(
         frontend_location
@@ -156,6 +248,73 @@ async fn enabled_provider_callback_issues_an_exchangeable_pkce_code() {
         .is_some_and(|token| token.starts_with("sess_")));
     assert!(body["session_id"].as_str().is_some());
     assert_eq!(body["is_new_user"], true);
+    assert!(db
+        .oauth_repository()
+        .consume_oauth_state(&provider_state)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn provider_callback_rejects_missing_and_wrong_verifiers() {
+    for replacement in [None, Some("w".repeat(43))] {
+        let provider = MockServer::start().await;
+        // A provider-bound code cannot be exchanged with a different verifier.
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_json(json!({ "error": "invalid_grant" })),
+            )
+            .expect(if replacement.is_some() { 1 } else { 0 })
+            .mount(&provider)
+            .await;
+        let (server, db) = create_test_server_and_db(TestServerConfig {
+            google_oauth_token_url: Some(format!("{}/token", provider.uri())),
+            google_oauth_user_info_url: Some(format!("{}/userinfo", provider.uri())),
+            ..Default::default()
+        })
+        .await;
+        let initiation = server
+            .get("/v1/auth/google?frontend_callback=http%3A%2F%2Flocalhost%3A3000")
+            .await;
+        assert_eq!(initiation.status_code(), 307);
+        let redirect = Url::parse(initiation.header(LOCATION).to_str().unwrap()).unwrap();
+        let state = redirect
+            .query_pairs()
+            .find_map(|(k, v)| (k == "state").then(|| v.into_owned()))
+            .unwrap();
+        let client = db.pool().get().await.unwrap();
+        client
+            .execute(
+                "UPDATE oauth_states SET provider_code_verifier = $2 WHERE state = $1",
+                &[&state, &replacement],
+            )
+            .await
+            .unwrap();
+        let callback = server
+            .get(&format!(
+                "/v1/auth/callback?code=provider-bound-code&state={state}"
+            ))
+            .await;
+        assert_eq!(callback.status_code(), 401);
+        assert!(db
+            .oauth_repository()
+            .consume_oauth_state(&state)
+            .await
+            .unwrap()
+            .is_none());
+        let requests = provider.received_requests().await.unwrap();
+        assert!(requests.iter().all(|r| r.url.path() != "/userinfo"));
+        if let Some(verifier) = replacement {
+            let form: std::collections::HashMap<_, _> =
+                url::form_urlencoded::parse(&requests[0].body).collect();
+            assert_eq!(
+                form.get("code_verifier").map(|v| v.as_ref()),
+                Some(verifier.as_str())
+            );
+        }
+    }
 }
 
 #[tokio::test]

@@ -1,0 +1,61 @@
+# Provider PKCE and security headers rollout
+
+This release adds provider PKCE to Google/GitHub sign-in and security response
+headers to the API, bundled frontend, and documentation routes. It does not
+remove the frontend wallet SDK's `script-src 'unsafe-inline'` requirement.
+
+## Before production
+
+- Exercise Google and GitHub sign-in on staging using the registered callback
+  URL and real provider configuration. Local tests validate provider parameters
+  and the Google token exchange with a mock provider; they do not validate the
+  production app registrations or proxy routing.
+- Check that the final proxy preserves HSTS on the frontend, API, errors,
+  `/docs`, `/docs/`, a Swagger asset, and `/api-docs/openapi.json`. HSTS is
+  `max-age=31536000; includeSubDomains`; HTTPS must remain available for the host
+  and its subdomains for that period. Removing the header does not immediately
+  clear policies already cached by browsers.
+- Smoke-test wallet selection and signing after the frontend CSP attribute
+  restriction. The existing inline script elements remain allowed; inline
+  event-handler attributes are rejected.
+- Apply V41 once using the normal migration runner before new instances become
+  ready. Startup also runs migrations. The migration adds a UUID column with a
+  volatile random default and a unique constraint, so allow for a table rewrite
+  and an exclusive lock on `oauth_states`. Check table size and lock contention
+  on the actual database; local tests do not establish production lock duration.
+
+## Cutover
+
+Do not randomly distribute OAuth initiation and callback requests across old
+and new replicas during the switch. Drain the old version and cut new login
+traffic over together, or use version-affine routing for both legs. Existing
+application sessions remain usable.
+
+Pre-release pending states have no provider verifier. A new callback rejects
+them. Conversely, an old callback cannot exchange a provider code issued with
+the new PKCE challenge. Those logins must restart; retrying the same callback
+does not work because state is consumed once before token exchange. Never
+accept a missing verifier as a compatibility fallback.
+
+## Rollback
+
+V41 is additive and keeps the old `state` primary key, so old query shapes still
+work. That does **not** mean an unchanged old image can start after migration.
+The existing refinery runner rejects applied migrations absent from its local
+SQL files. An image containing only V1–V40 fails startup after V41 is applied.
+
+Prepare and test a rollback image that includes the exact V41 SQL file as well
+as the original migration set, or supply the complete preserved V1–V41 SQL
+directory via `DATABASE_MIGRATIONS_PATH`. Preserve migration names and bytes;
+do not remove V41 from migration history or drop its columns during rollback.
+Use an absolute path and ensure the mounted directory exists: the runner falls
+back to bundled paths when an override path is absent.
+
+Drain/cut over login traffic as above when reverting code. New-version pending
+PKCE logins cannot finish on the old code and must restart. Code rollback also
+removes provider PKCE protection, so prefer a forward fix when possible. Reverting
+HSTS at the server cannot undo the policy cached in clients immediately.
+
+The production provider smoke tests, proxy-header check, database lock check,
+and rollback-image startup check are release prerequisites. Passing local tests
+alone is not evidence of a zero-risk production rollout.
