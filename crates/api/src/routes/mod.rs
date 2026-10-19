@@ -15,7 +15,8 @@ pub use services::agent::ports::{is_valid_service_type, VALID_SERVICE_TYPES};
 
 use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
 use serde::Serialize;
-use utoipa::ToSchema;
+use utoipa::{OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     middleware::{AuthState, MetricsState},
@@ -185,5 +186,11 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         ))
         .layer(axum::middleware::from_fn(
             crate::middleware::request_id_middleware,
+        ))
+        // Merge documentation before the final response layer. Router layers
+        // do not apply to routes merged afterwards.
+        .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", crate::ApiDoc::openapi()))
+        .layer(axum::middleware::map_response(
+            crate::middleware::security_headers::security_headers,
         ))
 }

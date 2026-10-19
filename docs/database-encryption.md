@@ -11,8 +11,17 @@ through `DB_ENCRYPTION_KEY_FILE` (preferred) or `DB_ENCRYPTION_KEY`; never reuse
 `DB_ENCRYPTION_KEY_ID` identifying the deployed key version.
 
 `DB_ENCRYPTION_WRITE_ENABLED` defaults to `false`. When false, repository reads
-accept legacy plaintext and encrypted envelopes, while writes remain plaintext.
-Execute-mode backfills are rejected.
+accept legacy plaintext and encrypted envelopes, while writes to existing
+confidential fields remain plaintext. Execute-mode backfills are rejected.
+
+New OAuth provider PKCE verifiers are an exception: they always use the configured
+database key and authenticated envelope, independently of this rollout gate.
+Storing a new verifier without encryption configuration fails before insertion.
+All replicas must use the same key and key ID, including when the global write
+gate is disabled. Reads retain support for pending states written by earlier
+versions. Invalidate pending states containing plaintext verifiers at cutover
+and require those logins to restart, so old plaintext verifiers do not remain in
+the live table.
 
 Agent provisioning secrets have a separate rollout gate,
 `DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED`, also defaulting to `false`. While
@@ -91,6 +100,7 @@ boundary or be destroyed under the backup-retention policy.
 - `conversation_shares.recipient_value`
 - `oauth_tokens.access_token`
 - `oauth_tokens.refresh_token`
+- `oauth_states.provider_code_verifier`
 - `agent_instances.auth_session_token`
 - `agent_instances.instance_url`
 - `agent_instances.dashboard_url`

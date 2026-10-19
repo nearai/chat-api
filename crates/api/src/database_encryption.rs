@@ -36,6 +36,14 @@ struct Field {
 
 const FIELDS: &[Field] = &[
     Field {
+        table: "oauth_states",
+        column: "provider_code_verifier",
+        id_column: "id",
+        kind: Kind::Text,
+        reason: "Short-lived OAuth provider PKCE credential",
+        token: None,
+    },
+    Field {
         table: "files",
         column: "filename",
         id_column: "id",
