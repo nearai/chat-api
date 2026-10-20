@@ -996,6 +996,17 @@ impl OAuthService for OAuthServiceImpl {
             .await?
             .ok_or_else(|| anyhow::anyhow!("Invalid or expired OAuth state"))?;
 
+        // Reject outstanding legacy states before exchanging provider credentials
+        // or creating a session. Every OAuth login requires frontend PKCE.
+        if oauth_state.frontend_response_mode != OAuthFrontendResponseMode::Code
+            || oauth_state.frontend_code_challenge.is_none()
+            || oauth_state.frontend_state.is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "OAuth state is missing frontend PKCE; restart sign-in"
+            ));
+        }
+
         self.handle_callback_impl(oauth_state.provider, code, oauth_state)
             .await
     }
