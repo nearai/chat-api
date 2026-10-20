@@ -28,11 +28,13 @@ use services::SessionId;
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 use url::{Host, Url};
 use utoipa::ToSchema;
 
 const FRONTEND_CALLBACK_ALLOWED_ORIGINS_ENV: &str = "FRONTEND_CALLBACK_ALLOWED_ORIGINS";
 const OAUTH_CALLBACK_PATH: &str = "/auth/callback";
+const OAUTH_GATEWAY_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 // Mobile app-scheme callbacks are not URL origins, so they cannot be validated
 // through FRONTEND_CALLBACK_ALLOWED_ORIGINS. Keep this list exact and short.
 // nearprivatechat is accepted temporarily for already-shipped mobile builds;
@@ -1144,33 +1146,44 @@ pub async fn exchange_oauth_callback_code(
 
     // The code is already consumed. Never restore it if gateway setup fails:
     // retries must start a new sign-in, not bypass frontend PKCE verification.
-    let gateway_cookie = match app_state
-        .agent_service
-        .setup_gateway_session_for_user(exchanged.session.user_id)
-        .await
+    let gateway_cookie = match tokio::time::timeout(
+        OAUTH_GATEWAY_SETUP_TIMEOUT,
+        app_state
+            .agent_service
+            .setup_gateway_session_for_user(exchanged.session.user_id),
+    )
+    .await
     {
-        Ok(Some(cookie)) if !cookie.trim().is_empty() => cookie.parse::<HeaderValue>().ok(),
-        _ => None,
-    };
-    let Some(gateway_cookie) = gateway_cookie else {
-        tracing::warn!(
-            user_id = %exchanged.session.user_id,
-            "Failed to set up gateway session after OAuth code exchange"
-        );
-        if let Err(error) = app_state
-            .oauth_service
-            .revoke_session(exchanged.session.session_id)
-            .await
-        {
-            tracing::error!(
-                session_id = %exchanged.session.session_id,
-                error = %error,
-                "Failed to revoke session after OAuth gateway setup failure"
-            );
+        Ok(Ok(Some(cookie))) if !cookie.trim().is_empty() => {
+            cookie.parse::<HeaderValue>().map_err(|_| "invalid_header")
         }
-        return Err(ApiError::bad_gateway(
-            "Failed to set up gateway session; restart sign-in",
-        ));
+        Ok(Ok(_)) => Err("missing_cookie"),
+        Ok(Err(_)) => Err("gateway_error"),
+        Err(_) => Err("timeout"),
+    };
+    let gateway_cookie = match gateway_cookie {
+        Ok(cookie) => cookie,
+        Err(reason) => {
+            tracing::warn!(
+                user_id = %exchanged.session.user_id,
+                reason,
+                "Failed to set up gateway session after OAuth code exchange"
+            );
+            if let Err(error) = app_state
+                .oauth_service
+                .revoke_session(exchanged.session.session_id)
+                .await
+            {
+                tracing::error!(
+                    session_id = %exchanged.session.session_id,
+                    error = %error,
+                    "Failed to revoke session after OAuth gateway setup failure"
+                );
+            }
+            return Err(ApiError::bad_gateway(
+                "Failed to set up gateway session; restart sign-in",
+            ));
+        }
     };
 
     let mut headers = HeaderMap::new();

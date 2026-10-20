@@ -4,7 +4,7 @@ mod common;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration, Utc};
-use common::{create_test_server_and_db, TestServerConfig};
+use common::{create_test_server_and_db, create_test_server_with_state, TestServerConfig};
 use http::header::{
     CACHE_CONTROL, LOCATION, REFERRER_POLICY, SET_COOKIE, STRICT_TRANSPORT_SECURITY,
 };
@@ -14,7 +14,9 @@ use services::auth::ports::{OAuthCallbackCode, OAuthRepository, OAuthTokens, Ses
 use services::user::ports::{OAuthProvider, UserRepository};
 use services::UserId;
 use sha2::{Digest, Sha256};
+use std::io;
 use std::sync::{Arc, Mutex};
+use tracing::instrument::WithSubscriber;
 use url::Url;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
@@ -31,6 +33,36 @@ fn pkce_challenge(verifier: &str) -> String {
 const GATEWAY_COOKIE: &str =
     "gateway=test-session; Domain=.near.ai; Path=/; Secure; HttpOnly; SameSite=None";
 type GatewayCalls = Arc<Mutex<Vec<UserId>>>;
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLogs {
+    fn contents(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+
+    fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + 'static {
+        let logs = self.clone();
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || logs.clone())
+            .finish()
+    }
+}
 
 fn gateway_config(
     expected_calls: usize,
@@ -885,12 +917,15 @@ async fn malformed_or_missing_exchange_credentials_never_call_gateway() {
 
 #[tokio::test]
 async fn gateway_failure_revokes_session_without_restoring_callback_code() {
-    for result in [
-        Err("gateway unavailable"),
-        Ok(None),
-        Ok(Some("")),
-        Ok(Some("   ")),
-        Ok(Some("invalid\r\nSet-Cookie: injected=value")),
+    for (result, reason) in [
+        (Err("gateway unavailable"), "gateway_error"),
+        (Ok(None), "missing_cookie"),
+        (Ok(Some("")), "missing_cookie"),
+        (Ok(Some("   ")), "missing_cookie"),
+        (
+            Ok(Some("invalid\r\nSet-Cookie: injected=value")),
+            "invalid_header",
+        ),
     ] {
         let (config, calls) = gateway_config(1, result);
         let (server, db) = create_test_server_and_db(config).await;
@@ -922,10 +957,21 @@ async fn gateway_failure_revokes_session_without_restoring_callback_code() {
             )
             .await
             .unwrap();
-        let response = server
-            .post("/v1/auth/exchange")
-            .json(&json!({"code": code, "code_verifier": verifier}))
-            .await;
+        let logs = CapturedLogs::default();
+        let response = async {
+            server
+                .post("/v1/auth/exchange")
+                .json(&json!({"code": code, "code_verifier": verifier}))
+                .await
+        }
+        .with_subscriber(logs.subscriber())
+        .await;
+        let logged = logs.contents();
+        assert!(logged.contains(&format!("reason=\"{reason}\"")), "{logged}");
+        assert!(!logged.contains("gateway unavailable"));
+        assert!(!logged.contains("injected=value"));
+        assert!(!logged.contains(&code));
+        assert!(!logged.contains(&verifier));
         assert_eq!(response.status_code(), 502);
         assert_eq!(response.header(CACHE_CONTROL), "no-store");
         assert!(!response.headers().contains_key(SET_COOKIE));
@@ -969,4 +1015,113 @@ async fn gateway_failure_revokes_session_without_restoring_callback_code() {
         assert!(!replay.headers().contains_key(SET_COOKIE));
         assert_eq!(*calls.lock().unwrap(), vec![user.id]);
     }
+}
+
+#[tokio::test]
+async fn gateway_setup_timeout_revokes_session_without_restoring_callback_code() {
+    let gateway = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/auth/login"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "session_token": "gateway-secret" }))
+                .set_delay(std::time::Duration::from_secs(30)),
+        )
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    let (_server, db, mut state) = create_test_server_with_state(TestServerConfig::default()).await;
+    state.agent_service = Arc::new(services::agent::AgentServiceImpl::new(
+        db.agent_repository(),
+        vec![config::AgentManager {
+            url: gateway.uri(),
+            token: "test-token".into(),
+        }],
+        "http://127.0.0.1:9".into(),
+        state.system_configs_service.clone(),
+        None,
+    ));
+    let server = axum_test::TestServer::new(api::create_router_with_cors(
+        state,
+        config::CorsConfig::default(),
+    ))
+    .unwrap();
+    let user = db
+        .user_repository()
+        .create_user(
+            format!("oauth-gateway-timeout-{}@example.com", Uuid::new_v4()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session = db
+        .session_repository()
+        .create_session(user.id)
+        .await
+        .unwrap();
+    let code = URL_SAFE_NO_PAD.encode(Sha256::digest(Uuid::new_v4().as_bytes()));
+    let verifier = "v".repeat(43);
+    db.oauth_repository()
+        .store_callback_code(
+            &sha256_hex(&code),
+            &OAuthCallbackCode {
+                session_id: session.session_id,
+                code_challenge: pkce_challenge(&verifier),
+                is_new_user: false,
+                expires_at: Utc::now() + Duration::minutes(2),
+            },
+        )
+        .await
+        .unwrap();
+    let logs = CapturedLogs::default();
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        async {
+            server
+                .post("/v1/auth/exchange")
+                .json(&json!({ "code": code, "code_verifier": verifier }))
+                .await
+        }
+        .with_subscriber(logs.subscriber()),
+    )
+    .await
+    .expect("gateway setup must stop after ten seconds");
+    assert!(started.elapsed() >= std::time::Duration::from_secs(10));
+    assert_eq!(response.status_code(), 502);
+    assert_eq!(response.header(CACHE_CONTROL), "no-store");
+    assert!(!response.headers().contains_key(SET_COOKIE));
+    assert!(response.json::<serde_json::Value>().get("token").is_none());
+    let logged = logs.contents();
+    assert!(logged.contains("reason=\"timeout\""), "{logged}");
+    assert!(!logged.contains("gateway-secret"));
+    assert!(!logged.contains(&code));
+    assert!(!logged.contains(&verifier));
+    let client = db.pool().get().await.unwrap();
+    let sessions: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM sessions WHERE id = $1",
+            &[&session.session_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(sessions, 0);
+    let codes: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM oauth_callback_codes WHERE code_hash = $1",
+            &[&sha256_hex(&code)],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(codes, 0);
+    let replay = server
+        .post("/v1/auth/exchange")
+        .json(&json!({ "code": code, "code_verifier": verifier }))
+        .await;
+    assert_eq!(replay.status_code(), 401);
+    assert!(!replay.headers().contains_key(SET_COOKIE));
+    assert_eq!(gateway.received_requests().await.unwrap().len(), 1);
 }
