@@ -1149,18 +1149,7 @@ pub async fn exchange_oauth_callback_code(
         .setup_gateway_session_for_user(exchanged.session.user_id)
         .await
     {
-        Ok(Some(cookie)) => cookie::Cookie::parse(cookie.as_str())
-            .ok()
-            .filter(|parsed| {
-                !parsed.value_trimmed().is_empty()
-                    && match parsed.max_age() {
-                        Some(age) => age.is_positive(),
-                        None => parsed.expires_datetime().is_none_or(|expires| {
-                            expires.unix_timestamp() > chrono::Utc::now().timestamp()
-                        }),
-                    }
-            })
-            .and_then(|_| cookie.parse::<HeaderValue>().ok()),
+        Ok(Some(cookie)) if !cookie.trim().is_empty() => cookie.parse::<HeaderValue>().ok(),
         _ => None,
     };
     let Some(gateway_cookie) = gateway_cookie else {

@@ -184,9 +184,7 @@ async fn initiation_rejects_legacy_and_invalid_frontend_pkce() {
 #[tokio::test]
 async fn provider_callback_works_with_global_encryption_writes_disabled() {
     let provider = MockServer::start().await;
-    // Max-Age takes precedence over Expires, as it does in browsers.
-    let cookie = "gateway=test-session; Domain=.near.ai; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=3600; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
-    let (gateway, gateway_calls) = gateway_config(1, Ok(Some(cookie)));
+    let (gateway, gateway_calls) = gateway_config(1, Ok(Some(GATEWAY_COOKIE)));
     let email = format!("oauth-provider-callback-{}@example.com", Uuid::new_v4());
     Mock::given(method("GET"))
         .and(path("/userinfo"))
@@ -305,7 +303,7 @@ async fn provider_callback_works_with_global_encryption_writes_disabled() {
         .json(&json!({ "code": callback_code, "code_verifier": verifier }))
         .await;
     assert_eq!(exchange.status_code(), 200);
-    assert_eq!(exchange.header(SET_COOKIE), cookie);
+    assert_eq!(exchange.header(SET_COOKIE), GATEWAY_COOKIE);
     assert_eq!(gateway_calls.lock().unwrap().len(), 1);
     assert_eq!(exchange.header(CACHE_CONTROL), "no-store");
     let body: serde_json::Value = exchange.json();
@@ -891,13 +889,7 @@ async fn gateway_failure_revokes_session_without_restoring_callback_code() {
         Err("gateway unavailable"),
         Ok(None),
         Ok(Some("")),
-        Ok(Some("not-a-cookie")),
-        Ok(Some("gateway=; Max-Age=0")),
-        Ok(Some("gateway=deleted; Max-Age=0")),
-        Ok(Some("gateway=deleted; Max-Age=-1")),
-        Ok(Some(
-            "gateway=deleted; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
-        )),
+        Ok(Some("   ")),
         Ok(Some("invalid\r\nSet-Cookie: injected=value")),
     ] {
         let (config, calls) = gateway_config(1, result);

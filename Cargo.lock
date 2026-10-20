@@ -515,7 +515,6 @@ dependencies = [
  "bytes",
  "chrono",
  "config",
- "cookie",
  "database",
  "deadpool-postgres",
  "dotenvy",

@@ -33,7 +33,6 @@ chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 bytes = "1.5"
 http = "1.0"
-cookie = "0.18"
 flate2 = "1.0"
 brotli = "8.0"
 zstd = "0.13"
