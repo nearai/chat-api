@@ -116,6 +116,7 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Install pinned apt dependencies
+# eMudhra intermediate CA key compromise (2026-10-20): bookworm has no fixed ca-certificates yet, so distrust the two roots the compromised intermediates chain to. Remove once the pinned ca-certificates no longer ships them.
 RUN --mount=type=bind,source=scripts/pinned-packages-runtime.txt,target=/tmp/pinned-packages-runtime.txt,ro \
     set -e; \
     # Create a sources.list file pointing to a specific snapshot
@@ -137,7 +138,12 @@ RUN --mount=type=bind,source=scripts/pinned-packages-runtime.txt,target=/tmp/pin
         ca-certificates \
         libssl3 \
         curl \
-        && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
+        && sed -i -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt$|!&|' \
+                  -e 's|^mozilla/Comodo_AAA_Services_root.crt$|!&|' /etc/ca-certificates.conf && \
+        update-ca-certificates && \
+        test ! -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem && \
+        test ! -e /etc/ssl/certs/Comodo_AAA_Services_root.pem && \
+        rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Create app user
 # Normalize /etc/shadow file last password change date to 0 for app user
