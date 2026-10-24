@@ -282,22 +282,15 @@ async fn provider_callback_works_with_global_encryption_writes_disabled() {
     let client = db.pool().get().await.expect("database client");
     let stored_state = client
         .query_one(
-            "SELECT frontend_response_mode, frontend_code_challenge, frontend_state, provider_code_verifier
+            "SELECT frontend_code_challenge, frontend_state, provider_code_verifier
              FROM oauth_states WHERE state = $1",
             &[&provider_state],
         )
         .await
         .expect("stored OAuth initiation state");
-    assert_eq!(stored_state.get::<_, String>(0), "code");
-    assert_eq!(
-        stored_state.get::<_, Option<String>>(1).as_deref(),
-        Some(challenge.as_str())
-    );
-    assert_eq!(
-        stored_state.get::<_, Option<String>>(2).as_deref(),
-        Some(frontend_state.as_str())
-    );
-    let stored_verifier: String = stored_state.get(3);
+    assert_eq!(stored_state.get::<_, String>(0), challenge);
+    assert_eq!(stored_state.get::<_, String>(1), frontend_state);
+    let stored_verifier: String = stored_state.get(2);
     let envelope: serde_json::Value = serde_json::from_str(&stored_verifier).unwrap();
     assert!(database::field_encryption::is_envelope(&envelope));
 
@@ -834,54 +827,70 @@ async fn expired_session_returns_unauthorized_without_consuming_callback_code() 
 }
 
 #[tokio::test]
-async fn callback_rejects_legacy_or_incomplete_state_before_provider_exchange() {
-    let provider = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/token"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&provider)
-        .await;
+async fn token_mode_migration_discards_unsafe_states_and_preserves_pending_pkce() {
+    let (_, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let mut client = db.pool().get().await.unwrap();
+    let transaction = client.transaction().await.unwrap();
+    // Shadow the real table to exercise an upgrade without touching other tests.
+    transaction
+        .batch_execute(
+            "CREATE TEMPORARY TABLE oauth_states (
+        state TEXT PRIMARY KEY,
+        frontend_response_mode TEXT NOT NULL DEFAULT 'token'
+            CHECK (frontend_response_mode IN ('token', 'code')),
+        frontend_code_challenge TEXT,
+        frontend_state TEXT
+    ) ON COMMIT DROP;
+    INSERT INTO oauth_states VALUES
+        ('old-default', DEFAULT, NULL, NULL),
+        ('old-explicit', 'token', 'challenge', 'state'),
+        ('incomplete-challenge', 'code', NULL, 'state'),
+        ('incomplete-state', 'code', 'challenge', NULL),
+        ('valid-pkce', 'code', 'challenge', 'state');",
+        )
+        .await
+        .unwrap();
+    transaction
+        .batch_execute(include_str!(
+            "../../database/src/migrations/sql/V42__remove_legacy_oauth_token_mode.sql"
+        ))
+        .await
+        .unwrap();
+    let rows = transaction
+        .query(
+            "SELECT state, frontend_code_challenge, frontend_state FROM oauth_states",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, String>(0), "valid-pkce");
+    assert_eq!(rows[0].get::<_, String>(1), "challenge");
+    assert_eq!(rows[0].get::<_, String>(2), "state");
+    transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn schema_cannot_store_token_mode_or_incomplete_frontend_pkce() {
     let (config, calls) = gateway_config(0, Ok(Some(GATEWAY_COOKIE)));
-    let (server, db) = create_test_server_and_db(TestServerConfig {
-        google_oauth_token_url: Some(format!("{}/token", provider.uri())),
-        google_oauth_user_info_url: Some(format!("{}/userinfo", provider.uri())),
-        ..config
-    })
-    .await;
-    for (mode, challenge, frontend_state) in [
-        ("token", Some("A".repeat(43)), Some("B".repeat(43))),
-        ("code", None, Some("B".repeat(43))),
-        ("code", Some("A".repeat(43)), None),
+    let (server, db) = create_test_server_and_db(config).await;
+    let initiation = server.get(&format!(
+        "/v1/auth/google?frontend_callback=http%3A%2F%2Flocalhost%3A3000&frontend_response_mode=code&code_challenge={}&code_challenge_method=S256&frontend_state={}",
+        "A".repeat(43), "B".repeat(43)
+    )).await;
+    assert_eq!(initiation.status_code(), 307);
+    let redirect = Url::parse(initiation.header(LOCATION).to_str().unwrap()).unwrap();
+    let state = redirect
+        .query_pairs()
+        .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    for sql in [
+        "UPDATE oauth_states SET frontend_response_mode = 'token' WHERE state = $1",
+        "UPDATE oauth_states SET frontend_code_challenge = NULL WHERE state = $1",
+        "UPDATE oauth_states SET frontend_state = NULL WHERE state = $1",
     ] {
-        let initiation = server.get(&format!(
-            "/v1/auth/google?frontend_callback=http%3A%2F%2Flocalhost%3A3000&frontend_response_mode=code&code_challenge={}&code_challenge_method=S256&frontend_state={}",
-            "A".repeat(43), "B".repeat(43)
-        )).await;
-        assert_eq!(initiation.status_code(), 307);
-        let redirect = Url::parse(initiation.header(LOCATION).to_str().unwrap()).unwrap();
-        let state = redirect
-            .query_pairs()
-            .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
-            .unwrap();
-        db.pool().get().await.unwrap().execute(
-            "UPDATE oauth_states SET frontend_response_mode = $2, frontend_code_challenge = $3, frontend_state = $4 WHERE state = $1",
-            &[&state, &mode, &challenge, &frontend_state]
-        ).await.unwrap();
-        let response = server
-            .get(&format!(
-                "/v1/auth/callback?code=provider-code&state={state}"
-            ))
-            .await;
-        assert_eq!(response.status_code(), 401);
-        assert!(!response.headers().contains_key(SET_COOKIE));
-        assert!(!response.headers().contains_key(LOCATION));
-        assert!(db
-            .oauth_repository()
-            .consume_oauth_state(&state)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(client.execute(sql, &[&state]).await.is_err());
     }
     assert!(calls.lock().unwrap().is_empty());
 }

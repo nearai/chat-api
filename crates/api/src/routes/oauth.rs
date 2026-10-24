@@ -18,8 +18,7 @@ use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, AuthMethod, RecordActivityRequest};
 use services::auth::near::SignedMessage;
 use services::auth::ports::{
-    OAuthCodeExchangeError, OAuthFrontendResponseMode, OAuthProvider, RequestEmailCodeError,
-    VerifyEmailCodeError,
+    OAuthCodeExchangeError, OAuthProvider, RequestEmailCodeError, VerifyEmailCodeError,
 };
 use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
@@ -543,9 +542,8 @@ pub struct OAuthInitQuery {
 
 #[derive(Debug)]
 struct OAuthFrontendResponseOptions {
-    mode: OAuthFrontendResponseMode,
-    code_challenge: Option<String>,
-    state: Option<String>,
+    code_challenge: String,
+    state: String,
 }
 
 fn is_base64url(value: &str) -> bool {
@@ -582,9 +580,8 @@ fn validate_frontend_response_options(
         .ok_or_else(|| ApiError::bad_request("Invalid frontend_state"))?;
 
     Ok(OAuthFrontendResponseOptions {
-        mode: OAuthFrontendResponseMode::Code,
-        code_challenge: Some(challenge.to_string()),
-        state: Some(state.to_string()),
+        code_challenge: challenge.to_string(),
+        state: state.to_string(),
     })
 }
 
@@ -928,7 +925,6 @@ pub async fn google_login(
             services::auth::ports::OAuthProvider::Google,
             redirect_uri.clone(),
             Some(frontend_callback),
-            frontend_response.mode,
             frontend_response.code_challenge,
             frontend_response.state,
         )
@@ -1065,13 +1061,8 @@ pub async fn oauth_callback(
 
     tracing::info!("Redirecting to validated OAuth frontend callback");
 
-    let challenge = callback
-        .frontend_code_challenge
-        .ok_or_else(|| ApiError::internal_server_error("Invalid OAuth callback state"))?;
-    let state = callback
-        .frontend_state
-        .as_deref()
-        .ok_or_else(|| ApiError::internal_server_error("Invalid OAuth callback state"))?;
+    let challenge = callback.frontend_code_challenge;
+    let state = &callback.frontend_state;
     let code = app_state
         .oauth_service
         .create_frontend_callback_code(callback.session.session_id, challenge, callback.is_new_user)
@@ -1252,7 +1243,6 @@ pub async fn github_login(
             services::auth::ports::OAuthProvider::Github,
             redirect_uri.clone(),
             Some(frontend_callback),
-            frontend_response.mode,
             frontend_response.code_challenge,
             frontend_response.state,
         )
@@ -1646,7 +1636,7 @@ mod tests {
         build_oauth_frontend_code_redirect, extract_client_ip,
         frontend_callback_allowed_origins_from, select_proxy_chain_ip,
         validate_frontend_callback_url, validate_frontend_response_options,
-        FrontendCallbackValidationError, OAuthFrontendResponseMode, OAuthInitQuery,
+        FrontendCallbackValidationError, OAuthInitQuery,
     };
     use axum::http::{HeaderMap, HeaderValue};
     use std::net::{IpAddr, SocketAddr};
@@ -1855,15 +1845,11 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(options.mode, OAuthFrontendResponseMode::Code);
         assert_eq!(
-            options.code_challenge.as_deref(),
-            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            options.code_challenge,
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         );
-        assert_eq!(
-            options.state.as_deref(),
-            Some("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
-        );
+        assert_eq!(options.state, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
     }
 
     #[test]
