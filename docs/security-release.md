@@ -66,3 +66,25 @@ HSTS at the server cannot undo the policy cached in clients immediately.
 The production provider smoke tests, proxy-header check, database lock check,
 and rollback-image startup check are release prerequisites. Passing local tests
 alone is not evidence of a zero-risk production rollout.
+
+## Frontend PKCE and token-mode removal (V42)
+
+Google/GitHub login requires frontend S256 PKCE and state in addition to provider
+PKCE. The provider callback returns only a one-time code; application tokens and
+gateway cookies are delivered only by a successful frontend code exchange.
+
+V42 removes the persisted response-mode column and makes frontend challenge/state
+mandatory. It deletes pending token-mode or incomplete states; those sign-ins must
+restart. Existing application sessions are unaffected. Historical migration files
+remain unchanged for refinery checksum validation.
+
+Upgrade supported Web/mobile/Tauri clients before backend cutover. Drain old API
+replicas before applying V42 and route new login traffic only to the new version;
+old repository queries reference the removed column and cannot run against V42.
+Do not roll an unchanged old backend back onto this schema. Prefer a forward fix;
+a rollback requires an explicitly reviewed compatible schema/code plan.
+
+Before promotion, exercise Google/GitHub login, actual gateway cookie storage and
+gateway access on Web, mobile browsers and Tauri. Confirm that bearer query/hash
+URLs, desktop bearer GET and old channel handoffs cannot establish a session.
+NEAR signed-message login and state-bound loopback POST remain supported.

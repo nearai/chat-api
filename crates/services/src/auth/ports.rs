@@ -15,45 +15,20 @@ pub struct OAuthState {
     pub provider: OAuthProvider,
     pub redirect_uri: String,
     pub frontend_callback: Option<String>,
-    pub frontend_response_mode: OAuthFrontendResponseMode,
-    pub frontend_code_challenge: Option<String>,
-    pub frontend_state: Option<String>,
+    pub frontend_code_challenge: String,
+    pub frontend_state: String,
     /// Secret for the provider authorization-code exchange, independent of the
     /// browser's frontend callback verifier. Debug output is redacted by oauth2.
     pub provider_code_verifier: Option<PkceCodeVerifier>,
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OAuthFrontendResponseMode {
-    Token,
-    Code,
-}
-
-impl OAuthFrontendResponseMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Token => "token",
-            Self::Code => "code",
-        }
-    }
-
-    pub fn parse(value: &str) -> anyhow::Result<Self> {
-        match value {
-            "token" => Ok(Self::Token),
-            "code" => Ok(Self::Code),
-            _ => Err(anyhow::anyhow!("unsupported OAuth frontend response mode")),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct OAuthCallbackSuccess {
     pub session: UserSession,
     pub frontend_callback: Option<String>,
-    pub frontend_response_mode: OAuthFrontendResponseMode,
-    pub frontend_code_challenge: Option<String>,
-    pub frontend_state: Option<String>,
+    pub frontend_code_challenge: String,
+    pub frontend_state: String,
     pub is_new_user: bool,
     pub provider: OAuthProvider,
 }
@@ -331,9 +306,8 @@ pub trait OAuthService: Send + Sync {
         provider: OAuthProvider,
         redirect_uri: String,
         frontend_callback: Option<String>,
-        frontend_response_mode: OAuthFrontendResponseMode,
-        frontend_code_challenge: Option<String>,
-        frontend_state: Option<String>,
+        frontend_code_challenge: String,
+        frontend_state: String,
     ) -> anyhow::Result<String>;
 
     /// Unified callback handler that determines provider from state

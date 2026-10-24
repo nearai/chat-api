@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use super::ports::{
     EmailAuthService, EmailAuthSuccess, EmailVerificationChallengeRepository, OAuthCallbackCode,
-    OAuthCallbackSuccess, OAuthCodeExchangeError, OAuthCodeExchangeSuccess,
-    OAuthFrontendResponseMode, OAuthRepository, OAuthService, OAuthState, OAuthTokens,
-    OAuthUserInfo, RequestEmailCodeError, SessionRepository, UserSession, VerifyEmailCodeError,
+    OAuthCallbackSuccess, OAuthCodeExchangeError, OAuthCodeExchangeSuccess, OAuthRepository,
+    OAuthService, OAuthState, OAuthTokens, OAuthUserInfo, RequestEmailCodeError, SessionRepository,
+    UserSession, VerifyEmailCodeError,
 };
 use super::{NearAuthService, NearNonceRepository};
 use crate::types::{SessionId, UserId};
@@ -449,7 +449,6 @@ impl OAuthServiceImpl {
         Ok(OAuthCallbackSuccess {
             session,
             frontend_callback: oauth_state.frontend_callback,
-            frontend_response_mode: oauth_state.frontend_response_mode,
             frontend_code_challenge: oauth_state.frontend_code_challenge,
             frontend_state: oauth_state.frontend_state,
             is_new_user,
@@ -845,9 +844,8 @@ impl OAuthService for OAuthServiceImpl {
         provider: OAuthProvider,
         redirect_uri: String,
         frontend_callback: Option<String>,
-        frontend_response_mode: OAuthFrontendResponseMode,
-        frontend_code_challenge: Option<String>,
-        frontend_state: Option<String>,
+        frontend_code_challenge: String,
+        frontend_state: String,
     ) -> anyhow::Result<String> {
         tracing::info!(
             provider = ?provider,
@@ -901,7 +899,6 @@ impl OAuthService for OAuthServiceImpl {
             provider,
             redirect_uri: redirect_uri.clone(),
             frontend_callback: frontend_callback.clone(),
-            frontend_response_mode,
             frontend_code_challenge,
             frontend_state,
             provider_code_verifier: Some(provider_verifier),

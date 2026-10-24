@@ -3,8 +3,8 @@ use crate::repositories::session_repository::{generate_session_token, hash_sessi
 use async_trait::async_trait;
 use services::{
     auth::ports::{
-        OAuthCallbackCode, OAuthCodeExchangeSuccess, OAuthFrontendResponseMode, OAuthRepository,
-        OAuthState, OAuthTokens, PkceCodeVerifier, UserSession,
+        OAuthCallbackCode, OAuthCodeExchangeSuccess, OAuthRepository, OAuthState, OAuthTokens,
+        PkceCodeVerifier, UserSession,
     },
     user::ports::OAuthProvider,
     SessionId, UserId,
@@ -119,20 +119,18 @@ impl OAuthRepository for PostgresOAuthRepository {
                     provider,
                     redirect_uri,
                     frontend_callback,
-                    frontend_response_mode,
                     frontend_code_challenge,
                     frontend_state,
                     created_at,
                     id,
                     provider_code_verifier
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 &[
                     &state.state,
                     &provider_str,
                     &state.redirect_uri,
                     &state.frontend_callback,
-                    &state.frontend_response_mode.as_str(),
                     &state.frontend_code_challenge,
                     &state.frontend_state,
                     &state.created_at,
@@ -171,7 +169,7 @@ impl OAuthRepository for PostgresOAuthRepository {
                 "DELETE FROM oauth_states
                  WHERE state = $1
                  RETURNING state, provider, redirect_uri, frontend_callback,
-                           frontend_response_mode, frontend_code_challenge,
+                           frontend_code_challenge,
                            frontend_state, created_at, id, provider_code_verifier",
                 &[&state],
             )
@@ -194,19 +192,16 @@ impl OAuthRepository for PostgresOAuthRepository {
                     provider,
                     redirect_uri: r.get(2),
                     frontend_callback: r.get(3),
-                    frontend_response_mode: OAuthFrontendResponseMode::parse(
-                        &r.get::<_, String>(4),
-                    )?,
-                    frontend_code_challenge: r.get(5),
-                    frontend_state: r.get(6),
-                    created_at: r.get(7),
+                    frontend_code_challenge: r.get(4),
+                    frontend_state: r.get(5),
+                    created_at: r.get(6),
                     provider_code_verifier: r
-                        .get::<_, Option<String>>(9)
+                        .get::<_, Option<String>>(8)
                         .map(|value| {
                             self.decode_field(
                                 "oauth_states",
                                 "provider_code_verifier",
-                                r.get(8),
+                                r.get(7),
                                 value,
                             )
                             .map(PkceCodeVerifier::new)
