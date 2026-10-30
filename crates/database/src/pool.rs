@@ -1,4 +1,5 @@
 use deadpool_postgres::{Config, Pool, Runtime};
+use rustls_pki_types::{pem::PemObject, CertificateDer};
 use std::fs::File;
 use std::io::BufReader;
 use tracing::{debug, info};
@@ -23,7 +24,7 @@ pub fn create_pool_with_rustls(cfg: Config, cert_path: Option<&str>) -> anyhow::
         let mut reader = BufReader::new(cert_file);
 
         // Parse the PEM certificates
-        let certs = rustls_pemfile::certs(&mut reader)
+        let certs = CertificateDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("Failed to parse certificate: {}", e))?;
 
@@ -100,6 +101,45 @@ pub use services::db_pool::DbPool;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn pool_with_ca_pem(pem: &str) -> anyhow::Result<Pool> {
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(pem.as_bytes())?;
+
+        let mut cfg = Config::new();
+        cfg.host = Some("localhost".to_string());
+        cfg.user = Some("postgres".to_string());
+        cfg.dbname = Some("postgres".to_string());
+
+        create_pool_with_rustls(cfg, file.path().to_str())
+    }
+
+    #[test]
+    fn custom_ca_bundle_creates_pool() {
+        let certificate = include_str!("../tests/fixtures/test-ca.pem");
+        let bundle = format!("{certificate}\n{certificate}");
+
+        let result = pool_with_ca_pem(&bundle);
+
+        assert!(result.is_ok(), "custom CA bundle failed: {result:?}");
+    }
+
+    #[test]
+    fn empty_custom_ca_bundle_is_rejected() {
+        let error = pool_with_ca_pem("").unwrap_err();
+
+        assert!(error.to_string().contains("No certificates found"));
+    }
+
+    #[test]
+    fn malformed_custom_ca_bundle_is_rejected() {
+        let malformed = "-----BEGIN CERTIFICATE-----\n!invalid!\n-----END CERTIFICATE-----\n";
+
+        let error = pool_with_ca_pem(malformed).unwrap_err();
+
+        assert!(error.to_string().contains("Failed to parse certificate"));
+    }
 
     #[test]
     fn test_tls_disabled_by_default() {

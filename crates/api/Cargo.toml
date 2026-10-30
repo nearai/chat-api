@@ -20,7 +20,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 dotenvy = "0.15"
-dstack-sdk = "0.1.2"
+dstack-sdk = "0.1.3"
 multer = "3"
 
 # Authentication dependencies
@@ -35,12 +35,12 @@ bytes = "1.5"
 http = "1.0"
 flate2 = "1.0"
 brotli = "8.0"
-zstd = "0.13"
+zstd = "0.14.3"
 # For TypedHeader support
 headers = "0.4"
 # OpenAPI documentation generation
-utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "10.0.2", features = ["axum"] }
 
 # Internal dependencies
 services = { path = "../services", features = ["utoipa"] }
@@ -49,7 +49,7 @@ deadpool-postgres = "0.14"
 config = { path = "../config" }
 stripe_client = { path = "../stripe_client" }
 hex = "0.4.3"
-near-api = "0.8.0"
+near-api = "0.8.7"
 
 # VPC authentication
 reqwest = { version = "0.12", features = ["json"] }
@@ -61,8 +61,15 @@ opentelemetry = { version = "0.31", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 opentelemetry-otlp = { version = "0.31", features = ["metrics", "grpc-tonic"] }
 aws-config = { version = "1.8.15", default-features = false, features = ["rt-tokio", "rustls"] }
-aws-sdk-scheduler = "1.97.0"
-aws-sdk-sqs = "1.97.0"
+# Use the current HTTPS client without the legacy Rustls 0.21/Hyper 0.14 stack.
+aws-sdk-scheduler = { version = "1.97.0", default-features = false, features = [
+    "rt-tokio",
+    "default-https-client",
+] }
+aws-sdk-sqs = { version = "1.97.0", default-features = false, features = [
+    "rt-tokio",
+    "default-https-client",
+] }
 aws-smithy-http-client = "1.1.4"
 
 [dev-dependencies]
