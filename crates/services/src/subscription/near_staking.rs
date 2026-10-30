@@ -233,7 +233,14 @@ where
         let url = rpc_url
             .parse()
             .map_err(|e: url::ParseError| e.to_string())?;
-        let network = NetworkConfig::from_rpc_url("configured", url);
+        let mut network = NetworkConfig::from_rpc_url("configured", url);
+
+        // Reconciliation owns the backoff between probes. The SDK counts total
+        // attempts in `retries`, so one preserves a single request per view call.
+        for endpoint in &mut network.rpc_endpoints {
+            endpoint.retries = 1;
+        }
+
         let cid: AccountId = contract_id
             .parse()
             .map_err(|e| format!("invalid staking contract account id: {e}"))?;
@@ -496,6 +503,32 @@ mod tests {
 
     fn chain_subscription(value: Value) -> NearStakingSubscription {
         serde_json::from_value(value).expect("typed chain subscription")
+    }
+
+    #[tokio::test]
+    async fn view_call_does_not_retry_http_failures() {
+        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+
+        for status in [429, 500, 503] {
+            let mock = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&mock)
+                .await;
+
+            let result = view_get_subscription_for_price(
+                &mock.uri(),
+                "staking.testnet",
+                "alice.testnet",
+                "price_fake",
+            )
+            .await;
+
+            assert!(result.is_err(), "HTTP {status} must remain an error");
+            assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]
