@@ -1,26 +1,42 @@
 name: Security Audit
+
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   schedule:
-    - cron: "0 9 * * 1"   # weekly Mon 09:00 UTC
+    # Avoid the top-of-hour scheduling peak on GitHub Actions.
+    - cron: "17 0 * * *" # Daily at 00:17 UTC
+
+# Cancel superseded PR scans without cancelling scheduled or main-branch scans.
+concurrency:
+  group: security-audit-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+
 jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-audit@0.22.2
+      - name: Check lockfile vulnerabilities and warnings
+        run: cargo audit --deny warnings
+
   deny:
     name: cargo deny (advisories + bans + sources)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
-      # cargo-deny scans RustSec advisories + supply-chain (bans/sources) and surfaces findings in the job log.
-      # Report-only via continue-on-error: the check stays green, and cargo-deny (unlike rustsec/audit-check)
-      # does NOT publish a separate failing check-run or open issues - so no red check and no public-issue spam
-      # on this PUBLIC repo. Advisories are tracked/triaged via the Vulnerability Management procedure; remove
-      # continue-on-error to gate merges once the backlog is triaged to a baseline.
-      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe  # v2.0.20
-        continue-on-error: true
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # Use the prebuilt binary to avoid Docker Hub availability/rate limits.
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
-          rust-version: "1.91.1"   # match rust-toolchain.toml so cargo-deny reads Cargo.lock v4
-          command: check advisories bans sources
+          tool: cargo-deny@0.20.2
+      - name: Check advisories, dependency bans, and sources
+        run: cargo deny --locked --all-features check advisories bans sources
