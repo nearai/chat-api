@@ -91,9 +91,18 @@ RUN --mount=type=bind,source=scripts/pinned-packages-backend-builder.txt,target=
     done && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
+        ca-certificates \
         pkg-config \
         libssl-dev \
-        && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
+        # Distrust compromised eMudhra chains before build scripts download Swagger UI with curl.
+        && sed -i -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt$|!&|' \
+                  -e 's|^mozilla/Comodo_AAA_Services_root.crt$|!&|' /etc/ca-certificates.conf && \
+        update-ca-certificates && \
+        test ! -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem && \
+        test ! -e /etc/ssl/certs/Comodo_AAA_Services_root.pem && \
+        ! grep -qxF "$(sed -n 5p /usr/share/ca-certificates/mozilla/emSign_ECC_Root_CA_-_G3.crt)" /etc/ssl/certs/ca-certificates.crt && \
+        ! grep -qxF "$(sed -n 5p /usr/share/ca-certificates/mozilla/Comodo_AAA_Services_root.crt)" /etc/ssl/certs/ca-certificates.crt && \
+        rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Set the working directory
 WORKDIR /app
