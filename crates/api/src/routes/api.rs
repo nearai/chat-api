@@ -3014,7 +3014,7 @@ async fn ensure_near_balance_for_near_user(
             .into_response()
     })?;
 
-    let balance = fetch_near_balance(&state.near_rpc_url.to_string(), account_id)
+    let balance = fetch_near_balance(state.near_rpc_url.as_str(), account_id)
         .await
         .map_err(|e| {
             tracing::error!(
