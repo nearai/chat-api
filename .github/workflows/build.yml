@@ -1,9 +1,6 @@
 name: Build & Deploy
 on:
   workflow_dispatch:
-  # Temporary image validation for PR #413; remove after validation.
-  pull_request:
-    branches: [main]
   push:
     branches:
       - main
@@ -15,31 +12,8 @@ env:
   IMAGE_REPOSITORY: ${{ vars.DOCKER_REGISTRY_USER }}/private-chat
 
 jobs:
-  pr-docker-image:
-    name: PR Docker Image (temporary)
-    if: github.event_name == 'pull_request' && github.event.pull_request.number == 413
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - name: Checkout PR head
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y skopeo jq
-
-      - name: Build complete image without publishing
-        run: bash -e ./scripts/build-image.sh
-
   reproducible-docker-image:
     name: Reproducible Docker Image
-    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: write
