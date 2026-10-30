@@ -387,11 +387,6 @@ const REVIEWED_PLAINTEXT_FIELDS: &[(&str, &str, &str)] = &[
     ),
     (
         "oauth_states",
-        "frontend_response_mode",
-        "Queryable callback protocol enum",
-    ),
-    (
-        "oauth_states",
         "frontend_code_challenge",
         "Public PKCE challenge derived from a browser-held verifier",
     ),

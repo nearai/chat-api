@@ -1,5 +1,5 @@
 # Stage 1: Frontend build stage
-FROM node:22-slim@sha256:b21fe589dfbe5cc39365d0544b9be3f1f33f55f3c86c87a76ff65a02f8f5848e AS frontend-builder
+FROM node:22.23.4-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS frontend-builder
 
 # Set working directory for frontend build
 WORKDIR /frontend
@@ -31,7 +31,15 @@ RUN --mount=type=bind,source=scripts/pinned-packages-frontend-builder.txt,target
     apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
-        && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
+        # eMudhra intermediate CA key compromise (2026-10-20): bookworm has no fixed ca-certificates yet, so distrust the two roots the compromised intermediates chain to. Remove these lines once the pinned ca-certificates no longer ships them.
+        && sed -i -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt$|!&|' \
+                  -e 's|^mozilla/Comodo_AAA_Services_root.crt$|!&|' /etc/ca-certificates.conf && \
+        update-ca-certificates && \
+        test ! -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem && \
+        test ! -e /etc/ssl/certs/Comodo_AAA_Services_root.pem && \
+        ! grep -qxF "$(sed -n 5p /usr/share/ca-certificates/mozilla/emSign_ECC_Root_CA_-_G3.crt)" /etc/ssl/certs/ca-certificates.crt && \
+        ! grep -qxF "$(sed -n 5p /usr/share/ca-certificates/mozilla/Comodo_AAA_Services_root.crt)" /etc/ssl/certs/ca-certificates.crt && \
+        rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Fetch the latest pinned package list
 RUN dpkg -l | grep '^ii' | awk '{print $2"="$3}' | sort > ./pinned-packages-frontend-builder.txt
@@ -41,6 +49,11 @@ ARG PRIVATE_CHAT_FRONTEND_VERSION
 RUN curl -L -o /tmp/private-chat.tar.gz "https://github.com/nearai/private-chat/archive/${PRIVATE_CHAT_FRONTEND_VERSION}.tar.gz" && \
     tar -xzf /tmp/private-chat.tar.gz --strip-components=1 && \
     rm /tmp/private-chat.tar.gz
+
+# Use the hardened system trust store for npm, pnpm, and Node build scripts.
+ENV NODE_OPTIONS="--use-openssl-ca"
+ENV SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+ENV SSL_CERT_DIR="/etc/ssl/certs"
 
 # Install pnpm with specific version
 RUN npm install -g pnpm@10.10.0
@@ -83,9 +96,18 @@ RUN --mount=type=bind,source=scripts/pinned-packages-backend-builder.txt,target=
     done && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
+        ca-certificates \
         pkg-config \
         libssl-dev \
-        && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
+        # Distrust compromised eMudhra chains before build scripts download Swagger UI with curl.
+        && sed -i -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt$|!&|' \
+                  -e 's|^mozilla/Comodo_AAA_Services_root.crt$|!&|' /etc/ca-certificates.conf && \
+        update-ca-certificates && \
+        test ! -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem && \
+        test ! -e /etc/ssl/certs/Comodo_AAA_Services_root.pem && \
+        ! grep -qxF "$(sed -n 5p /usr/share/ca-certificates/mozilla/emSign_ECC_Root_CA_-_G3.crt)" /etc/ssl/certs/ca-certificates.crt && \
+        ! grep -qxF "$(sed -n 5p /usr/share/ca-certificates/mozilla/Comodo_AAA_Services_root.crt)" /etc/ssl/certs/ca-certificates.crt && \
+        rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Set the working directory
 WORKDIR /app
@@ -138,7 +160,15 @@ RUN --mount=type=bind,source=scripts/pinned-packages-runtime.txt,target=/tmp/pin
         ca-certificates \
         libssl3 \
         curl \
-        && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
+        # eMudhra intermediate CA key compromise (2026-10-20): bookworm has no fixed ca-certificates yet, so distrust the two roots the compromised intermediates chain to. Remove these lines once the pinned ca-certificates no longer ships them.
+        && sed -i -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt$|!&|' \
+                  -e 's|^mozilla/Comodo_AAA_Services_root.crt$|!&|' /etc/ca-certificates.conf && \
+        update-ca-certificates && \
+        test ! -e /etc/ssl/certs/emSign_ECC_Root_CA_-_G3.pem && \
+        test ! -e /etc/ssl/certs/Comodo_AAA_Services_root.pem && \
+        ! grep -qxF "$(sed -n 5p /usr/share/ca-certificates/mozilla/emSign_ECC_Root_CA_-_G3.crt)" /etc/ssl/certs/ca-certificates.crt && \
+        ! grep -qxF "$(sed -n 5p /usr/share/ca-certificates/mozilla/Comodo_AAA_Services_root.crt)" /etc/ssl/certs/ca-certificates.crt && \
+        rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Create app user
 # Normalize /etc/shadow file last password change date to 0 for app user
