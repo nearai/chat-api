@@ -1,5 +1,5 @@
 # Stage 1: Frontend build stage
-FROM node:22-slim@sha256:b21fe589dfbe5cc39365d0544b9be3f1f33f55f3c86c87a76ff65a02f8f5848e AS frontend-builder
+FROM node:22.23.4-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS frontend-builder
 
 # Set working directory for frontend build
 WORKDIR /frontend
