@@ -1,6 +1,7 @@
 [workspace]
 members = ["crates/*"]
 resolver = "2"
+exclude = ["vendor/dstack-sdk"]
 
 [workspace.package]
 edition = "2021"
@@ -11,3 +12,8 @@ description = "NEAR AI Chat API"
 
 [profile.dev]
 debug = true
+
+# Client-only dstack-sdk patch removes the unused, vulnerable Alloy dependency.
+# See vendor/dstack-sdk/README.md for provenance and removal conditions.
+[patch.crates-io]
+dstack-sdk = { path = "vendor/dstack-sdk" }

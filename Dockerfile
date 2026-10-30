@@ -100,6 +100,7 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
+COPY vendor/ ./vendor/
 COPY .cargo/ ./.cargo/
 
 # Build the application binaries in release mode

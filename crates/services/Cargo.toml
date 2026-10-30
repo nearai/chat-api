@@ -34,12 +34,11 @@ hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
-dstack-sdk = "0.1"
 # OpenTelemetry for metrics
 opentelemetry = { version = "0.31", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
-utoipa = { version = "5", optional = true }
-near-api = "0.8.0"
+utoipa = { version = "6", optional = true }
+near-api = "0.8.7"
 # Stripe payment integration
 stripe_client = { path = "../stripe_client" }
 
