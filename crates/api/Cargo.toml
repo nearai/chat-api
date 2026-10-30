@@ -61,8 +61,15 @@ opentelemetry = { version = "0.31", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 opentelemetry-otlp = { version = "0.31", features = ["metrics", "grpc-tonic"] }
 aws-config = { version = "1.8.15", default-features = false, features = ["rt-tokio", "rustls"] }
-aws-sdk-scheduler = "1.97.0"
-aws-sdk-sqs = "1.97.0"
+# Use the current HTTPS client without the legacy Rustls 0.21/Hyper 0.14 stack.
+aws-sdk-scheduler = { version = "1.97.0", default-features = false, features = [
+    "rt-tokio",
+    "default-https-client",
+] }
+aws-sdk-sqs = { version = "1.97.0", default-features = false, features = [
+    "rt-tokio",
+    "default-https-client",
+] }
 aws-smithy-http-client = "1.1.4"
 
 [dev-dependencies]
