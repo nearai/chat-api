@@ -38,7 +38,7 @@ base64 = "0.22"
 opentelemetry = { version = "0.31", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 utoipa = { version = "6", optional = true }
-near-api = "0.8.7"
+near-kit = { version = "0.18.3", default-features = false, features = ["rpc"] }
 mockall = { version = "0.13", optional = true }
 # Stripe payment integration
 stripe_client = { path = "../stripe_client" }

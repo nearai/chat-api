@@ -3,7 +3,7 @@
 use crate::subscription::ports::{DowngradeIntentStatus, Subscription};
 use crate::UserId;
 use chrono::{DateTime, Utc};
-use near_api::{AccountId, Contract, Data, NetworkConfig};
+use near_kit::{AccountId, Near};
 use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::time::Duration;
@@ -227,32 +227,33 @@ async fn view_call<Args, Response>(
 ) -> Result<Option<Response>, String>
 where
     Args: Serialize + Send,
-    Response: DeserializeOwned + Send + Sync,
+    Response: DeserializeOwned + Send + Sync + 'static,
 {
     timeout(NEAR_VIEW_RPC_TIMEOUT, async {
-        let url = rpc_url
+        let url: url::Url = rpc_url
             .parse()
             .map_err(|e: url::ParseError| e.to_string())?;
-        let mut network = NetworkConfig::from_rpc_url("configured", url);
-
-        // Reconciliation owns the backoff between probes. The SDK counts total
-        // attempts in `retries`, so one preserves a single request per view call.
-        for endpoint in &mut network.rpc_endpoints {
-            endpoint.retries = 1;
-        }
-
+        let network = Near::custom(url.to_string(), "configured")
+            // Preserve near-api's five attempts and 10/20/40/80 ms backoff.
+            // The outer timeout bounds requests and backoff together.
+            .retry_config(near_kit::rpc::RetryConfig {
+                max_retries: 4,
+                initial_delay_ms: 10,
+                max_delay_ms: 80,
+            })
+            .build();
         let cid: AccountId = contract_id
             .parse()
             .map_err(|e| format!("invalid staking contract account id: {e}"))?;
 
-        let data: Data<Option<Response>> = Contract(cid)
-            .call_function(method_name, args)
-            .read_only()
-            .fetch_from(&network)
+        let data: Option<Response> = network
+            .view(cid, method_name)
+            .finality(near_kit::rpc::Finality::Optimistic)
+            .args(args)
             .await
             .map_err(|e| e.to_string())?;
 
-        Ok::<Option<Response>, String>(data.data)
+        Ok::<Option<Response>, String>(data)
     })
     .await
     .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
@@ -491,7 +492,7 @@ mod tests {
         let encoded: Vec<Value> = payload.iter().map(|b| json!(b)).collect();
         json!({
             "jsonrpc": "2.0",
-            "id": "0",
+            "id": 1,
             "result": {
                 "block_hash": "11111111111111111111111111111111",
                 "block_height": 12345u64,
@@ -506,15 +507,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn view_call_does_not_retry_http_failures() {
-        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    async fn staking_view_recovers_from_transient_http_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        for status in [429, 500, 503] {
+        for status in [408, 429, 500, 502, 503, 504] {
             let mock = MockServer::start().await;
+            let attempts = AtomicUsize::new(0);
+
             Mock::given(method("POST"))
-                .and(path("/"))
-                .respond_with(ResponseTemplate::new(status))
-                .expect(1)
+                .respond_with(move |_: &wiremock::Request| {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        ResponseTemplate::new(status)
+                    } else {
+                        ResponseTemplate::new(200)
+                            .set_body_json(call_function_query_response(&Value::Null))
+                    }
+                })
+                .expect(2)
                 .mount(&mock)
                 .await;
 
@@ -526,9 +535,66 @@ mod tests {
             )
             .await;
 
-            assert!(result.is_err(), "HTTP {status} must remain an error");
-            assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+            assert!(result.unwrap().is_none());
+            mock.verify().await;
         }
+    }
+
+    #[tokio::test]
+    async fn staking_view_bounds_retries_and_does_not_retry_permanent_errors() {
+        for (status, expected_attempts) in [(503, 5), (400, 1)] {
+            let mock = MockServer::start().await;
+
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(expected_attempts)
+                .mount(&mock)
+                .await;
+
+            let result = view_get_subscription_for_price(
+                &mock.uri(),
+                "staking.testnet",
+                "alice.testnet",
+                "price_fake",
+            )
+            .await;
+
+            assert!(result.is_err());
+            mock.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn staking_view_timeout_covers_retry_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mock = MockServer::start().await;
+        let attempts = AtomicUsize::new(0);
+
+        Mock::given(method("POST"))
+            .respond_with(move |_: &wiremock::Request| {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_json(call_function_query_response(&Value::Null))
+                        .set_delay(NEAR_VIEW_RPC_TIMEOUT + Duration::from_secs(1))
+                }
+            })
+            .expect(2)
+            .mount(&mock)
+            .await;
+
+        let result = view_get_subscription_for_price(
+            &mock.uri(),
+            "staking.testnet",
+            "alice.testnet",
+            "price_fake",
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), NEAR_VIEW_RPC_TIMEOUT_MSG);
+        mock.verify().await;
     }
 
     #[tokio::test]
@@ -582,7 +648,10 @@ mod tests {
                 use base64::{engine::general_purpose::STANDARD, Engine};
 
                 let body: Value = serde_json::from_slice(&req.body).expect("request body");
+                assert_eq!(body["method"], "EXPERIMENTAL_call_function");
                 let params = body.get("params").expect("query params");
+                assert_eq!(params["finality"], "optimistic");
+                assert_eq!(params["account_id"], "staking.testnet");
                 assert_eq!(
                     params.get("method_name").and_then(|x| x.as_str()),
                     Some("get_lock")

@@ -1,6 +1,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use near_api::{signer::NEP413Payload, types::Signature, AccountId, NetworkConfig, PublicKey};
+use near_kit::{
+    signer::{PublicKey, Signature},
+    standards::nep413::{self, NonceValidation, SignMessageParams, VerifyOptions},
+    AccountId, Near,
+};
 use std::sync::Arc;
 use url::Url;
 
@@ -94,7 +98,7 @@ pub struct NearAuthService {
     session_repository: Arc<dyn SessionRepository>,
     user_repository: Arc<dyn UserRepository>,
     nonce_repository: Arc<dyn NearNonceRepository>,
-    network_config: NetworkConfig,
+    network: Near,
 }
 
 impl NearAuthService {
@@ -104,12 +108,12 @@ impl NearAuthService {
         nonce_repository: Arc<dyn NearNonceRepository>,
         near_rpc_url: Url,
     ) -> Self {
-        let network_config = NetworkConfig::from_rpc_url("near", near_rpc_url);
+        let network = Near::custom(near_rpc_url.to_string(), "near").build();
         Self {
             session_repository,
             user_repository,
             nonce_repository,
-            network_config,
+            network,
         }
     }
 
@@ -199,7 +203,7 @@ impl NearAuthService {
     pub async fn verify_and_authenticate(
         &self,
         signed_message: SignedMessage,
-        payload: NEP413Payload,
+        payload: SignMessageParams,
     ) -> anyhow::Result<(UserSession, bool)> {
         let account_id = signed_message.account_id.to_string();
 
@@ -215,23 +219,11 @@ impl NearAuthService {
         self.cleanup_nonces().await;
 
         // 4. Check nonce timestamp (replay protection)
-        let nonce_timestamp_ms = payload.extract_timestamp_from_nonce();
+        let nonce_timestamp_ms = nep413::extract_timestamp_from_nonce(&payload.nonce);
         validate_nonce_timestamp(nonce_timestamp_ms)?;
 
-        // 5. Verify signature AND public key ownership via near-api
-        let is_valid = payload
-            .verify(
-                &signed_message.account_id,
-                signed_message.public_key,
-                &signed_message.signature,
-                &self.network_config,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
-
-        if !is_valid {
-            return Err(anyhow::anyhow!("Invalid signature"));
-        }
+        // 5. Verify the signature and full-access key ownership before consuming the nonce.
+        verify_wallet_control(&payload, &signed_message, &self.network).await?;
 
         // 6. Consume nonce AFTER signature verification (replay protection)
         // This prevents attackers from burning legitimate nonces with invalid signatures
@@ -261,10 +253,180 @@ impl NearAuthService {
     }
 }
 
+async fn verify_wallet_control(
+    payload: &SignMessageParams,
+    message: &SignedMessage,
+    network: &Near,
+) -> anyhow::Result<()> {
+    let signed = nep413::SignedMessage {
+        account_id: message.account_id.clone(),
+        public_key: message.public_key.clone(),
+        signature: message.signature.clone(),
+        state: message.state.clone(),
+    };
+
+    let valid = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        nep413::verify(
+            &signed,
+            payload,
+            network,
+            VerifyOptions {
+                // Timestamp validation and atomic replay prevention are owned by this service.
+                nonce_validation: NonceValidation::None,
+                require_full_access: true,
+            },
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Wallet verification timed out"))?
+    .map_err(|error| {
+        tracing::warn!(error_category = ?std::mem::discriminant(&error), "NEP-413 verifier error");
+        anyhow::anyhow!("Wallet verification unavailable")
+    })?;
+
+    if !valid {
+        return Err(anyhow::anyhow!("Invalid signature"));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn nep413_hash_matches_wallet_fixtures_with_and_without_callback() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        // Sender/Meteor fixtures also used by near-api-rs. Expected hashes are
+        // SHA-256 of the NEP-413 tag followed by the Borsh-encoded payload.
+        for (callback_url, expected) in [
+            (
+                None,
+                "036a114cfadb42200dc972aff40b994039571359cbcdd34be9c097d472351038",
+            ),
+            (
+                Some("http://localhost:3000"),
+                "ca89aebc4b822cb0618aa785dca563acee228e2631cff9adb7ce44989c5e8874",
+            ),
+        ] {
+            let mut payload = SignMessageParams {
+                message: "Hello NEAR!".into(),
+                nonce: STANDARD
+                    .decode("KNV0cOpvJ50D5vfF9pqWom8wo2sliQ4W+Wa7uZ3Uk6Y=")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                recipient: "example.near".into(),
+                callback_url: callback_url.map(str::to_owned),
+                state: None,
+            };
+
+            let hash = nep413::serialize_message(&payload);
+
+            assert_eq!(hex::encode(hash.as_bytes()), expected);
+
+            payload.state = Some("wallet-callback-state".into());
+
+            assert_eq!(nep413::serialize_message(&payload), hash);
+        }
+    }
+
+    #[tokio::test]
+    async fn wallet_verification_requires_full_access_and_rejects_tampering() {
+        use near_kit::signer::SecretKey;
+        use serde_json::json;
+        use wiremock::{matchers::body_partial_json, Mock, MockServer, ResponseTemplate};
+
+        for key in [
+            SecretKey::ed25519_from_bytes([7; 32]),
+            SecretKey::secp256k1_from_bytes([7; 32]).unwrap(),
+            SecretKey::ml_dsa65_from_seed([7; 32]),
+        ] {
+            let payload = SignMessageParams {
+                message: EXPECTED_MESSAGE.into(),
+                nonce: [9; 32],
+                recipient: "private.near.ai".into(),
+                callback_url: None,
+                state: None,
+            };
+            let message = SignedMessage {
+                account_id: "alice.near".parse().unwrap(),
+                public_key: key.public_key(),
+                signature: key.sign(nep413::serialize_message(&payload).as_bytes()),
+                state: None,
+            };
+
+            for permission in [
+                json!("FullAccess"),
+                json!({
+                    "FunctionCall": {
+                        "allowance": null,
+                        "receiver_id": "app.near",
+                        "method_names": [],
+                    },
+                }),
+                serde_json::Value::Null,
+            ] {
+                let rpc = MockServer::start().await;
+                let response = if permission.is_null() {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "error": {
+                            "code": -32000,
+                            "message": "Server error",
+                            "name": "HANDLER_ERROR",
+                            "cause": {
+                                "name": "UNKNOWN_ACCESS_KEY",
+                                "info": { "public_key": message.public_key },
+                            },
+                        },
+                    })
+                } else {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "block_hash": "11111111111111111111111111111111",
+                            "block_height": 1,
+                            "nonce": 0,
+                            "permission": permission,
+                        },
+                    })
+                };
+
+                Mock::given(body_partial_json(json!({
+                    "method": "EXPERIMENTAL_view_access_key",
+                    "params": {
+                        "account_id": "alice.near",
+                        "public_key": message.public_key,
+                        "finality": "optimistic",
+                    },
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&rpc)
+                .await;
+                let network = Near::custom(rpc.uri(), "near").build();
+
+                let result = verify_wallet_control(&payload, &message, &network).await;
+
+                assert_eq!(result.is_ok(), permission == json!("FullAccess"));
+
+                let mut tampered = payload.clone();
+                tampered.message.push_str("changed");
+
+                assert!(verify_wallet_control(&tampered, &message, &network)
+                    .await
+                    .is_err());
+                rpc.verify().await;
+            }
+        }
+    }
 
     #[test]
     fn test_zero_timestamp_should_fail() {

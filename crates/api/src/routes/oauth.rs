@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use near_api::signer::NEP413Payload;
+use near_kit::standards::nep413::SignMessageParams;
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, AuthMethod, RecordActivityRequest};
 use services::auth::near::SignedMessage;
@@ -676,7 +676,7 @@ impl TryFrom<NearSignedMessageJson> for SignedMessage {
 
     fn try_from(msg: NearSignedMessageJson) -> Result<Self, Self::Error> {
         use base64::prelude::*;
-        use near_api::types::Signature;
+        use near_kit::signer::{KeyType, Signature};
 
         if msg.public_key.len() > MAX_NEAR_PUBLIC_KEY_LEN {
             return Err(anyhow::anyhow!(
@@ -686,12 +686,37 @@ impl TryFrom<NearSignedMessageJson> for SignedMessage {
             ));
         }
 
-        let public_key: near_api::PublicKey = msg.public_key.parse()?;
+        let public_key: near_kit::signer::PublicKey = msg.public_key.parse()?;
 
         // Parse base64 signature and create Signature based on key type
         let sig_bytes = BASE64_STANDARD.decode(&msg.signature)?;
-        let signature = Signature::from_parts(public_key.key_type(), &sig_bytes)
-            .map_err(|e| anyhow::anyhow!("Invalid signature: {}", e))?;
+        let sig_len = sig_bytes.len();
+        let signature = match public_key.key_type() {
+            KeyType::Ed25519 => {
+                Signature::ed25519_from_bytes(sig_bytes.try_into().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Invalid Ed25519 signature length: expected 64 bytes, got {sig_len}"
+                    )
+                })?)
+            }
+            KeyType::Secp256k1 => {
+                Signature::secp256k1_from_bytes(sig_bytes.try_into().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Invalid Secp256k1 signature length: expected 65 bytes, got {sig_len}"
+                    )
+                })?)
+            }
+            KeyType::MlDsa65 => {
+                let expected_len = public_key.key_type().signature_len();
+                let bytes = sig_bytes.into_boxed_slice().try_into().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Invalid ML-DSA-65 signature length: expected {expected_len} bytes, got {sig_len}"
+                    )
+                })?;
+
+                Signature::ml_dsa65_from_bytes(bytes)
+            }
+        };
 
         Ok(SignedMessage {
             account_id: msg.account_id.parse()?,
@@ -702,18 +727,19 @@ impl TryFrom<NearSignedMessageJson> for SignedMessage {
     }
 }
 
-impl TryFrom<NearPayloadJson> for NEP413Payload {
+impl TryFrom<NearPayloadJson> for SignMessageParams {
     type Error = anyhow::Error;
 
     fn try_from(payload: NearPayloadJson) -> Result<Self, Self::Error> {
         let nonce: [u8; 32] = payload.nonce.try_into().map_err(|v: Vec<u8>| {
             anyhow::anyhow!("Invalid nonce length: expected 32, got {}", v.len())
         })?;
-        Ok(NEP413Payload {
+        Ok(SignMessageParams {
             message: payload.message,
             nonce,
             recipient: payload.recipient,
             callback_url: payload.callback_url,
+            state: None,
         })
     }
 }
@@ -1510,13 +1536,13 @@ pub async fn near_auth(
         request.signed_message.account_id
     );
 
-    // Convert to near-api types
+    // Convert to near-kit types
     let signed_message: SignedMessage = request
         .signed_message
         .try_into()
         .map_err(|e| ApiError::bad_request(format!("{}", e)))?;
 
-    let payload: NEP413Payload = request
+    let payload: SignMessageParams = request
         .payload
         .try_into()
         .map_err(|e| ApiError::bad_request(format!("{}", e)))?;
@@ -1673,9 +1699,42 @@ mod tests {
 
     #[test]
     fn near_signed_message_accepts_valid_public_key() {
-        let public_key = format!("ed25519:{}", "1".repeat(32));
+        let public_key = near_kit::signer::SecretKey::ed25519_from_bytes([7; 32])
+            .public_key()
+            .to_string();
 
         assert!(SignedMessage::try_from(near_signed_message(public_key)).is_ok());
+    }
+
+    #[test]
+    fn near_signed_message_decodes_supported_signatures_and_checks_lengths() {
+        use near_kit::signer::SecretKey;
+
+        for key in [
+            SecretKey::ed25519_from_bytes([7; 32]),
+            SecretKey::secp256k1_from_bytes([7; 32]).unwrap(),
+            SecretKey::ml_dsa65_from_seed([7; 32]),
+        ] {
+            let signature = key.sign(&[9; 32]);
+            let mut request = near_signed_message(key.public_key().to_string());
+            request.signature = BASE64_STANDARD.encode(signature.as_bytes());
+
+            let decoded = SignedMessage::try_from(request).unwrap();
+
+            assert_eq!(decoded.signature, signature);
+            assert!(decoded.signature.verify(&[9; 32], &decoded.public_key));
+
+            for length in [
+                0,
+                signature.as_bytes().len() - 1,
+                signature.as_bytes().len() + 1,
+            ] {
+                let mut request = near_signed_message(key.public_key().to_string());
+                request.signature = BASE64_STANDARD.encode(vec![0; length]);
+
+                assert!(SignedMessage::try_from(request).is_err());
+            }
+        }
     }
 
     #[test]
