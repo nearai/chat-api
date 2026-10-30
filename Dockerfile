@@ -50,6 +50,11 @@ RUN curl -L -o /tmp/private-chat.tar.gz "https://github.com/nearai/private-chat/
     tar -xzf /tmp/private-chat.tar.gz --strip-components=1 && \
     rm /tmp/private-chat.tar.gz
 
+# Use the hardened system trust store for npm, pnpm, and Node build scripts.
+ENV NODE_OPTIONS="--use-openssl-ca"
+ENV SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+ENV SSL_CERT_DIR="/etc/ssl/certs"
+
 # Install pnpm with specific version
 RUN npm install -g pnpm@10.10.0
 
