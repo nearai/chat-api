@@ -30,21 +30,14 @@ http = "1.0"
 tokio-stream = "0.1"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
 deadpool-postgres = "0.14"
-# MCP protocol
-rmcp = { version = "0.6", features = [
-    "client",
-    "transport-streamable-http-client-reqwest",
-    "transport-sse-client-reqwest",
-] }
 hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
-dstack-sdk = "0.1"
 # OpenTelemetry for metrics
 opentelemetry = { version = "0.31", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
-utoipa = { version = "5", optional = true }
+utoipa = { version = "6", optional = true }
 near-kit = { version = "0.18.3", default-features = false, features = ["rpc"] }
 mockall = { version = "0.13", optional = true }
 # Stripe payment integration

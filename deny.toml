@@ -1,9 +1,14 @@
-# cargo-deny config - advisories + supply-chain (bans / sources). Run report-only in CI (continue-on-error);
-# advisory findings surface in the job log and are triaged via the Vulnerability Management procedure. Add a
-# [licenses] allow-list and `licenses` to the workflow command once the dependency tree is license-reviewed.
+# Fail CI on vulnerabilities and unsound or unmaintained dependencies.
+# Add exceptions only after reviewing applicability and documenting a reason.
+[graph]
+all-features = true
+
 [advisories]
-# Defaults apply (vulnerabilities + unmaintained/unsound are surfaced). Report-only is enforced by the
-# workflow's continue-on-error, not by downgrading severities here.
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+unused-ignored-advisory = "deny"
 
 [bans]
 multiple-versions = "warn"
