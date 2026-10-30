@@ -6,7 +6,8 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    - cron: "0 0 * * *" # Daily at 00:00 UTC
+    # Avoid the top-of-hour scheduling peak on GitHub Actions.
+    - cron: "17 0 * * *" # Daily at 00:17 UTC
 
 # Cancel superseded PR scans without cancelling scheduled or main-branch scans.
 concurrency:
