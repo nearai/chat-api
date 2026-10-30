@@ -40,6 +40,9 @@ const OAUTH_GATEWAY_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 // new mobile clients should send nearai://auth.
 const MOBILE_FRONTEND_CALLBACK_SCHEMES: &[&str] = &["nearai", "nearprivatechat"];
 const MOBILE_FRONTEND_CALLBACK_HOST: &str = "auth";
+// Upper bound on the public_key string in NEAR sign-in requests. Leaves room for
+// ML-DSA-65, the longest NEAR key type at 2677 characters.
+const MAX_NEAR_PUBLIC_KEY_LEN: usize = 3000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrontendCallbackValidationError {
@@ -674,6 +677,14 @@ impl TryFrom<NearSignedMessageJson> for SignedMessage {
     fn try_from(msg: NearSignedMessageJson) -> Result<Self, Self::Error> {
         use base64::prelude::*;
         use near_api::types::Signature;
+
+        if msg.public_key.len() > MAX_NEAR_PUBLIC_KEY_LEN {
+            return Err(anyhow::anyhow!(
+                "Invalid public key length: expected at most {}, got {}",
+                MAX_NEAR_PUBLIC_KEY_LEN,
+                msg.public_key.len()
+            ));
+        }
 
         let public_key: near_api::PublicKey = msg.public_key.parse()?;
 
@@ -1636,9 +1647,12 @@ mod tests {
         build_oauth_frontend_code_redirect, extract_client_ip,
         frontend_callback_allowed_origins_from, select_proxy_chain_ip,
         validate_frontend_callback_url, validate_frontend_response_options,
-        FrontendCallbackValidationError, OAuthInitQuery,
+        FrontendCallbackValidationError, NearSignedMessageJson, OAuthInitQuery,
+        MAX_NEAR_PUBLIC_KEY_LEN,
     };
     use axum::http::{HeaderMap, HeaderValue};
+    use base64::prelude::*;
+    use services::auth::near::SignedMessage;
     use std::net::{IpAddr, SocketAddr};
 
     fn allowlist() -> Vec<String> {
@@ -1646,6 +1660,45 @@ mod tests {
             "https://app.near.ai".to_string(),
             "http://localhost:3000".to_string(),
         ]
+    }
+
+    fn near_signed_message(public_key: String) -> NearSignedMessageJson {
+        NearSignedMessageJson {
+            account_id: "alice.near".to_string(),
+            public_key,
+            signature: BASE64_STANDARD.encode([0u8; 64]),
+            state: None,
+        }
+    }
+
+    #[test]
+    fn near_signed_message_accepts_valid_public_key() {
+        let public_key = format!("ed25519:{}", "1".repeat(32));
+
+        assert!(SignedMessage::try_from(near_signed_message(public_key)).is_ok());
+    }
+
+    #[test]
+    fn near_signed_message_parses_public_key_at_length_limit() {
+        let public_key = "1".repeat(MAX_NEAR_PUBLIC_KEY_LEN);
+
+        let error = SignedMessage::try_from(near_signed_message(public_key))
+            .expect_err("key of zeros has the wrong size");
+
+        assert!(!error.to_string().contains("Invalid public key length"));
+    }
+
+    #[test]
+    fn near_signed_message_rejects_public_key_over_length_limit() {
+        let public_key = "1".repeat(MAX_NEAR_PUBLIC_KEY_LEN + 1);
+
+        let error = SignedMessage::try_from(near_signed_message(public_key))
+            .expect_err("over-long key must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "Invalid public key length: expected at most 3000, got 3001"
+        );
     }
 
     #[test]
