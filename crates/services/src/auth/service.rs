@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use near_api::signer::NEP413Payload;
+use near_kit::standards::nep413::SignMessageParams;
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
     PkceCodeChallenge, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
@@ -1055,7 +1055,7 @@ impl OAuthService for OAuthServiceImpl {
     async fn authenticate_near(
         &self,
         signed_message: super::near::SignedMessage,
-        payload: NEP413Payload,
+        payload: SignMessageParams,
     ) -> anyhow::Result<(UserSession, bool)> {
         self.near_auth
             .verify_and_authenticate(signed_message, payload)

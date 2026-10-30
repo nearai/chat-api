@@ -49,7 +49,7 @@ deadpool-postgres = "0.14"
 config = { path = "../config" }
 stripe_client = { path = "../stripe_client" }
 hex = "0.4.3"
-near-api = "0.8.0"
+near-kit = { version = "0.18.3", default-features = false, features = ["rpc"] }
 
 # VPC authentication
 reqwest = { version = "0.12", features = ["json"] }

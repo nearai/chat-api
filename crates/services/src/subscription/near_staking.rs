@@ -3,7 +3,7 @@
 use crate::subscription::ports::{DowngradeIntentStatus, Subscription};
 use crate::UserId;
 use chrono::{DateTime, Utc};
-use near_api::{AccountId, Contract, Data, NetworkConfig};
+use near_kit::{AccountId, Near};
 use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::time::Duration;
@@ -227,25 +227,27 @@ async fn view_call<Args, Response>(
 ) -> Result<Option<Response>, String>
 where
     Args: Serialize + Send,
-    Response: DeserializeOwned + Send + Sync,
+    Response: DeserializeOwned + Send + Sync + 'static,
 {
     timeout(NEAR_VIEW_RPC_TIMEOUT, async {
-        let url = rpc_url
+        let url: url::Url = rpc_url
             .parse()
             .map_err(|e: url::ParseError| e.to_string())?;
-        let network = NetworkConfig::from_rpc_url("configured", url);
+        let network = Near::custom(url.to_string(), "configured")
+            .retry_config(near_kit::rpc::RetryConfig::none())
+            .build();
         let cid: AccountId = contract_id
             .parse()
             .map_err(|e| format!("invalid staking contract account id: {e}"))?;
 
-        let data: Data<Option<Response>> = Contract(cid)
-            .call_function(method_name, args)
-            .read_only()
-            .fetch_from(&network)
+        let data: Option<Response> = network
+            .view(cid, method_name)
+            .finality(near_kit::rpc::Finality::Optimistic)
+            .args(args)
             .await
             .map_err(|e| e.to_string())?;
 
-        Ok::<Option<Response>, String>(data.data)
+        Ok::<Option<Response>, String>(data)
     })
     .await
     .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
@@ -484,7 +486,7 @@ mod tests {
         let encoded: Vec<Value> = payload.iter().map(|b| json!(b)).collect();
         json!({
             "jsonrpc": "2.0",
-            "id": "0",
+            "id": 1,
             "result": {
                 "block_hash": "11111111111111111111111111111111",
                 "block_height": 12345u64,
@@ -549,7 +551,10 @@ mod tests {
                 use base64::{engine::general_purpose::STANDARD, Engine};
 
                 let body: Value = serde_json::from_slice(&req.body).expect("request body");
+                assert_eq!(body["method"], "EXPERIMENTAL_call_function");
                 let params = body.get("params").expect("query params");
+                assert_eq!(params["finality"], "optimistic");
+                assert_eq!(params["account_id"], "staking.testnet");
                 assert_eq!(
                     params.get("method_name").and_then(|x| x.as_str()),
                     Some("get_lock")

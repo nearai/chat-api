@@ -1,7 +1,7 @@
 //! Validation utilities for API request data
 use url::{Host, Url};
 
-use near_api::AccountId;
+use near_kit::AccountId;
 
 /// Validates a URL for Stripe checkout/portal redirects.
 /// Requires https for production. Allows http only for loopback (localhost, 127.0.0.1, [::1]).

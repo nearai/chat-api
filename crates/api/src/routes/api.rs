@@ -24,7 +24,7 @@ use http::{
     HeaderValue,
 };
 use multer::Multipart;
-use near_api::{Account, AccountId, NetworkConfig};
+use near_kit::{AccountId, Near};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use services::analytics::{ActivityType, RecordActivityRequest};
@@ -2996,13 +2996,13 @@ async fn ensure_near_balance_for_near_user(
             .into_response()
     })?;
 
-    let account = Account(account_id);
+    let network = Near::custom(state.near_rpc_url.to_string(), "near")
+        .retry_config(near_kit::rpc::RetryConfig::none())
+        .build();
 
-    let network_config = NetworkConfig::from_rpc_url("near", state.near_rpc_url.clone());
-
-    let info = account
-        .view()
-        .fetch_from(&network_config)
+    let info = network
+        .account(account_id)
+        .finality(near_kit::rpc::Finality::Optimistic)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -3019,7 +3019,7 @@ async fn ensure_near_balance_for_near_user(
                 .into_response()
         })?;
 
-    let balance = info.data.amount.as_yoctonear();
+    let balance = info.amount.as_yoctonear();
 
     tracing::info!(
         "NEAR balance for account '{}' (user_id={}): {} yoctoNEAR",
