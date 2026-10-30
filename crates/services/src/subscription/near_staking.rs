@@ -234,7 +234,13 @@ where
             .parse()
             .map_err(|e: url::ParseError| e.to_string())?;
         let network = Near::custom(url.to_string(), "configured")
-            .retry_config(near_kit::rpc::RetryConfig::none())
+            // Preserve near-api's five attempts and 10/20/40/80 ms backoff.
+            // The outer timeout bounds requests and backoff together.
+            .retry_config(near_kit::rpc::RetryConfig {
+                max_retries: 4,
+                initial_delay_ms: 10,
+                max_delay_ms: 80,
+            })
             .build();
         let cid: AccountId = contract_id
             .parse()
@@ -498,6 +504,97 @@ mod tests {
 
     fn chain_subscription(value: Value) -> NearStakingSubscription {
         serde_json::from_value(value).expect("typed chain subscription")
+    }
+
+    #[tokio::test]
+    async fn staking_view_recovers_from_transient_http_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for status in [408, 429, 500, 502, 503, 504] {
+            let mock = MockServer::start().await;
+            let attempts = AtomicUsize::new(0);
+
+            Mock::given(method("POST"))
+                .respond_with(move |_: &wiremock::Request| {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        ResponseTemplate::new(status)
+                    } else {
+                        ResponseTemplate::new(200)
+                            .set_body_json(call_function_query_response(&Value::Null))
+                    }
+                })
+                .expect(2)
+                .mount(&mock)
+                .await;
+
+            let result = view_get_subscription_for_price(
+                &mock.uri(),
+                "staking.testnet",
+                "alice.testnet",
+                "price_fake",
+            )
+            .await;
+
+            assert!(result.unwrap().is_none());
+            mock.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn staking_view_bounds_retries_and_does_not_retry_permanent_errors() {
+        for (status, expected_attempts) in [(503, 5), (400, 1)] {
+            let mock = MockServer::start().await;
+
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(expected_attempts)
+                .mount(&mock)
+                .await;
+
+            let result = view_get_subscription_for_price(
+                &mock.uri(),
+                "staking.testnet",
+                "alice.testnet",
+                "price_fake",
+            )
+            .await;
+
+            assert!(result.is_err());
+            mock.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn staking_view_timeout_covers_retry_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mock = MockServer::start().await;
+        let attempts = AtomicUsize::new(0);
+
+        Mock::given(method("POST"))
+            .respond_with(move |_: &wiremock::Request| {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_json(call_function_query_response(&Value::Null))
+                        .set_delay(NEAR_VIEW_RPC_TIMEOUT + Duration::from_secs(1))
+                }
+            })
+            .expect(2)
+            .mount(&mock)
+            .await;
+
+        let result = view_get_subscription_for_price(
+            &mock.uri(),
+            "staking.testnet",
+            "alice.testnet",
+            "price_fake",
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), NEAR_VIEW_RPC_TIMEOUT_MSG);
+        mock.verify().await;
     }
 
     #[tokio::test]
