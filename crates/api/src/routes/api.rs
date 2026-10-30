@@ -2895,6 +2895,24 @@ async fn proxy_responses(
     Ok(with_no_store_cache_control(response))
 }
 
+async fn fetch_near_balance(rpc_url: &str, account_id: AccountId) -> anyhow::Result<u128> {
+    let network = Near::custom(rpc_url, "near")
+        .retry_config(near_kit::rpc::RetryConfig::none())
+        .build();
+
+    // Bound the entire lookup, including a connected server that stalls its response.
+    let info = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        network
+            .account(account_id)
+            .finality(near_kit::rpc::Finality::Optimistic)
+            .await
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("NEAR balance RPC timed out"))??;
+
+    Ok(info.amount.as_yoctonear())
+}
+
 /// Ensure that if the authenticated user logged in with NEAR (has a NEAR-linked account),
 /// their on-chain balance is at least 1 NEAR before allowing expensive /v1/responses calls.
 /// Paid users skip this check.
@@ -2996,13 +3014,7 @@ async fn ensure_near_balance_for_near_user(
             .into_response()
     })?;
 
-    let network = Near::custom(state.near_rpc_url.to_string(), "near")
-        .retry_config(near_kit::rpc::RetryConfig::none())
-        .build();
-
-    let info = network
-        .account(account_id)
-        .finality(near_kit::rpc::Finality::Optimistic)
+    let balance = fetch_near_balance(&state.near_rpc_url.to_string(), account_id)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -3018,8 +3030,6 @@ async fn ensure_near_balance_for_near_user(
             )
                 .into_response()
         })?;
-
-    let balance = info.amount.as_yoctonear();
 
     tracing::info!(
         "NEAR balance for account '{}' (user_id={}): {} yoctoNEAR",
@@ -5689,6 +5699,65 @@ mod tests {
     use http::{HeaderMap, HeaderValue};
     use serde_json::json;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn near_balance_rpc_returns_yocto_balance() {
+        use wiremock::{matchers::body_partial_json, Mock, MockServer, ResponseTemplate};
+
+        let rpc = MockServer::start().await;
+        Mock::given(body_partial_json(json!({
+            "method": "EXPERIMENTAL_view_account",
+            "params": { "account_id": "alice.near", "finality": "optimistic" },
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "amount": "1000000000000000000000000",
+                "locked": "0",
+                "code_hash": "11111111111111111111111111111111",
+                "storage_usage": 0,
+                "storage_paid_at": 0,
+                "block_height": 1,
+                "block_hash": "11111111111111111111111111111111",
+            },
+        })))
+        .expect(1)
+        .mount(&rpc)
+        .await;
+
+        let balance = super::fetch_near_balance(&rpc.uri(), "alice.near".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(balance, 1_000_000_000_000_000_000_000_000);
+        rpc.verify().await;
+    }
+
+    #[tokio::test]
+    async fn near_balance_rpc_stalled_response_times_out() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let rpc = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(30)))
+            .expect(1)
+            .mount(&rpc)
+            .await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            super::fetch_near_balance(&rpc.uri(), "alice.near".parse().unwrap()),
+        )
+        .await
+        .expect("the balance lookup must finish before the watchdog");
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "NEAR balance RPC timed out"
+        );
+        rpc.verify().await;
+    }
 
     fn headers(content_encoding: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
