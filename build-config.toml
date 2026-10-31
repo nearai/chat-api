@@ -11,5 +11,5 @@
 private_chat_frontend_version = "3df14875ce65e196182a0ec9ecfcaf576044e9ef" # v0.2.24
 
 # PostHog key and host for the private-chat frontend
-posthog_key = "phc_glaMeuuO1gLFSB2U9y27MchidXEmSnFOQLB8cceyVSb"
+posthog_key = "phc_C4kUGXVknKVfzTRgy8kbQpYUvYR6FaKQsY8HrXgKD3jP"
 posthog_host = "https://us.i.posthog.com"
