@@ -396,7 +396,7 @@ fn direct_pool_config(config: &config::DatabaseConfig) -> Result<deadpool_postgr
             create: Some(Duration::from_secs(10)),
             recycle: Some(Duration::from_secs(5)),
         },
-        queue_mode: deadpool::managed::QueueMode::Fifo,
+        queue_mode: deadpool_postgres::QueueMode::Fifo,
     });
     pg.manager = Some(deadpool_postgres::ManagerConfig {
         recycling_method: deadpool_postgres::RecyclingMethod::Verified,
@@ -518,7 +518,7 @@ mod direct_connection_tests {
         assert!(matches!(
             result.unwrap(),
             Err(deadpool_postgres::PoolError::Timeout(
-                deadpool::managed::TimeoutType::Create
+                deadpool_postgres::TimeoutType::Create
             ))
         ));
     }
