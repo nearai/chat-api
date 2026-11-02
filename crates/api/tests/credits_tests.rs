@@ -157,7 +157,7 @@ fn near_rpc_call_function_body(result_json: &serde_json::Value) -> serde_json::V
     let encoded: Vec<serde_json::Value> = payload.iter().map(|b| json!(*b)).collect();
     json!({
         "jsonrpc": "2.0",
-        "id": "0",
+        "id": 1,
         "result": {
             "block_hash": "11111111111111111111111111111111",
             "block_height": 12345u64,

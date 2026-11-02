@@ -3751,7 +3751,7 @@ fn near_rpc_call_function_body(result_json: &serde_json::Value) -> serde_json::V
     let encoded: Vec<serde_json::Value> = payload.iter().map(|b| json!(*b)).collect();
     json!({
         "jsonrpc": "2.0",
-        "id": "0",
+        "id": 1,
         "result": {
             "block_hash": "11111111111111111111111111111111",
             "block_height": 12345u64,
@@ -4404,7 +4404,9 @@ async fn test_expired_house_of_stake_reconcile_failure_is_backed_off() {
         assert_eq!(response.status_code(), 200, "{}", response.text());
     }
 
-    assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+    // The first reconciliation exhausts five RPC attempts. The second request
+    // must respect the reconciliation backoff instead of starting another probe.
+    assert_eq!(mock.received_requests().await.unwrap().len(), 5);
     let status: String = client
         .query_one(
             "SELECT status FROM subscriptions WHERE user_id = $1 AND provider = 'house-of-stake'",
@@ -6299,7 +6301,8 @@ async fn test_expired_house_of_stake_reconcile_does_not_cancel_from_partial_prob
             .timestamp_micros(),
         expired_end.timestamp_micros()
     );
-    assert_eq!(mock.received_requests().await.unwrap().len(), 2);
+    // One successful basic-price probe plus five attempts for the failing pro price.
+    assert_eq!(mock.received_requests().await.unwrap().len(), 6);
 }
 
 #[tokio::test]

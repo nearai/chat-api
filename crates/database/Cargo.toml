@@ -26,7 +26,7 @@ rustls = { version = "0.23", features = ["ring"] }
 # Documentation: https://docs.rs/rustls-platform-verifier/latest/rustls_platform_verifier/
 rustls-platform-verifier = "0.6"
 # PEM file parsing for custom certificates
-rustls-pemfile = "2.0"
+rustls-pki-types = "1"
 
 # PostgreSQL types
 postgres-types = { version = "0.2", features = ["derive", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
@@ -63,3 +63,6 @@ reqwest = { version = "0.12.24", features = ["json", "rustls-tls"] }
 deadpool = "0.12.3"
 native-tls = "0.2.14"
 postgres-native-tls = "0.5.2"
+
+[dev-dependencies]
+tempfile = "3"

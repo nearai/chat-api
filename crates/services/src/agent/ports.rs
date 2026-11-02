@@ -374,19 +374,20 @@ pub trait AgentRepository: Send + Sync {
 
     /// Admin update instance fields for migration (agent_api_base_url, instance_url, instance_token,
     /// dashboard_url, name).
-    /// Only updates fields that are Some. instance_token is stored already-encrypted.
+    /// Only updates fields that are Some. The repository encrypts instance_token before storage.
     async fn admin_update_instance(
         &self,
         instance_id: Uuid,
         agent_api_base_url: Option<String>,
         instance_url: Option<String>,
-        encrypted_instance_token: Option<String>,
+        instance_token: Option<String>,
         dashboard_url: Option<String>,
         name: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
 }
 
 /// Service trait for agent business logic
+#[cfg_attr(any(test, feature = "test"), mockall::automock)]
 #[async_trait]
 pub trait AgentService: Send + Sync {
     /// List all instances from DB (admin only); correct user_id per instance
@@ -438,10 +439,10 @@ pub trait AgentService: Send + Sync {
     /// When `agent_api_base_url` is provided, queries only the owning manager (O(1)).
     /// Falls back to fan-out across all managers when the URL is None (legacy instances).
     /// Returns None if the Agent API call fails or returns 404.
-    async fn get_instance_enrichment_from_agent_api(
+    async fn get_instance_enrichment_from_agent_api<'a>(
         &self,
         agent_api_name: &str,
-        agent_api_base_url: Option<&str>,
+        agent_api_base_url: Option<&'a str>,
     ) -> Option<AgentApiInstanceEnrichment>;
 
     /// Fetch instance enrichments from the Agent API for a set of instances.

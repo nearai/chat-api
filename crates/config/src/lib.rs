@@ -984,6 +984,9 @@ pub struct DatabaseEncryptionConfig {
     pub key_id: String,
     /// Enables encrypted repository writes and execute-mode backfills.
     pub write_enabled: bool,
+    /// Migrate agent provisioning secrets only after every reader supports field envelopes.
+    #[serde(default)]
+    pub agent_secrets_write_enabled: bool,
 }
 
 impl fmt::Debug for DatabaseEncryptionConfig {
@@ -993,6 +996,10 @@ impl fmt::Debug for DatabaseEncryptionConfig {
             .field("key", &"[REDACTED]")
             .field("key_id", &self.key_id)
             .field("write_enabled", &self.write_enabled)
+            .field(
+                "agent_secrets_write_enabled",
+                &self.agent_secrets_write_enabled,
+            )
             .finish()
     }
 }
@@ -1011,6 +1018,10 @@ impl Default for DatabaseEncryptionConfig {
             key,
             key_id: std::env::var("DB_ENCRYPTION_KEY_ID").unwrap_or_else(|_| "db-v1".to_string()),
             write_enabled: std::env::var("DB_ENCRYPTION_WRITE_ENABLED")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(false),
+            agent_secrets_write_enabled: std::env::var("DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED")
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(false),
@@ -1100,11 +1111,16 @@ mod tests {
         std::env::set_var("DB_ENCRYPTION_KEY", "super-secret-test-value");
         std::env::remove_var("DB_ENCRYPTION_KEY_FILE");
         std::env::remove_var("DB_ENCRYPTION_WRITE_ENABLED");
+        std::env::remove_var("DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED");
         let config = DatabaseEncryptionConfig::default();
         assert!(!config.write_enabled);
+        assert!(!config.agent_secrets_write_enabled);
         assert_eq!(config.key_id, "db-v1");
         let debug = format!("{config:?}");
         assert!(!debug.contains("super-secret-test-value"));
+        std::env::set_var("DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED", "true");
+        assert!(DatabaseEncryptionConfig::default().agent_secrets_write_enabled);
+        std::env::remove_var("DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED");
         std::env::remove_var("DB_ENCRYPTION_KEY");
     }
 

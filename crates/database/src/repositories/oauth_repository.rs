@@ -1,9 +1,13 @@
 use crate::pool::DbPool;
+use crate::repositories::session_repository::{generate_session_token, hash_session_token};
 use async_trait::async_trait;
 use services::{
-    auth::ports::{OAuthRepository, OAuthState, OAuthTokens},
+    auth::ports::{
+        OAuthCallbackCode, OAuthCodeExchangeSuccess, OAuthRepository, OAuthState, OAuthTokens,
+        PkceCodeVerifier, UserSession,
+    },
     user::ports::OAuthProvider,
-    UserId,
+    SessionId, UserId,
 };
 use uuid::Uuid;
 
@@ -16,12 +20,18 @@ impl PostgresOAuthRepository {
         Self { pool }
     }
 
-    fn encode_token(&self, column: &str, id: Uuid, value: &str) -> anyhow::Result<String> {
+    fn encode_field(
+        &self,
+        table: &str,
+        column: &str,
+        id: Uuid,
+        value: &str,
+    ) -> anyhow::Result<String> {
         match self.pool.field_encryption() {
             Some(config) if config.write_enabled => crate::field_encryption::encrypt(
                 &config.key,
                 &config.key_id,
-                "oauth_tokens",
+                table,
                 column,
                 id,
                 value,
@@ -30,18 +40,48 @@ impl PostgresOAuthRepository {
         }
     }
 
-    fn decode_token(&self, column: &str, id: Uuid, value: String) -> anyhow::Result<String> {
+    fn decode_field(
+        &self,
+        table: &str,
+        column: &str,
+        id: Uuid,
+        value: String,
+    ) -> anyhow::Result<String> {
         match self.pool.field_encryption() {
             Some(config) => crate::field_encryption::decrypt_if_encrypted(
                 &config.key,
                 &config.key_id,
-                "oauth_tokens",
+                table,
                 column,
                 id,
                 value,
             ),
             None => Ok(value),
         }
+    }
+
+    fn encode_token(&self, column: &str, id: Uuid, value: &str) -> anyhow::Result<String> {
+        self.encode_field("oauth_tokens", column, id, value)
+    }
+
+    fn encode_provider_verifier(&self, id: Uuid, value: &str) -> anyhow::Result<String> {
+        // This new credential has no plaintext-write rollout phase. The global
+        // gate only controls migration of existing confidential fields.
+        let config = self.pool.field_encryption().ok_or_else(|| {
+            anyhow::anyhow!("field encryption configuration is required for provider PKCE")
+        })?;
+        crate::field_encryption::encrypt(
+            &config.key,
+            &config.key_id,
+            "oauth_states",
+            "provider_code_verifier",
+            id,
+            value,
+        )
+    }
+
+    fn decode_token(&self, column: &str, id: Uuid, value: String) -> anyhow::Result<String> {
+        self.decode_field("oauth_tokens", column, id, value)
     }
 }
 
@@ -59,6 +99,13 @@ impl OAuthRepository for PostgresOAuthRepository {
 
         let client = self.pool.get().await?;
 
+        let id = Uuid::new_v4();
+        let provider_code_verifier = state
+            .provider_code_verifier
+            .as_ref()
+            .map(|verifier| self.encode_provider_verifier(id, verifier.secret()))
+            .transpose()?;
+
         let provider_str = match state.provider {
             OAuthProvider::Google => "google",
             OAuthProvider::Github => "github",
@@ -67,14 +114,28 @@ impl OAuthRepository for PostgresOAuthRepository {
 
         client
             .execute(
-                "INSERT INTO oauth_states (state, provider, redirect_uri, frontend_callback, created_at) 
-                 VALUES ($1, $2, $3, $4, $5)",
+                "INSERT INTO oauth_states (
+                    state,
+                    provider,
+                    redirect_uri,
+                    frontend_callback,
+                    frontend_code_challenge,
+                    frontend_state,
+                    created_at,
+                    id,
+                    provider_code_verifier
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 &[
                     &state.state,
                     &provider_str,
                     &state.redirect_uri,
                     &state.frontend_callback,
+                    &state.frontend_code_challenge,
+                    &state.frontend_state,
                     &state.created_at,
+                    &id,
+                    &provider_code_verifier,
                 ],
             )
             .await?;
@@ -105,32 +166,50 @@ impl OAuthRepository for PostgresOAuthRepository {
         // Get and delete the state in one go
         let row = transaction
             .query_opt(
-                "DELETE FROM oauth_states 
-                 WHERE state = $1 
-                 RETURNING state, provider, redirect_uri, frontend_callback, created_at",
+                "DELETE FROM oauth_states
+                 WHERE state = $1
+                 RETURNING state, provider, redirect_uri, frontend_callback,
+                           frontend_code_challenge,
+                           frontend_state, created_at, id, provider_code_verifier",
                 &[&state],
             )
             .await?;
 
         transaction.commit().await?;
 
-        let result = row.map(|r| {
-            let provider_str: String = r.get(1);
-            let provider = match provider_str.as_str() {
-                "google" => OAuthProvider::Google,
-                "github" => OAuthProvider::Github,
-                "near" => OAuthProvider::Near,
-                _ => OAuthProvider::Google, // fallback
-            };
+        let result = row
+            .map(|r| -> anyhow::Result<OAuthState> {
+                let provider_str: String = r.get(1);
+                let provider = match provider_str.as_str() {
+                    "google" => OAuthProvider::Google,
+                    "github" => OAuthProvider::Github,
+                    "near" => OAuthProvider::Near,
+                    _ => OAuthProvider::Google, // fallback
+                };
 
-            OAuthState {
-                state: r.get(0),
-                provider,
-                redirect_uri: r.get(2),
-                frontend_callback: r.get(3),
-                created_at: r.get(4),
-            }
-        });
+                Ok(OAuthState {
+                    state: r.get(0),
+                    provider,
+                    redirect_uri: r.get(2),
+                    frontend_callback: r.get(3),
+                    frontend_code_challenge: r.get(4),
+                    frontend_state: r.get(5),
+                    created_at: r.get(6),
+                    provider_code_verifier: r
+                        .get::<_, Option<String>>(8)
+                        .map(|value| {
+                            self.decode_field(
+                                "oauth_states",
+                                "provider_code_verifier",
+                                r.get(7),
+                                value,
+                            )
+                            .map(PkceCodeVerifier::new)
+                        })
+                        .transpose()?,
+                })
+            })
+            .transpose()?;
 
         if result.is_some() {
             tracing::debug!(
@@ -147,6 +226,96 @@ impl OAuthRepository for PostgresOAuthRepository {
         }
 
         Ok(result)
+    }
+
+    async fn store_callback_code(
+        &self,
+        code_hash: &str,
+        callback_code: &OAuthCallbackCode,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "INSERT INTO oauth_callback_codes (
+                    code_hash, session_id, code_challenge, is_new_user, expires_at
+                 ) VALUES ($1, $2, $3, $4, $5)",
+                &[
+                    &code_hash,
+                    &callback_code.session_id,
+                    &callback_code.code_challenge,
+                    &callback_code.is_new_user,
+                    &callback_code.expires_at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn exchange_callback_code(
+        &self,
+        code_hash: &str,
+        code_challenge: &str,
+    ) -> anyhow::Result<Option<OAuthCodeExchangeSuccess>> {
+        let token = generate_session_token();
+        let token_hash = hash_session_token(&token);
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+        // Opportunistic cleanup keeps abandoned/expired handoff codes from
+        // accumulating without introducing a separate maintenance job.
+        transaction
+            .execute(
+                "DELETE FROM oauth_callback_codes WHERE expires_at <= NOW()",
+                &[],
+            )
+            .await?;
+        let callback_row = transaction
+            .query_opt(
+                "DELETE FROM oauth_callback_codes
+                 WHERE code_hash = $1
+                   AND code_challenge = $2
+                   AND expires_at > NOW()
+                 RETURNING session_id, code_challenge, is_new_user, expires_at",
+                &[&code_hash, &code_challenge],
+            )
+            .await?;
+
+        let Some(callback_row) = callback_row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+
+        let session_id: SessionId = callback_row.get(0);
+        let is_new_user: bool = callback_row.get(2);
+        let session_row = transaction
+            .query_opt(
+                "UPDATE sessions
+                 SET token_hash = $2
+                 WHERE id = $1 AND expires_at > NOW()
+                 RETURNING id, user_id, created_at, expires_at",
+                &[&session_id, &token_hash],
+            )
+            .await?;
+
+        let Some(session_row) = session_row else {
+            // Roll back the callback-code DELETE as well. A missing or expired
+            // session is an invalid exchange, not an internal database error,
+            // and must not consume an otherwise matching callback code.
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+
+        transaction.commit().await?;
+
+        Ok(Some(OAuthCodeExchangeSuccess {
+            session: UserSession {
+                session_id: session_row.get(0),
+                user_id: session_row.get(1),
+                created_at: session_row.get(2),
+                expires_at: session_row.get(3),
+                token: Some(token),
+            },
+            is_new_user,
+        }))
     }
 
     async fn store_oauth_tokens(
