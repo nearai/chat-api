@@ -2,15 +2,18 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, ready_for_review]  # When PR is ready for review (not draft)
+    types: [opened, ready_for_review, synchronize]
   issue_comment:
     types: [created]  # Listen for @claude mentions in PR comments
 
 jobs:
   claude-review:
-    # Run if: (PR opened/ready AND not draft) OR @claude review in PR comment
+    # Dependabot PR events cannot access Actions secrets. A maintainer
+    # can still request a review with an @claude review comment.
     if: |
-      (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
+      (github.event_name == 'pull_request' &&
+       !github.event.pull_request.draft &&
+       github.event.pull_request.user.login != 'dependabot[bot]') ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request &&
        (contains(github.event.comment.body, '@claude review') ||

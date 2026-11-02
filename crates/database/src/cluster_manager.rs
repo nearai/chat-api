@@ -1,8 +1,7 @@
 use crate::patroni_discovery::{ClusterMember, PatroniDiscovery};
 use crate::pool::{create_pool_with_native_tls, DbPool};
 use anyhow::{anyhow, Result};
-use deadpool::managed::QueueMode;
-use deadpool_postgres::{Config, Object as PooledConnection, Pool, Runtime};
+use deadpool_postgres::{Config, Object as PooledConnection, Pool, QueueMode, Runtime};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

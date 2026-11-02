@@ -60,7 +60,6 @@ hkdf = "0.12"
 hex = "0.4"
 
 reqwest = { version = "0.12.24", features = ["json", "rustls-tls"] }
-deadpool = "0.12.3"
 native-tls = "0.2.14"
 postgres-native-tls = "0.5.2"
 
