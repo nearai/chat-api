@@ -25,6 +25,8 @@ static TEST_ENV_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 
 const TEST_ENCRYPTION_KEY: &str =
     "3031323334353637383961626364656666656463626139383736353433323130";
+const TEST_DATABASE_ENCRYPTION_KEY: &str =
+    "4242424242424242424242424242424242424242424242424242424242424242";
 
 /// Configuration for test server with Cloud API mocking
 #[derive(Default)]
@@ -62,6 +64,12 @@ pub struct TestServerConfig {
     pub aml_report_repo: Option<Arc<dyn services::aml::AmlReportRepository>>,
     /// Enable confidential database writes/backfill for encryption tests.
     pub database_encryption_write_enabled: Option<bool>,
+    pub database_encryption_agent_secrets_write_enabled: Option<bool>,
+    /// Local Google endpoints used by callback tests; both must be supplied together.
+    pub google_oauth_token_url: Option<String>,
+    pub google_oauth_user_info_url: Option<String>,
+    /// Override agent operations for gateway credential issuance tests.
+    pub agent_service: Option<Arc<dyn services::agent::AgentService>>,
 }
 
 /// Restrictive rate limit config for rate limit tests.
@@ -88,9 +96,10 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     server
 }
 
-async fn create_test_server_and_db_inner(
+/// Expose shared state for tests that exercise startup tasks such as job recovery.
+pub async fn create_test_server_with_state(
     test_config: TestServerConfig,
-) -> (TestServer, database::Database) {
+) -> (TestServer, database::Database, AppState) {
     // Load .env file
     dotenvy::dotenv().ok();
 
@@ -102,7 +111,7 @@ async fn create_test_server_and_db_inner(
                 std::env::set_var("ENCRYPTION_KEY", TEST_ENCRYPTION_KEY);
             }
             if std::env::var_os("DB_ENCRYPTION_KEY").is_none() {
-                std::env::set_var("DB_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY);
+                std::env::set_var("DB_ENCRYPTION_KEY", TEST_DATABASE_ENCRYPTION_KEY);
             }
         })
         .await;
@@ -111,6 +120,9 @@ async fn create_test_server_and_db_inner(
     let mut config = config::Config::from_env();
     if let Some(enabled) = test_config.database_encryption_write_enabled {
         config.database_encryption.write_enabled = enabled;
+    }
+    if let Some(enabled) = test_config.database_encryption_agent_secrets_write_enabled {
+        config.database_encryption.agent_secrets_write_enabled = enabled;
     }
     if let Some(base_url) = test_config.email_resend_base_url.clone() {
         config.email_auth.resend_base_url = base_url;
@@ -130,6 +142,7 @@ async fn create_test_server_and_db_inner(
             key,
             key_id: config.database_encryption.key_id.clone(),
             write_enabled: config.database_encryption.write_enabled,
+            agent_secrets_write_enabled: config.database_encryption.agent_secrets_write_enabled,
         });
 
     // Run migrations only once, even when tests run in parallel
@@ -163,7 +176,7 @@ async fn create_test_server_and_db_inner(
 
     // Create services
     let http_client = reqwest::Client::new();
-    let oauth_service = Arc::new(services::auth::OAuthServiceImpl::new(
+    let oauth_service = services::auth::OAuthServiceImpl::new(
         oauth_repo.clone(),
         session_repo.clone(),
         user_repo.clone(),
@@ -174,7 +187,19 @@ async fn create_test_server_and_db_inner(
         config.oauth.github_client_secret.clone(),
         config.oauth.redirect_uri.clone(),
         config.near.rpc_url.clone(),
-    ));
+    );
+    #[cfg(feature = "test")]
+    let oauth_service = match (
+        test_config.google_oauth_token_url.clone(),
+        test_config.google_oauth_user_info_url.clone(),
+    ) {
+        (Some(token_url), Some(user_info_url)) => {
+            oauth_service.with_google_test_endpoints(token_url, user_info_url)
+        }
+        (None, None) => oauth_service,
+        _ => panic!("Google OAuth test token and user-info URLs must be configured together"),
+    };
+    let oauth_service = Arc::new(oauth_service);
 
     let email_auth_service: Arc<dyn services::auth::ports::EmailAuthService> =
         if let Some(turnstile_verify_url) = email_turnstile_verify_url {
@@ -403,7 +428,7 @@ async fn create_test_server_and_db_inner(
         conversation_service,
         conversation_share_service,
         file_service,
-        agent_service,
+        agent_service: test_config.agent_service.unwrap_or(agent_service),
         agent_repository: agent_repo,
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
@@ -434,18 +459,19 @@ async fn create_test_server_and_db_inner(
     };
 
     // Create router
-    let app = create_router_with_cors(app_state, config::CorsConfig::default());
+    let app = create_router_with_cors(app_state.clone(), config::CorsConfig::default());
 
     // Create test server
     let server = TestServer::new(app).expect("Failed to create test server");
-    (server, db)
+    (server, db, app_state)
 }
 
 /// Create a test server and database for tests that need to pre-populate DB (e.g. token/cost rate limit).
 pub async fn create_test_server_and_db(
     test_config: TestServerConfig,
 ) -> (TestServer, database::Database) {
-    create_test_server_and_db_inner(test_config).await
+    let (server, db, _) = create_test_server_with_state(test_config).await;
+    (server, db)
 }
 
 /// Helper function to get/create a user and get a session token via mock login.

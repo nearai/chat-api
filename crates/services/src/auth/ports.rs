@@ -6,15 +6,53 @@ use crate::types::{SessionId, UserId};
 
 // Re-export OAuthProvider from user module for convenience
 pub use crate::user::ports::OAuthProvider;
+pub use oauth2::PkceCodeVerifier;
 
 /// Represents an OAuth session state
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct OAuthState {
     pub state: String,
     pub provider: OAuthProvider,
     pub redirect_uri: String,
     pub frontend_callback: Option<String>,
+    pub frontend_code_challenge: String,
+    pub frontend_state: String,
+    /// Secret for the provider authorization-code exchange, independent of the
+    /// browser's frontend callback verifier. Debug output is redacted by oauth2.
+    pub provider_code_verifier: Option<PkceCodeVerifier>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OAuthCallbackSuccess {
+    pub session: UserSession,
+    pub frontend_callback: Option<String>,
+    pub frontend_code_challenge: String,
+    pub frontend_state: String,
+    pub is_new_user: bool,
+    pub provider: OAuthProvider,
+}
+
+#[derive(Debug, Clone)]
+pub struct OAuthCallbackCode {
+    pub session_id: SessionId,
+    pub code_challenge: String,
+    pub is_new_user: bool,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OAuthCodeExchangeSuccess {
+    pub session: UserSession,
+    pub is_new_user: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OAuthCodeExchangeError {
+    #[error("Invalid or expired OAuth callback code")]
+    InvalidOrExpired,
+    #[error("Internal error: {0}")]
+    Internal(#[from] anyhow::Error),
 }
 
 /// Represents OAuth tokens
@@ -209,6 +247,22 @@ pub trait OAuthRepository: Send + Sync {
     /// Retrieve and remove OAuth state (one-time use)
     async fn consume_oauth_state(&self, state: &str) -> anyhow::Result<Option<OAuthState>>;
 
+    /// Store a short-lived, PKCE-bound frontend callback code by its hash.
+    async fn store_callback_code(
+        &self,
+        code_hash: &str,
+        callback_code: &OAuthCallbackCode,
+    ) -> anyhow::Result<()>;
+
+    /// Atomically consume a non-expired callback code and rotate the associated
+    /// session token only when its PKCE challenge matches. A wrong verifier or
+    /// a failed transaction must not burn the legitimate code.
+    async fn exchange_callback_code(
+        &self,
+        code_hash: &str,
+        code_challenge: &str,
+    ) -> anyhow::Result<Option<OAuthCodeExchangeSuccess>>;
+
     /// Store OAuth tokens for a user
     async fn store_oauth_tokens(
         &self,
@@ -252,6 +306,8 @@ pub trait OAuthService: Send + Sync {
         provider: OAuthProvider,
         redirect_uri: String,
         frontend_callback: Option<String>,
+        frontend_code_challenge: String,
+        frontend_state: String,
     ) -> anyhow::Result<String>;
 
     /// Unified callback handler that determines provider from state
@@ -260,7 +316,23 @@ pub trait OAuthService: Send + Sync {
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)>;
+    ) -> anyhow::Result<OAuthCallbackSuccess>;
+
+    /// Create the opaque code placed in a frontend callback URL. Only its hash
+    /// is persisted, and it is bound to the frontend's PKCE challenge.
+    async fn create_frontend_callback_code(
+        &self,
+        session_id: SessionId,
+        code_challenge: String,
+        is_new_user: bool,
+    ) -> anyhow::Result<String>;
+
+    /// Exchange a one-time callback code for a freshly rotated session token.
+    async fn exchange_frontend_callback_code(
+        &self,
+        code: String,
+        code_verifier: String,
+    ) -> Result<OAuthCodeExchangeSuccess, OAuthCodeExchangeError>;
 
     /// Refresh an access token
     async fn refresh_token(
@@ -277,6 +349,6 @@ pub trait OAuthService: Send + Sync {
     async fn authenticate_near(
         &self,
         signed_message: super::near::SignedMessage,
-        payload: near_api::signer::NEP413Payload,
+        payload: near_kit::standards::nep413::SignMessageParams,
     ) -> anyhow::Result<(UserSession, bool)>;
 }

@@ -1,4 +1,4 @@
-use crate::encryption;
+use crate::agent_secrets;
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -10,15 +10,6 @@ use services::user_usage::METRIC_KEY_LLM_TOKENS;
 use services::UserId;
 use uuid::Uuid;
 
-fn encrypt_token(token: Option<String>) -> Result<Option<String>, anyhow::Error> {
-    token.map(|token| encryption::encrypt(&token)).transpose()
-}
-
-fn decrypt_token(token: Option<String>) -> Option<String> {
-    // Decrypt is allowed to fall back for migration of existing plaintext data
-    token.map(|t| encryption::decrypt(&t).unwrap_or(t))
-}
-
 pub struct PostgresAgentRepository {
     pool: DbPool,
 }
@@ -29,6 +20,15 @@ impl PostgresAgentRepository {
     }
 
     fn encode_field(&self, column: &str, id: Uuid, value: String) -> anyhow::Result<String> {
+        if column == "instance_token" {
+            return agent_secrets::encrypt(
+                self.pool.field_encryption().as_ref(),
+                "agent_instances",
+                column,
+                id,
+                &value,
+            );
+        }
         match self.pool.field_encryption() {
             Some(config) if config.write_enabled => crate::field_encryption::encrypt(
                 &config.key,
@@ -54,6 +54,15 @@ impl PostgresAgentRepository {
     }
 
     fn decode_field(&self, column: &str, id: Uuid, value: String) -> anyhow::Result<String> {
+        if column == "instance_token" {
+            return agent_secrets::decrypt(
+                self.pool.field_encryption().as_ref(),
+                "agent_instances",
+                column,
+                id,
+                &value,
+            );
+        }
         match self.pool.field_encryption() {
             Some(config) => crate::field_encryption::decrypt_if_encrypted(
                 &config.key,
@@ -76,6 +85,18 @@ impl PostgresAgentRepository {
         value
             .map(|value| self.decode_field(column, id, value))
             .transpose()
+    }
+
+    /// Listing metadata must not fail because one instance has an unreadable
+    /// token. Authentication lookups still use the strict decoder above.
+    fn decode_list_instance_token(&self, id: Uuid, value: Option<String>) -> Option<String> {
+        match self.decode_optional_field("instance_token", id, value) {
+            Ok(token) => token,
+            Err(_) => {
+                tracing::warn!(instance_id = %id, "Unreadable instance token omitted from list");
+                None
+            }
+        }
     }
 
     async fn set_instance_status_with_audit(
@@ -164,7 +185,8 @@ impl AgentRepository for PostgresAgentRepository {
             .unwrap_or(DEFAULT_AGENT_SERVICE_TYPE);
         let id = Uuid::new_v4();
         let instance_url = self.encode_optional_field("instance_url", id, params.instance_url)?;
-        let instance_token = encrypt_token(params.instance_token)?;
+        let instance_token =
+            self.encode_optional_field("instance_token", id, params.instance_token)?;
         let dashboard_url =
             self.encode_optional_field("dashboard_url", id, params.dashboard_url)?;
 
@@ -184,7 +206,7 @@ impl AgentRepository for PostgresAgentRepository {
             name: row.get(3),
             public_ssh_key: row.get(5),
             instance_url: self.decode_optional_field("instance_url", id, row.get(6))?,
-            instance_token: decrypt_token(row.get(7)),
+            instance_token: self.decode_optional_field("instance_token", row.get(0), row.get(7))?,
             dashboard_url: self.decode_optional_field("dashboard_url", id, row.get(8))?,
             agent_api_base_url: row.get(9),
             service_type: row.get(4),
@@ -216,7 +238,7 @@ impl AgentRepository for PostgresAgentRepository {
                 name: r.get(3),
                 public_ssh_key: r.get(5),
                 instance_url: self.decode_optional_field("instance_url", r.get(0), r.get(6))?,
-                instance_token: decrypt_token(r.get(7)),
+                instance_token: self.decode_optional_field("instance_token", r.get(0), r.get(7))?,
                 dashboard_url: self.decode_optional_field("dashboard_url", r.get(0), r.get(8))?,
                 agent_api_base_url: r.get(9),
                 service_type: r.get(4),
@@ -251,7 +273,7 @@ impl AgentRepository for PostgresAgentRepository {
                 name: r.get(3),
                 public_ssh_key: r.get(5),
                 instance_url: self.decode_optional_field("instance_url", r.get(0), r.get(6))?,
-                instance_token: decrypt_token(r.get(7)),
+                instance_token: self.decode_optional_field("instance_token", r.get(0), r.get(7))?,
                 dashboard_url: self.decode_optional_field("dashboard_url", r.get(0), r.get(8))?,
                 agent_api_base_url: r.get(9),
                 service_type: r.get(4),
@@ -291,7 +313,7 @@ impl AgentRepository for PostgresAgentRepository {
                 name: r.get(3),
                 public_ssh_key: r.get(5),
                 instance_url: self.decode_optional_field("instance_url", r.get(0), r.get(6))?,
-                instance_token: decrypt_token(r.get(7)),
+                instance_token: self.decode_optional_field("instance_token", r.get(0), r.get(7))?,
                 dashboard_url: self.decode_optional_field("dashboard_url", r.get(0), r.get(8))?,
                 agent_api_base_url: r.get(9),
                 service_type: r.get(4),
@@ -355,7 +377,7 @@ impl AgentRepository for PostgresAgentRepository {
                     name: r.get(3),
                     public_ssh_key: r.get(5),
                     instance_url: self.decode_optional_field("instance_url", r.get(0), r.get(6))?,
-                    instance_token: decrypt_token(r.get(7)),
+                    instance_token: self.decode_list_instance_token(r.get(0), r.get(7)),
                     dashboard_url: self.decode_optional_field(
                         "dashboard_url",
                         r.get(0),
@@ -427,7 +449,7 @@ impl AgentRepository for PostgresAgentRepository {
                     name: r.get(3),
                     public_ssh_key: r.get(5),
                     instance_url: self.decode_optional_field("instance_url", r.get(0), r.get(6))?,
-                    instance_token: decrypt_token(r.get(7)),
+                    instance_token: self.decode_list_instance_token(r.get(0), r.get(7)),
                     dashboard_url: self.decode_optional_field(
                         "dashboard_url",
                         r.get(0),
@@ -477,7 +499,11 @@ impl AgentRepository for PostgresAgentRepository {
                         row.get(0),
                         row.get(6),
                     )?,
-                    instance_token: decrypt_token(row.get(7)),
+                    instance_token: self.decode_optional_field(
+                        "instance_token",
+                        row.get(0),
+                        row.get(7),
+                    )?,
                     dashboard_url: self.decode_optional_field(
                         "dashboard_url",
                         row.get(0),
@@ -512,7 +538,11 @@ impl AgentRepository for PostgresAgentRepository {
                         row.get(0),
                         row.get(6),
                     )?,
-                    instance_token: decrypt_token(row.get(7)),
+                    instance_token: self.decode_optional_field(
+                        "instance_token",
+                        row.get(0),
+                        row.get(7),
+                    )?,
                     dashboard_url: self.decode_optional_field(
                         "dashboard_url",
                         row.get(0),
@@ -547,7 +577,11 @@ impl AgentRepository for PostgresAgentRepository {
                         row.get(0),
                         row.get(6),
                     )?,
-                    instance_token: decrypt_token(row.get(7)),
+                    instance_token: self.decode_optional_field(
+                        "instance_token",
+                        row.get(0),
+                        row.get(7),
+                    )?,
                     dashboard_url: self.decode_optional_field(
                         "dashboard_url",
                         row.get(0),
@@ -582,7 +616,11 @@ impl AgentRepository for PostgresAgentRepository {
                         row.get(0),
                         row.get(6),
                     )?,
-                    instance_token: decrypt_token(row.get(7)),
+                    instance_token: self.decode_optional_field(
+                        "instance_token",
+                        row.get(0),
+                        row.get(7),
+                    )?,
                     dashboard_url: self.decode_optional_field(
                         "dashboard_url",
                         row.get(0),
@@ -1143,15 +1181,28 @@ impl AgentRepository for PostgresAgentRepository {
             )
             .await?;
 
-        Ok(row.map(|r| {
+        row.map(|r| -> anyhow::Result<_> {
             let encrypted_secret: String = r.get(0);
             let encrypted_passphrase: String = r.get(1);
-            // Decrypt credentials; fall back to plaintext if decryption fails (backward compatibility)
-            let secret = encryption::decrypt(&encrypted_secret).unwrap_or(encrypted_secret);
-            let passphrase =
-                encryption::decrypt(&encrypted_passphrase).unwrap_or(encrypted_passphrase);
-            (secret, passphrase)
-        }))
+            let config = self.pool.field_encryption();
+            // user_id is the stable unique UUID; the table's primary key is a serial integer.
+            let secret = agent_secrets::decrypt(
+                config.as_ref(),
+                "user_passkey_credentials",
+                "auth_secret",
+                user_id.0,
+                &encrypted_secret,
+            )?;
+            let passphrase = agent_secrets::decrypt(
+                config.as_ref(),
+                "user_passkey_credentials",
+                "backup_passphrase",
+                user_id.0,
+                &encrypted_passphrase,
+            )?;
+            Ok((secret, passphrase))
+        })
+        .transpose()
     }
 
     async fn upsert_user_passkey_credentials(
@@ -1162,8 +1213,21 @@ impl AgentRepository for PostgresAgentRepository {
     ) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
 
-        let encrypted_secret = encryption::encrypt(auth_secret)?;
-        let encrypted_passphrase = encryption::encrypt(backup_passphrase)?;
+        let config = self.pool.field_encryption();
+        let encrypted_secret = agent_secrets::encrypt(
+            config.as_ref(),
+            "user_passkey_credentials",
+            "auth_secret",
+            user_id.0,
+            auth_secret,
+        )?;
+        let encrypted_passphrase = agent_secrets::encrypt(
+            config.as_ref(),
+            "user_passkey_credentials",
+            "backup_passphrase",
+            user_id.0,
+            backup_passphrase,
+        )?;
 
         client
             .execute(
@@ -1225,7 +1289,7 @@ impl AgentRepository for PostgresAgentRepository {
                     name: r.get(3),
                     public_ssh_key: r.get(5),
                     instance_url: self.decode_optional_field("instance_url", id, r.get(6))?,
-                    instance_token: decrypt_token(r.get(7)),
+                    instance_token: self.decode_list_instance_token(id, r.get(7)),
                     dashboard_url: self.decode_optional_field("dashboard_url", id, r.get(8))?,
                     agent_api_base_url: r.get(9),
                     service_type: r.get(4),
@@ -1244,12 +1308,14 @@ impl AgentRepository for PostgresAgentRepository {
         instance_id: Uuid,
         agent_api_base_url: Option<String>,
         instance_url: Option<String>,
-        encrypted_instance_token: Option<String>,
+        instance_token: Option<String>,
         dashboard_url: Option<String>,
         name: Option<String>,
     ) -> anyhow::Result<AgentInstance> {
         let client = self.pool.get().await?;
         let instance_url = self.encode_optional_field("instance_url", instance_id, instance_url)?;
+        let instance_token =
+            self.encode_optional_field("instance_token", instance_id, instance_token)?;
         let dashboard_url =
             self.encode_optional_field("dashboard_url", instance_id, dashboard_url)?;
 
@@ -1268,7 +1334,7 @@ impl AgentRepository for PostgresAgentRepository {
             param_values.push(Box::new(val.clone()));
             param_idx += 1;
         }
-        if let Some(ref val) = encrypted_instance_token {
+        if let Some(ref val) = instance_token {
             set_clauses.push(format!("instance_token = ${}", param_idx));
             param_values.push(Box::new(val.clone()));
             param_idx += 1;
@@ -1317,7 +1383,7 @@ impl AgentRepository for PostgresAgentRepository {
             name: row.get(3),
             public_ssh_key: row.get(5),
             instance_url: self.decode_optional_field("instance_url", row.get(0), row.get(6))?,
-            instance_token: decrypt_token(row.get(7)),
+            instance_token: self.decode_optional_field("instance_token", row.get(0), row.get(7))?,
             dashboard_url: self.decode_optional_field("dashboard_url", row.get(0), row.get(8))?,
             agent_api_base_url: row.get(9),
             service_type: row.get(4),

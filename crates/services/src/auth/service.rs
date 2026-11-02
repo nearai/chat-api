@@ -1,11 +1,12 @@
 use anyhow::Context;
 use async_trait::async_trait;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use near_api::signer::NEP413Payload;
+use near_kit::standards::nep413::SignMessageParams;
 use oauth2::{
-    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl,
-    RefreshToken, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
+    PkceCodeChallenge, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 use rand::Rng;
 use serde::Deserialize;
@@ -14,7 +15,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::ports::{
-    EmailAuthService, EmailAuthSuccess, EmailVerificationChallengeRepository, OAuthRepository,
+    EmailAuthService, EmailAuthSuccess, EmailVerificationChallengeRepository, OAuthCallbackCode,
+    OAuthCallbackSuccess, OAuthCodeExchangeError, OAuthCodeExchangeSuccess, OAuthRepository,
     OAuthService, OAuthState, OAuthTokens, OAuthUserInfo, RequestEmailCodeError, SessionRepository,
     UserSession, VerifyEmailCodeError,
 };
@@ -24,6 +26,15 @@ use crate::user::ports::{OAuthProvider, UserRepository};
 
 type HmacSha256 = Hmac<Sha256>;
 const TURNSTILE_SITEVERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+const FRONTEND_CALLBACK_CODE_TTL_MINUTES: i64 = 2;
+
+fn sha256_hex(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+fn pkce_s256_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
 
 /// Custom error type for HTTP client
 #[derive(Debug, thiserror::Error)]
@@ -90,6 +101,8 @@ pub struct OAuthServiceImpl {
     near_auth: NearAuthService,
     google_client_id: String,
     google_client_secret: String,
+    google_token_url: String,
+    google_user_info_url: String,
     github_client_id: String,
     github_client_secret: String,
     redirect_uri: String,
@@ -123,17 +136,28 @@ impl OAuthServiceImpl {
             near_auth,
             google_client_id,
             google_client_secret,
+            google_token_url: "https://oauth2.googleapis.com/token".to_string(),
+            google_user_info_url: "https://www.googleapis.com/oauth2/v2/userinfo".to_string(),
             github_client_id,
             github_client_secret,
             redirect_uri,
         }
     }
 
+    /// Override Google endpoints for integration tests without contacting the
+    /// real provider. This is intentionally unavailable in production builds.
+    #[cfg(feature = "test")]
+    pub fn with_google_test_endpoints(mut self, token_url: String, user_info_url: String) -> Self {
+        self.google_token_url = token_url;
+        self.google_user_info_url = user_info_url;
+        self
+    }
+
     async fn fetch_google_user_info(&self, access_token: &str) -> anyhow::Result<OAuthUserInfo> {
         tracing::debug!("Fetching Google user info");
         let client = reqwest::Client::new();
         let response = client
-            .get("https://www.googleapis.com/oauth2/v2/userinfo")
+            .get(&self.google_user_info_url)
             .bearer_auth(access_token)
             .send()
             .await?;
@@ -332,13 +356,14 @@ impl OAuthServiceImpl {
     }
 
     /// Internal implementation that handles the callback with a pre-validated state
-    /// Returns (UserSession, frontend_callback_url, is_new_user, provider)
+    /// Returns the authenticated session and the frontend handoff metadata that
+    /// was fixed at OAuth initiation time.
     async fn handle_callback_impl(
         &self,
         provider: OAuthProvider,
         code: String,
         oauth_state: OAuthState,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)> {
+    ) -> anyhow::Result<OAuthCallbackSuccess> {
         tracing::info!(
             provider = ?provider,
             redirect_uri_len = oauth_state.redirect_uri.len(),
@@ -352,7 +377,7 @@ impl OAuthServiceImpl {
                 &self.google_client_id,
                 &self.google_client_secret,
                 "https://accounts.google.com/o/oauth2/v2/auth",
-                "https://oauth2.googleapis.com/token",
+                self.google_token_url.as_str(),
             ),
             OAuthProvider::Github => (
                 &self.github_client_id,
@@ -373,8 +398,12 @@ impl OAuthServiceImpl {
             .set_token_uri(TokenUrl::new(token_url.to_string())?)
             .set_redirect_uri(RedirectUrl::new(oauth_state.redirect_uri.clone())?);
 
+        let provider_verifier = oauth_state.provider_code_verifier.ok_or_else(|| {
+            anyhow::anyhow!("OAuth state is missing provider PKCE; restart sign-in")
+        })?;
         let token_result = client
             .exchange_code(AuthorizationCode::new(code))
+            .set_pkce_verifier(provider_verifier)
             .request_async(&async_http_client)
             .await
             .map_err(|e| {
@@ -417,12 +446,14 @@ impl OAuthServiceImpl {
             session.session_id
         );
 
-        Ok((
+        Ok(OAuthCallbackSuccess {
             session,
-            oauth_state.frontend_callback,
+            frontend_callback: oauth_state.frontend_callback,
+            frontend_code_challenge: oauth_state.frontend_code_challenge,
+            frontend_state: oauth_state.frontend_state,
             is_new_user,
             provider,
-        ))
+        })
     }
 }
 
@@ -813,6 +844,8 @@ impl OAuthService for OAuthServiceImpl {
         provider: OAuthProvider,
         redirect_uri: String,
         frontend_callback: Option<String>,
+        frontend_code_challenge: String,
+        frontend_state: String,
     ) -> anyhow::Result<String> {
         tracing::info!(
             provider = ?provider,
@@ -828,7 +861,7 @@ impl OAuthService for OAuthServiceImpl {
                 &self.google_client_id,
                 &self.google_client_secret,
                 "https://accounts.google.com/o/oauth2/v2/auth",
-                "https://oauth2.googleapis.com/token",
+                self.google_token_url.as_str(),
                 vec!["openid", "email", "profile"],
             ),
             OAuthProvider::Github => (
@@ -851,7 +884,10 @@ impl OAuthService for OAuthServiceImpl {
             .set_token_uri(TokenUrl::new(token_url.to_string())?)
             .set_redirect_uri(RedirectUrl::new(redirect_uri.clone())?);
 
-        let mut auth_request = client.authorize_url(CsrfToken::new_random);
+        let (provider_challenge, provider_verifier) = PkceCodeChallenge::new_random_sha256();
+        let mut auth_request = client
+            .authorize_url(CsrfToken::new_random)
+            .set_pkce_challenge(provider_challenge);
         for scope in scopes {
             auth_request = auth_request.add_scope(Scope::new(scope.to_string()));
         }
@@ -863,6 +899,9 @@ impl OAuthService for OAuthServiceImpl {
             provider,
             redirect_uri: redirect_uri.clone(),
             frontend_callback: frontend_callback.clone(),
+            frontend_code_challenge,
+            frontend_state,
+            provider_code_verifier: Some(provider_verifier),
             created_at: Utc::now(),
         };
 
@@ -894,7 +933,7 @@ impl OAuthService for OAuthServiceImpl {
                 &self.google_client_id,
                 &self.google_client_secret,
                 "https://accounts.google.com/o/oauth2/v2/auth",
-                "https://oauth2.googleapis.com/token",
+                self.google_token_url.as_str(),
             ),
             OAuthProvider::Github => (
                 &self.github_client_id,
@@ -943,7 +982,7 @@ impl OAuthService for OAuthServiceImpl {
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)> {
+    ) -> anyhow::Result<OAuthCallbackSuccess> {
         let state_present = !state.is_empty();
         let state_len = state.len();
         tracing::info!(state_present, state_len, "Handling unified OAuth callback");
@@ -958,6 +997,52 @@ impl OAuthService for OAuthServiceImpl {
             .await
     }
 
+    async fn create_frontend_callback_code(
+        &self,
+        session_id: SessionId,
+        code_challenge: String,
+        is_new_user: bool,
+    ) -> anyhow::Result<String> {
+        let mut code_bytes = [0_u8; 32];
+        rand::rng().fill(&mut code_bytes);
+        let code = URL_SAFE_NO_PAD.encode(code_bytes);
+        let callback_code = OAuthCallbackCode {
+            session_id,
+            code_challenge,
+            is_new_user,
+            expires_at: Utc::now() + chrono::Duration::minutes(FRONTEND_CALLBACK_CODE_TTL_MINUTES),
+        };
+
+        if let Err(error) = self
+            .oauth_repository
+            .store_callback_code(&sha256_hex(&code), &callback_code)
+            .await
+        {
+            if let Err(cleanup_error) = self.session_repository.delete_session(session_id).await {
+                tracing::error!(
+                    %session_id,
+                    error = %cleanup_error,
+                    "Failed to remove session after OAuth callback-code storage failure"
+                );
+            }
+            return Err(error);
+        }
+
+        Ok(code)
+    }
+
+    async fn exchange_frontend_callback_code(
+        &self,
+        code: String,
+        code_verifier: String,
+    ) -> Result<OAuthCodeExchangeSuccess, OAuthCodeExchangeError> {
+        self.oauth_repository
+            .exchange_callback_code(&sha256_hex(&code), &pkce_s256_challenge(&code_verifier))
+            .await
+            .map_err(OAuthCodeExchangeError::Internal)?
+            .ok_or(OAuthCodeExchangeError::InvalidOrExpired)
+    }
+
     async fn revoke_session(&self, session_id: SessionId) -> anyhow::Result<()> {
         tracing::info!("Revoking session: session_id={}", session_id);
 
@@ -970,7 +1055,7 @@ impl OAuthService for OAuthServiceImpl {
     async fn authenticate_near(
         &self,
         signed_message: super::near::SignedMessage,
-        payload: NEP413Payload,
+        payload: SignMessageParams,
     ) -> anyhow::Result<(UserSession, bool)> {
         self.near_auth
             .verify_and_authenticate(signed_message, payload)

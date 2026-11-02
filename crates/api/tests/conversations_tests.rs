@@ -1,353 +1,644 @@
 mod common;
 
-use common::create_test_server;
-use serde_json::json;
+use api::routes::api::STATEFUL_API_RETIRED_MESSAGE;
+use axum_test::{TestResponse, TestServer};
+use common::{create_test_server_and_db, mock_login, TestServerConfig};
+use http::{HeaderName, HeaderValue, Method, StatusCode};
+use serde_json::{json, Value};
+use services::conversation::ports::{
+    ConversationShareRepository, NewConversationShare, SharePermission, ShareRecipient,
+    ShareRecipientKind, ShareType,
+};
+use services::user::ports::UserRepository;
+use uuid::Uuid;
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const SESSION_TOKEN: &str = "sess_7770c53028d8400a9c69600d800ab86e";
+fn bearer(token: &str) -> (HeaderName, HeaderValue) {
+    (
+        HeaderName::from_static("authorization"),
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("test token header"),
+    )
+}
+
+fn assert_no_store(response: &TestResponse) {
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+}
+
+fn assert_retired_mutation(response: TestResponse) {
+    assert_eq!(response.status_code(), StatusCode::GONE);
+    assert_no_store(&response);
+    let body: Value = response.json();
+    assert_eq!(
+        body.get("error").and_then(Value::as_str),
+        Some(STATEFUL_API_RETIRED_MESSAGE)
+    );
+}
+
+async fn stage_one_fixture_with_db() -> (
+    TestServer,
+    MockServer,
+    database::Database,
+    String,
+    String,
+    services::UserId,
+) {
+    let upstream = MockServer::start().await;
+    let conversation_id = format!("conv_stage1_{}", Uuid::new_v4());
+
+    Mock::given(method("POST"))
+        .and(path("/conversations/batch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": conversation_id.clone(), "object": "conversation"}],
+            "missing_ids": []
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/conversations/{conversation_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": conversation_id.clone(),
+            "object": "conversation",
+            "metadata": {"title": "temporary export view"}
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/conversations/{conversation_id}/items")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [],
+            "first_id": null,
+            "last_id": null,
+            "has_more": false
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/conversations/{conversation_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": conversation_id.clone(),
+            "deleted": true
+        })))
+        .mount(&upstream)
+        .await;
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        proxy_base_url: Some(upstream.uri()),
+        ..Default::default()
+    })
+    .await;
+    let email = format!("stage-one-views-{}@example.com", Uuid::new_v4());
+    let token = mock_login(&server, &email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(&email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    let client = db.pool().get().await.expect("db client");
+
+    client
+        .execute(
+            "INSERT INTO conversations (id, user_id) VALUES ($1, $2)",
+            &[&conversation_id, &user.id],
+        )
+        .await
+        .expect("insert conversation");
+    (server, upstream, db, token, conversation_id, user.id)
+}
+
+async fn stage_one_fixture() -> (TestServer, MockServer, String, String) {
+    let (server, upstream, _db, token, conversation_id, _owner_user_id) =
+        stage_one_fixture_with_db().await;
+    (server, upstream, token, conversation_id)
+}
 
 #[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
-async fn test_conversation_workflow() {
-    let server = create_test_server().await;
+async fn stage_one_conversation_views_remain_readable() {
+    let (server, _upstream, token, conversation_id) = stage_one_fixture().await;
+    let auth = bearer(&token);
 
-    println!("\n=== Test: Conversation Workflow ===");
-
-    // Step 1: Create a conversation using OpenAI's API
-    println!("1. Creating a conversation via OpenAI...");
-    let create_conv_body = json!({
-        "metadata": {"test": "e2e"}
-    });
-
-    let response = server
-        .post("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&create_conv_body)
-        .await;
-
-    let status = response.status_code();
-    println!("   Status: {status}");
-
-    let conversation_id = if status.is_success() {
-        let body: serde_json::Value = response.json();
-        println!("   ✓ Conversation created successfully");
-        let conv_id = body
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .expect("Conversation should have an ID");
-        println!("   Conversation ID: {conv_id}");
-        conv_id
-    } else {
-        let error_text = response.text();
-        println!("   ✗ Failed: {error_text}");
-        panic!("Failed to create conversation");
-    };
-
-    // Step 2: Add first response to the conversation
-    println!("\n2. Adding first response to the conversation...");
-    let request_body = json!({
-        "conversation": conversation_id,
-        "model": "gpt-4o",
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": "Say hello!"
-            }
-        ]
-    });
-
-    let response = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&request_body)
-        .await;
-
-    let status = response.status_code();
-    println!("   Status: {status}");
-
-    if status.is_success() {
-        let body: serde_json::Value = response.json();
-        println!("   ✓ First response created successfully");
-        println!(
-            "   Response ID: {}",
-            body.get("id").unwrap_or(&json!("N/A"))
-        );
-    } else {
-        let error_text = response.text();
-        println!("   ✗ Failed: {error_text}");
-        panic!("Failed to create first response");
-    };
-
-    // Step 3: Add second response to the same conversation
-    println!("\n3. Adding second response to the conversation...");
-    let request_body = json!({
-        "conversation": conversation_id,
-        "model": "gpt-4o",
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": "Tell me a joke!"
-            }
-        ]
-    });
-
-    let response = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&request_body)
-        .await;
-
-    let status = response.status_code();
-    println!("   Status: {status}");
-
-    if status.is_success() {
-        let body: serde_json::Value = response.json();
-        println!("   ✓ Second response created successfully");
-        println!(
-            "   Response ID: {}",
-            body.get("id").unwrap_or(&json!("N/A"))
-        );
-    } else {
-        let error_text = response.text();
-        println!("   ✗ Failed: {error_text}");
-        panic!("Failed to create second response");
-    };
-
-    // Step 4: List conversations (fetches from OpenAI with details)
-    println!("\n4. Listing conversations (should fetch details from OpenAI)...");
     let response = server
         .get("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
+        .add_header(auth.0.clone(), auth.1.clone())
         .await;
+    assert_eq!(response.status_code(), StatusCode::OK);
+    assert_no_store(&response);
+    let conversations: Vec<Value> = response.json();
+    assert_eq!(conversations[0]["id"], conversation_id);
 
-    assert_eq!(response.status_code(), 200, "Should list conversations");
+    for path in [
+        format!("/v1/conversations/{conversation_id}"),
+        format!("/v1/conversations/{conversation_id}/items"),
+    ] {
+        let response = server
+            .get(&path)
+            .add_header(auth.0.clone(), auth.1.clone())
+            .await;
+        assert_eq!(response.status_code(), StatusCode::OK, "GET {path}");
+        assert_no_store(&response);
+    }
+}
 
-    let conversations: Vec<serde_json::Value> = response.json();
-    println!("   Found {} total conversations", conversations.len());
+#[tokio::test]
+async fn conversation_detail_and_items_honor_existing_access_checks() {
+    let (server, _upstream, _owner_token, conversation_id) = stage_one_fixture().await;
+    let other_email = format!("stage-one-non-owner-{}@example.com", Uuid::new_v4());
+    let other_token = mock_login(&server, &other_email).await;
+    let auth = bearer(&other_token);
 
-    // Find our conversation
-    let our_conv = conversations.iter().find(|c| {
-        c.get("id")
-            .and_then(|v| v.as_str())
-            .map(|id| id == conversation_id)
-            .unwrap_or(false)
-    });
+    for path in [
+        format!("/v1/conversations/{conversation_id}"),
+        format!("/v1/conversations/{conversation_id}/items"),
+    ] {
+        let response = server
+            .get(&path)
+            .add_header(auth.0.clone(), auth.1.clone())
+            .await;
+        assert_eq!(response.status_code(), StatusCode::NOT_FOUND, "GET {path}");
+        assert_no_store(&response);
+    }
+}
 
-    if let Some(conv) = our_conv {
-        println!("   ✓ Found our conversation in the list!");
-        println!("      ID: {}", conv.get("id").unwrap_or(&json!("N/A")));
+#[tokio::test]
+async fn anonymous_private_or_session_scoped_reads_do_not_gain_access() {
+    let (server, _upstream, _token, conversation_id) = stage_one_fixture().await;
 
-        // Verify that we got OpenAI conversation details (not just ID)
-        if conv.get("created_at").is_some() {
-            println!("      Created: {}", conv.get("created_at").unwrap());
-        }
-        if conv.get("updated_at").is_some() {
-            println!("      Updated: {}", conv.get("updated_at").unwrap());
-        }
-        if conv.get("metadata").is_some() {
-            println!("      Metadata: {:?}", conv.get("metadata").unwrap());
-        }
-
-        println!("   ✓ Conversation details fetched from OpenAI");
-    } else {
-        println!("   ✗ Our conversation not found in list");
-        panic!("Conversation tracking is not working properly");
+    for path in [
+        format!("/v1/conversations/{conversation_id}"),
+        format!("/v1/conversations/{conversation_id}/items"),
+    ] {
+        let response = server.get(&path).await;
+        assert_eq!(response.status_code(), StatusCode::NOT_FOUND, "GET {path}");
+        assert_no_store(&response);
     }
 
-    println!("\n=== Test Complete ===");
-    println!("✅ Test passed: Created conversation, added responses, and listed conversations with OpenAI details\n");
+    for path in [
+        format!("/v1/conversations/{conversation_id}/unknown-child"),
+        format!("/v1/conversations/{conversation_id}/shares"),
+        "/v1/conversations/".to_string(),
+        "/v1/share-groups".to_string(),
+        "/v1/shared-with-me".to_string(),
+    ] {
+        let response = server.get(&path).await;
+        assert_eq!(
+            response.status_code(),
+            StatusCode::UNAUTHORIZED,
+            "GET {path}"
+        );
+        assert_no_store(&response);
+    }
 }
 
 #[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
-async fn test_conversation_access_control() {
-    let server = create_test_server().await;
+async fn stage_one_shared_and_public_reads_remain_available() {
+    let (server, _upstream, db, owner_token, conversation_id, owner_user_id) =
+        stage_one_fixture_with_db().await;
+    let sharee_email = format!("stage-one-sharee-{}@example.com", Uuid::new_v4());
+    let sharee_token = mock_login(&server, &sharee_email).await;
+    let shares = db.conversation_share_repository();
 
-    println!("\n=== Test: Conversation Access Control ===");
+    shares
+        .create_share(NewConversationShare {
+            conversation_id: conversation_id.clone(),
+            owner_user_id,
+            share_type: ShareType::Direct,
+            permission: SharePermission::Read,
+            recipient: Some(ShareRecipient {
+                kind: ShareRecipientKind::Email,
+                value: sharee_email,
+            }),
+            group_id: None,
+            org_email_pattern: None,
+        })
+        .await
+        .expect("seed direct share");
 
-    // Step 1: Create a conversation
-    println!("1. Creating a conversation...");
-    let create_conv_body = json!({
-        "metadata": {"test": "access_control"}
-    });
-
-    let response = server
-        .post("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&create_conv_body)
-        .await;
-
-    assert!(
-        response.status_code().is_success(),
-        "Should create conversation"
-    );
-
-    let body: serde_json::Value = response.json();
-    let conversation_id = body
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .expect("Conversation should have an ID");
-    println!("   ✓ Conversation created: {conversation_id}");
-
-    // Step 2: Try to access with the same user (should succeed)
-    println!("\n2. Accessing conversation as owner...");
-    let response = server
-        .get(&format!("/v1/conversations/{}", conversation_id))
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .await;
-
-    // Note: This will go through the proxy handler since we don't have a specific GET route
-    // In a real implementation, you'd want to add a specific route that uses the service
-    println!("   Status: {}", response.status_code());
-
-    // For now, we're testing through the proxy which should work
-    if response.status_code().is_success() {
-        println!("   ✓ Successfully accessed conversation");
+    let sharee_auth = bearer(&sharee_token);
+    for path in [
+        format!("/v1/conversations/{conversation_id}"),
+        format!("/v1/conversations/{conversation_id}/items"),
+    ] {
+        let response = server
+            .get(&path)
+            .add_header(sharee_auth.0.clone(), sharee_auth.1.clone())
+            .await;
+        assert_eq!(response.status_code(), StatusCode::OK, "shared GET {path}");
+        assert_no_store(&response);
     }
 
-    println!("\n=== Test Complete ===");
-    println!("✅ Test passed: Access control working correctly\n");
-}
+    shares
+        .create_share(NewConversationShare {
+            conversation_id: conversation_id.clone(),
+            owner_user_id,
+            share_type: ShareType::Public,
+            permission: SharePermission::Read,
+            recipient: None,
+            group_id: None,
+            org_email_pattern: None,
+        })
+        .await
+        .expect("seed public share");
 
-#[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
-async fn test_empty_conversation_list() {
-    let server = create_test_server().await;
+    for path in [
+        format!("/v1/conversations/{conversation_id}"),
+        format!("/v1/conversations/{conversation_id}/items"),
+    ] {
+        let response = server.get(&path).await;
+        assert_eq!(response.status_code(), StatusCode::OK, "public GET {path}");
+        assert_no_store(&response);
+    }
 
-    println!("\n=== Test: Empty Conversation List ===");
-
-    // List conversations (may or may not be empty depending on previous tests)
-    println!("1. Listing conversations...");
-    let response = server
-        .get("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
+    shares
+        .create_group(
+            owner_user_id,
+            &format!("stage-one-readable-group-{}", Uuid::new_v4()),
+            &[ShareRecipient {
+                kind: ShareRecipientKind::Email,
+                value: format!("stage-one-group-member-{}@example.com", Uuid::new_v4()),
+            }],
         )
-        .await;
+        .await
+        .expect("seed share group");
 
-    assert_eq!(response.status_code(), 200, "Should list conversations");
-
-    let conversations: Vec<serde_json::Value> = response.json();
-    println!("   Found {} conversations", conversations.len());
-    println!("   ✓ List endpoint works even with zero or many conversations");
-
-    println!("\n=== Test Complete ===");
-    println!("✅ Test passed: Can list conversations successfully\n");
-}
-
-#[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
-async fn test_conversation_tracking_on_response_creation() {
-    let server = create_test_server().await;
-
-    println!("\n=== Test: Conversation Tracking on Response Creation ===");
-
-    // Step 1: Create a conversation
-    println!("1. Creating a conversation...");
-    let create_conv_body = json!({
-        "metadata": {"test": "response_tracking"}
-    });
+    let owner_auth = bearer(&owner_token);
+    for path in [
+        format!("/v1/conversations/{conversation_id}/shares"),
+        "/v1/share-groups".to_string(),
+    ] {
+        let response = server
+            .get(&path)
+            .add_header(owner_auth.0.clone(), owner_auth.1.clone())
+            .await;
+        assert_eq!(response.status_code(), StatusCode::OK, "owner GET {path}");
+        assert_no_store(&response);
+    }
 
     let response = server
-        .post("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&create_conv_body)
+        .get("/v1/shared-with-me")
+        .add_header(sharee_auth.0, sharee_auth.1)
         .await;
-
+    assert_eq!(response.status_code(), StatusCode::OK);
+    assert_no_store(&response);
+    let shared: Vec<Value> = response.json();
     assert!(
-        response.status_code().is_success(),
-        "Should create conversation"
+        shared
+            .iter()
+            .any(|conversation| conversation["conversation_id"] == conversation_id),
+        "shared-with-me response should include the directly shared conversation"
     );
+}
 
-    let body: serde_json::Value = response.json();
-    let conversation_id = body
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .expect("Conversation should have an ID");
-    println!("   ✓ Conversation created: {conversation_id}");
+#[tokio::test]
+async fn stage_one_retired_conversation_and_sharing_surfaces_are_gone() {
+    let (server, _upstream, token, conversation_id) = stage_one_fixture().await;
+    let auth = bearer(&token);
 
-    // Step 2: Add response (this should trigger conversation tracking)
-    println!("\n2. Adding response to track conversation...");
-    let request_body = json!({
-        "conversation": conversation_id,
-        "model": "gpt-4o",
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": "Test message"
-            }
+    for (method, path) in [
+        (Method::POST, "/v1/conversations".to_string()),
+        (Method::POST, format!("/v1/conversations/{conversation_id}")),
+        (
+            Method::POST,
+            format!("/v1/conversations/{conversation_id}/items"),
+        ),
+        (
+            Method::POST,
+            format!("/v1/conversations/{conversation_id}/shares"),
+        ),
+        (
+            Method::POST,
+            format!("/v1/conversations/{conversation_id}/pin"),
+        ),
+        (
+            Method::DELETE,
+            format!("/v1/conversations/{conversation_id}/pin"),
+        ),
+        (
+            Method::POST,
+            format!("/v1/conversations/{conversation_id}/archive"),
+        ),
+        (
+            Method::DELETE,
+            format!("/v1/conversations/{conversation_id}/archive"),
+        ),
+        (
+            Method::POST,
+            format!("/v1/conversations/{conversation_id}/clone"),
+        ),
+        (Method::POST, "/v1/share-groups".to_string()),
+        (
+            Method::PATCH,
+            format!("/v1/share-groups/{}", Uuid::new_v4()),
+        ),
+        // Unsupported methods on a retained read view and unlisted legacy
+        // descendants remain within the authenticated migration namespace.
+        (
+            Method::PATCH,
+            format!("/v1/conversations/{conversation_id}"),
+        ),
+        (
+            Method::GET,
+            format!("/v1/conversations/{conversation_id}/unknown-child"),
+        ),
+        (
+            Method::GET,
+            format!(
+                "/v1/conversations/{conversation_id}/shares/{}",
+                Uuid::new_v4()
+            ),
+        ),
+        (
+            Method::GET,
+            format!("/v1/share-groups/{}/unknown-child", Uuid::new_v4()),
+        ),
+        (Method::POST, "/v1/shared-with-me".to_string()),
+        (Method::GET, "/v1/shared-with-me/unknown-child".to_string()),
+        // Axum nesting does not cover the trailing-slash prefix, so those
+        // exact legacy namespace paths are explicitly reserved too.
+        (Method::GET, "/v1/conversations/".to_string()),
+        (Method::GET, "/v1/share-groups/".to_string()),
+        (Method::GET, "/v1/shared-with-me/".to_string()),
+        // `batch` is used only for Chat API's internal Cloud list request and
+        // is never a public view or a conversation ID.
+        (Method::GET, "/v1/conversations/batch".to_string()),
+        (Method::POST, "/v1/conversations/batch".to_string()),
+        (Method::PATCH, "/v1/conversations/batch".to_string()),
+    ] {
+        assert_retired_mutation(
+            server
+                .method(method, &path)
+                .add_header(auth.0.clone(), auth.1.clone())
+                .await,
+        );
+    }
+}
+
+#[tokio::test]
+async fn stage_one_established_delete_operations_remain_available() {
+    let (server, _upstream, db, token, conversation_id, owner_user_id) =
+        stage_one_fixture_with_db().await;
+    let auth = bearer(&token);
+
+    let shares = db.conversation_share_repository();
+    let direct_share = shares
+        .create_share(NewConversationShare {
+            conversation_id: conversation_id.clone(),
+            owner_user_id,
+            share_type: ShareType::Direct,
+            permission: SharePermission::Read,
+            recipient: Some(ShareRecipient {
+                kind: ShareRecipientKind::Email,
+                value: format!("stage-one-share-{}@example.com", Uuid::new_v4()),
+            }),
+            group_id: None,
+            org_email_pattern: None,
+        })
+        .await
+        .expect("seed direct share");
+    let group = shares
+        .create_group(
+            owner_user_id,
+            &format!("stage-one-group-{}", Uuid::new_v4()),
+            &[ShareRecipient {
+                kind: ShareRecipientKind::Email,
+                value: format!("stage-one-member-{}@example.com", Uuid::new_v4()),
+            }],
+        )
+        .await
+        .expect("seed share group");
+    let group_share = shares
+        .create_share(NewConversationShare {
+            conversation_id: conversation_id.clone(),
+            owner_user_id,
+            share_type: ShareType::Group,
+            permission: SharePermission::Read,
+            recipient: None,
+            group_id: Some(group.id),
+            org_email_pattern: None,
+        })
+        .await
+        .expect("seed group share");
+
+    let response = server
+        .delete(&format!(
+            "/v1/conversations/{conversation_id}/shares/{}",
+            direct_share.id
+        ))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(response.status_code(), StatusCode::NO_CONTENT);
+    assert_no_store(&response);
+
+    let response = server
+        .delete(&format!("/v1/share-groups/{}", group.id))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(response.status_code(), StatusCode::NO_CONTENT);
+    assert_no_store(&response);
+
+    let client = db.pool().get().await.expect("db client");
+    for (table, column, id) in [
+        ("conversation_shares", "id", direct_share.id),
+        ("conversation_share_groups", "id", group.id),
+        ("conversation_share_group_members", "group_id", group.id),
+        ("conversation_shares", "id", group_share.id),
+    ] {
+        let query = format!("SELECT 1 FROM {table} WHERE {column} = $1");
+        assert!(
+            client
+                .query_opt(&query, &[&id])
+                .await
+                .expect("query deleted share state")
+                .is_none(),
+            "{table}.{column} should be removed"
+        );
+    }
+
+    let missing_share = server
+        .delete(&format!(
+            "/v1/conversations/{conversation_id}/shares/{}",
+            Uuid::new_v4()
+        ))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(missing_share.status_code(), StatusCode::NOT_FOUND);
+    assert_no_store(&missing_share);
+
+    let missing_group = server
+        .delete(&format!("/v1/share-groups/{}", Uuid::new_v4()))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(missing_group.status_code(), StatusCode::NOT_FOUND);
+    assert_no_store(&missing_group);
+
+    let response = server
+        .delete(&format!("/v1/conversations/{conversation_id}"))
+        .add_header(auth.0, auth.1)
+        .await;
+    assert_eq!(response.status_code(), StatusCode::OK);
+    assert_no_store(&response);
+    let body: Value = response.json();
+    assert_eq!(body["id"], conversation_id);
+    assert_eq!(body["deleted"], true);
+}
+
+/// Query pairs of every upstream GET for this Conversation's items, in order.
+async fn upstream_item_list_queries(
+    upstream: &MockServer,
+    conversation_id: &str,
+) -> Vec<Vec<(String, String)>> {
+    let items_path = format!("/conversations/{conversation_id}/items");
+    upstream
+        .received_requests()
+        .await
+        .expect("mock upstream should record requests")
+        .into_iter()
+        .filter(|request| request.method == Method::GET && request.url.path() == items_path)
+        .map(|request| {
+            request
+                .url
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect()
+        })
+        .collect()
+}
+
+fn query_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn conversation_items_forward_pagination_to_cloud_api() {
+    let (server, upstream, token, conversation_id) = stage_one_fixture().await;
+    let auth = bearer(&token);
+    let items_path = format!("/conversations/{conversation_id}/items");
+
+    // Cloud API pages by cursor; these take precedence over the fixture's
+    // catch-all items mock.
+    Mock::given(method("GET"))
+        .and(path(items_path.clone()))
+        .and(query_param_is_missing("after"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"id": "item_a", "type": "message"}],
+            "first_id": "item_a",
+            "last_id": "item_a",
+            "has_more": true
+        })))
+        .with_priority(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(items_path.clone()))
+        .and(query_param("after", "item_a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"id": "item_b", "type": "message"}],
+            "first_id": "item_b",
+            "last_id": "item_b",
+            "has_more": false
+        })))
+        .with_priority(1)
+        .mount(&upstream)
+        .await;
+
+    // Page through the way the export client does.
+    let first_page = server
+        .get(&format!(
+            "/v1/conversations/{conversation_id}/items?limit=1&order=asc"
+        ))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(first_page.status_code(), StatusCode::OK);
+    assert_no_store(&first_page);
+    let first_page: Value = first_page.json();
+    assert_eq!(first_page["last_id"], "item_a");
+    assert_eq!(first_page["has_more"], true);
+
+    // Parameters outside the allowlist are dropped, not forwarded.
+    let second_page = server
+        .get(&format!(
+            "/v1/conversations/{conversation_id}/items?after=item_a&limit=1&order=asc&include=message.output_text.logprobs&offset=5"
+        ))
+        .add_header(auth.0.clone(), auth.1.clone())
+        .await;
+    assert_eq!(second_page.status_code(), StatusCode::OK);
+    assert_no_store(&second_page);
+    let second_page: Value = second_page.json();
+    assert_eq!(second_page["data"][0]["id"], "item_b");
+    assert_eq!(second_page["has_more"], false);
+
+    // A request without parameters keeps the bare upstream path.
+    let bare = server
+        .get(&format!("/v1/conversations/{conversation_id}/items"))
+        .add_header(auth.0, auth.1)
+        .await;
+    assert_eq!(bare.status_code(), StatusCode::OK);
+
+    assert_eq!(
+        upstream_item_list_queries(&upstream, &conversation_id).await,
+        vec![
+            query_pairs(&[("limit", "1"), ("order", "asc")]),
+            query_pairs(&[("after", "item_a"), ("limit", "1"), ("order", "asc")]),
+            vec![],
         ]
-    });
+    );
+}
 
-    let response = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&request_body)
-        .await;
+#[tokio::test]
+async fn conversation_items_reject_invalid_pagination_query() {
+    let (server, upstream, token, conversation_id) = stage_one_fixture().await;
+    let auth = bearer(&token);
+
+    for (query, expected_error) in [
+        (
+            "order=sideways",
+            Some("Invalid order parameter. Must be 'asc' or 'desc'"),
+        ),
+        (
+            "limit=0",
+            Some("Invalid limit parameter. Must be between 1 and 1000"),
+        ),
+        (
+            "limit=1001",
+            Some("Invalid limit parameter. Must be between 1 and 1000"),
+        ),
+        // Non-numeric limits are rejected by the typed query extractor.
+        ("limit=ten", None),
+    ] {
+        let response = server
+            .get(&format!(
+                "/v1/conversations/{conversation_id}/items?{query}"
+            ))
+            .add_header(auth.0.clone(), auth.1.clone())
+            .await;
+        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST, "{query}");
+        assert_no_store(&response);
+        if let Some(expected_error) = expected_error {
+            let body: Value = response.json();
+            assert_eq!(
+                body.get("error").and_then(Value::as_str),
+                Some(expected_error),
+                "{query}"
+            );
+        }
+    }
 
     assert!(
-        response.status_code().is_success(),
-        "Should create response"
+        upstream_item_list_queries(&upstream, &conversation_id)
+            .await
+            .is_empty(),
+        "invalid queries must not reach Cloud API"
     );
-    println!("   ✓ Response created");
-
-    // Step 3: Verify conversation is now tracked in our database
-    println!("\n3. Verifying conversation is tracked...");
-    let response = server
-        .get("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .await;
-
-    assert_eq!(response.status_code(), 200);
-
-    let conversations: Vec<serde_json::Value> = response.json();
-    let found = conversations.iter().any(|c| {
-        c.get("id")
-            .and_then(|v| v.as_str())
-            .map(|id| id == conversation_id)
-            .unwrap_or(false)
-    });
-
-    assert!(
-        found,
-        "Conversation should be tracked after response creation"
-    );
-    println!("   ✓ Conversation is tracked in database");
-    println!("   ✓ Details fetched from OpenAI successfully");
-
-    println!("\n=== Test Complete ===");
-    println!("✅ Test passed: Conversation tracking on response creation works correctly\n");
 }

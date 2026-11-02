@@ -2102,10 +2102,10 @@ impl AgentService for AgentServiceImpl {
         Ok((instances, total))
     }
 
-    async fn get_instance_enrichment_from_agent_api(
+    async fn get_instance_enrichment_from_agent_api<'a>(
         &self,
         agent_api_name: &str,
-        agent_api_base_url: Option<&str>,
+        agent_api_base_url: Option<&'a str>,
     ) -> Option<AgentApiInstanceEnrichment> {
         // When the owning manager URL is known, query only that manager (O(1) instead of O(N))
         let managers_to_query: Vec<&AgentManager> = if let Some(url) = agent_api_base_url {
