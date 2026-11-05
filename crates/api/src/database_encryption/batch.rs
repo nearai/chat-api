@@ -2,7 +2,6 @@ use super::*;
 use database::field_encryption::KeyRing;
 
 pub(super) struct Batch<'a, 'tx> {
-    pub(super) job_id: Uuid,
     pub(super) tx: &'a deadpool_postgres::Transaction<'tx>,
     pub(super) field: &'a Field,
     pub(super) ring: &'a KeyRing,
@@ -15,6 +14,7 @@ impl Batch<'_, '_> {
         &self,
         row: &deadpool_postgres::tokio_postgres::Row,
         progress: &mut Progress,
+        projection: &mut projection::Projection,
     ) -> anyhow::Result<()> {
         let id: Uuid = row.get(0);
         progress.record(self.field, |c| c.processed += 1);
@@ -119,7 +119,7 @@ impl Batch<'_, '_> {
         };
         let rewrite = super::writes::RowRewrite { id, value, token };
         if self.mode == "dry_run" {
-            if !projection::try_rewrite(self, &rewrite).await? {
+            if !projection.try_rewrite(self, &rewrite).await? {
                 progress.conflict(self.field, id);
                 return Ok(());
             }

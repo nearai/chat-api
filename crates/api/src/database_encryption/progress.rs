@@ -24,6 +24,7 @@ pub(super) struct Counters {
 pub(super) struct Progress {
     #[serde(flatten)]
     pub(super) totals: Counters,
+    pub(super) token_conflicts_estimated: bool,
     pub(super) fields: BTreeMap<String, Counters>,
 }
 

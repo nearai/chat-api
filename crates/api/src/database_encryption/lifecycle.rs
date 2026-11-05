@@ -31,7 +31,6 @@ pub(super) async fn mark_job_failed(
             &[&id, &error_class, &error_message],
         )
         .await?;
-    projection::clear(&client, id).await?;
     Ok(())
 }
 

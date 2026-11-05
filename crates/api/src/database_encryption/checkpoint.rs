@@ -9,13 +9,14 @@ pub(super) struct Checkpoint {
 
 impl Checkpoint {
     pub(super) fn restore(
-        replay_projection: bool,
+        restart_dry_run: bool,
         cursor: Value,
         progress: Value,
     ) -> anyhow::Result<Self> {
-        // Recovery replays dry-run rows to rebuild job-scoped conflict state
-        // against current data and recount each row once.
-        if replay_projection {
+        // Projection lives only in the running task. After a process restart,
+        // dry runs reset cursor and counters and replay their entire scope;
+        // execute/verify jobs retain their durable checkpoint.
+        if restart_dry_run {
             return Ok(Self::default());
         }
         Ok(Self {
@@ -41,7 +42,7 @@ mod tests {
         // replaying the first batch would overlook that conflict.
         let cursor = json!({"field_index":3,"after_id":first});
         let progress = json!({"processed":1,"rewrapped":1,"stale":1,
-            "tokens_rewritten":1,"by_key_id":{"previous":1},
+            "tokens_rewritten":1,"token_conflicts_estimated":true,"by_key_id":{"previous":1},
             "fields":{"conversation_share_groups.name":{"processed":1,"rewrapped":1}}});
         let restored = Checkpoint::restore(true, cursor, progress).unwrap();
         assert_eq!(
@@ -57,21 +58,23 @@ mod tests {
         assert_eq!(restored.progress.totals.rewrapped, 0);
         assert!(restored.progress.totals.by_key_id.is_empty());
         assert!(restored.progress.fields.is_empty());
+        assert!(!restored.progress.token_conflicts_estimated);
     }
 
     #[test]
-    fn existing_encrypt_dry_run_keeps_its_saved_checkpoint() {
+    fn uninterrupted_dry_run_keeps_its_saved_checkpoint() {
         let after = Uuid::new_v4();
         let restored = Checkpoint::restore(
             false,
             json!({"field_index":2,"after_id":after}),
-            json!({"processed":7,"plaintext":7}),
+            json!({"processed":7,"plaintext":7,"token_conflicts_estimated":true}),
         )
         .unwrap();
         assert_eq!(restored.field_index, 2);
         assert_eq!(restored.after, after);
         assert_eq!(restored.progress.totals.processed, 7);
         assert_eq!(restored.progress.totals.plaintext, 7);
+        assert!(restored.progress.token_conflicts_estimated);
     }
 
     #[test]

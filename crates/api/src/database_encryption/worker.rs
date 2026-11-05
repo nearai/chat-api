@@ -2,22 +2,29 @@ use super::*;
 
 pub(super) async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
     let mut first = true;
+    // Task-local state survives returning pooled connections between batches.
+    // A recovered dry run starts over because this state is never persisted.
+    let mut projection = projection::Projection::default();
     loop {
         // run_batch commits and returns its connection before any delay.
-        let Some(delay) = run_batch(state, id, first).await? else {
+        let Some(delay) = run_batch(state, id, first, &mut projection).await? else {
             return Ok(());
         };
         first = false;
         if throttle::wait(std::time::Duration::from_millis(delay), || async {
             let client = state.db_pool.get().await?;
             let cancelled = client.execute("UPDATE database_encryption_jobs SET status='cancelled',completed_at=NOW() WHERE id=$1 AND status IN ('queued','running') AND cancel_requested_at IS NOT NULL", &[&id]).await? > 0;
-            if cancelled { projection::clear(&client, id).await?; }
             Ok(cancelled)
         }).await? { return Ok(()) }
     }
 }
 
-async fn run_batch(state: &AppState, id: Uuid, first: bool) -> anyhow::Result<Option<u64>> {
+async fn run_batch(
+    state: &AppState,
+    id: Uuid,
+    first: bool,
+    projection: &mut projection::Projection,
+) -> anyhow::Result<Option<u64>> {
     let config = state
         .db_pool
         .field_encryption()
@@ -37,7 +44,6 @@ async fn run_batch(state: &AppState, id: Uuid, first: bool) -> anyhow::Result<Op
             &[&id],
         )
         .await?;
-        projection::clear(&tx, id).await?;
         tx.commit().await?;
         return Ok(None);
     }
@@ -45,7 +51,6 @@ async fn run_batch(state: &AppState, id: Uuid, first: bool) -> anyhow::Result<Op
     let scope: Scope = serde_json::from_value(job.get(1))?;
     if !scope.tables.is_empty() || scope.fields.is_empty() {
         tx.execute("UPDATE database_encryption_jobs SET status='failed',completed_at=NOW(),last_error_class='scope_requires_confirmation',last_error_message='Legacy job scope is not pinned; review the fields and create a new job' WHERE id=$1", &[&id]).await?;
-        projection::clear(&tx, id).await?;
         tx.commit().await?;
         return Ok(None);
     }
@@ -58,15 +63,11 @@ async fn run_batch(state: &AppState, id: Uuid, first: bool) -> anyhow::Result<Op
     let action = actions
         .first()
         .ok_or_else(|| anyhow::anyhow!("missing job action"))?;
-    let replay = mode == "dry_run" && action == "rewrap";
+    let replay = mode == "dry_run";
     let mut checkpoint = checkpoint::Checkpoint::restore(first && replay, job.get(4), job.get(5))?;
-    if first && replay {
-        projection::clear(&tx, id).await?;
-    }
     let fields = selected(&scope).map_err(|_| anyhow::anyhow!("invalid scope"))?;
     if write_gate_blocks(&mode, execute_writes_enabled(state, &fields)) {
         tx.execute("UPDATE database_encryption_jobs SET status='failed',completed_at=NOW(),last_error_class='write_disabled',last_error_message='Database encryption writes are disabled for the selected scope' WHERE id=$1", &[&id]).await?;
-        projection::clear(&tx, id).await?;
         tx.commit().await?;
         return Ok(None);
     }
@@ -74,7 +75,6 @@ async fn run_batch(state: &AppState, id: Uuid, first: bool) -> anyhow::Result<Op
         || max.is_some_and(|limit| checkpoint.progress.totals.processed >= limit)
     {
         super::completion::finish(&tx, id, &mode, &fields, &checkpoint.progress).await?;
-        projection::clear(&tx, id).await?;
         tx.commit().await?;
         return Ok(None);
     }
@@ -94,13 +94,10 @@ async fn run_batch(state: &AppState, id: Uuid, first: bool) -> anyhow::Result<Op
     let delay = if rows.is_empty() {
         checkpoint.field_index += 1;
         checkpoint.after = Uuid::nil();
-        if replay {
-            projection::clear(&tx, id).await?;
-        }
+        projection.clear_field();
         0
     } else {
         let processor = batch::Batch {
-            job_id: id,
             tx: &tx,
             field,
             ring,
@@ -109,8 +106,11 @@ async fn run_batch(state: &AppState, id: Uuid, first: bool) -> anyhow::Result<Op
         };
         for row in &rows {
             checkpoint.after = row.get(0);
-            processor.process(row, &mut checkpoint.progress).await?;
+            processor
+                .process(row, &mut checkpoint.progress, projection)
+                .await?;
         }
+        checkpoint.progress.token_conflicts_estimated = projection.estimated();
         scope.options.batch_delay_ms.unwrap_or_default()
     };
     tx.execute(

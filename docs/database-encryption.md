@@ -45,8 +45,9 @@ be logged.
 4. Call `POST /v1/admin/database-encryption/scan` with an empty scope. Treat the
    capped scan as diagnostic; it is not the release gate for large tables.
 5. Create explicit-scope dry-run jobs, then execute jobs in small batches. Poll
-   `GET /v1/admin/database-encryption/jobs/{job_id}`. Jobs resume from durable
-   cursors after restart and can be cancelled at a transaction boundary.
+   `GET /v1/admin/database-encryption/jobs/{job_id}`. Execute and verify jobs resume
+   from durable cursors after restart; dry runs restart their scope and counters.
+   Jobs can be cancelled at a transaction boundary.
 6. Call `POST /v1/admin/database-encryption/verify` and poll its returned job.
    Do not move the database or backups outside the CVM boundary unless `pass` is
    true and plaintext, legacy-encrypted, and invalid-envelope counts are zero.
@@ -303,9 +304,16 @@ accept it too. Poll the ordinary job
 endpoint. Progress includes `stale`, `rewrapped`, `already_current`,
 `tokens_rewritten`, `token_conflicts`, and key-ID counts. A unique-token conflict
 leaves the row unchanged and records its ID; other rows continue. Resolve
-conflicts and invalid rows before verification and key removal. Recovered rewrap
-dry runs replay their scope from the beginning to rebuild their job-scoped
-conflict projection and recompute counts; application rows remain unchanged.
+conflicts and invalid rows before verification and key removal. Dry runs keep
+only row IDs and HMAC tokens in the running task's memory to predict conflicts
+across batches; they never write application data or persist projected tokens.
+Tracking is capped at 100,000 projected rows per field (released when the field
+finishes). If that limit is exceeded, tracking is discarded for the rest of the
+job and progress reports `token_conflicts_estimated: true`; conflict checks then
+use stored rows only, so counts may differ from execution. Recovered dry runs
+reset their cursor and counters and replay their scope from the beginning to
+rebuild this in-memory projection. Execute jobs use real rows inside each batch
+transaction and resume from their saved cursor.
 
 `GET /v1/admin/database-encryption/keys` uses the same admin authentication as
 other encryption endpoints. It returns the write ID, read-only IDs, short
