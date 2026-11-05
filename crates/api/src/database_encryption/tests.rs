@@ -179,8 +179,29 @@ fn rewrap_actions_are_exclusive_and_match_mode() {
 }
 
 #[test]
+fn default_job_options_preserve_legacy_scope_json() {
+    let legacy =
+        r#"{"tables":[],"fields":[{"table":"agent_instances","column":"instance_token"}]}"#;
+    for options in [None, Some(json!({})), Some(json!({"batch_delay_ms": 0}))] {
+        // Given a legacy pinned scope, with absent or default options.
+        let mut stored: Value = serde_json::from_str(legacy).unwrap();
+        if let Some(options) = options {
+            stored["options"] = options;
+        }
+
+        // When the scope is restored and serialized for storage.
+        let scope: Scope = serde_json::from_value(stored).unwrap();
+        let serialized = serde_json::to_string(&scope).unwrap();
+
+        // Then the previous release's bytes and default delay are preserved.
+        assert_eq!(serialized, legacy);
+        assert_eq!(scope.options.batch_delay_ms, 0);
+    }
+}
+
+#[test]
 fn delay_is_bounded_and_persisted_as_job_options() {
-    for delay in [0, 10_000] {
+    for delay in [0, 1, 10_000] {
         let request: CreateJobRequest = serde_json::from_value(json!({"mode":"dry_run","scope":{"tables":["files"]},"actions":["rewrap"],"batch_delay_ms":delay})).unwrap();
         assert_eq!(request.batch_delay_ms, delay);
         let scope = Scope {
@@ -190,7 +211,11 @@ fn delay_is_bounded_and_persisted_as_job_options() {
             ..Scope::default()
         };
         let stored = serde_json::to_value(&scope).unwrap();
-        assert_eq!(stored["options"]["batch_delay_ms"], delay);
+        if delay == 0 {
+            assert!(stored.get("options").is_none());
+        } else {
+            assert_eq!(stored["options"]["batch_delay_ms"], delay);
+        }
         let restored: Scope = serde_json::from_value(stored).unwrap();
         assert_eq!(restored.options.batch_delay_ms, delay);
     }

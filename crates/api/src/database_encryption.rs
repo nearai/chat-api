@@ -40,7 +40,7 @@ pub struct Scope {
     tables: Vec<String>,
     #[serde(default)]
     fields: Vec<FieldName>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "JobOptions::is_default")]
     options: JobOptions,
 }
 
@@ -205,6 +205,12 @@ mod tests;
 struct JobOptions {
     #[serde(default, deserialize_with = "batch_delay")]
     batch_delay_ms: u64,
+}
+
+impl JobOptions {
+    const fn is_default(&self) -> bool {
+        self.batch_delay_ms == 0
+    }
 }
 
 fn batch_delay<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
