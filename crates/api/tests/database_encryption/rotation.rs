@@ -120,3 +120,70 @@ async fn previous_key_rotation_preserves_reads_tokens_and_verification() {
     assert_eq!(f.job("verify", "verify").await["progress"]["pass"], true);
     f.cleanup().await;
 }
+
+#[tokio::test]
+async fn previous_key_tokens_remain_valid_for_non_rewrap_jobs() {
+    // Given five stale envelopes, including three valid old-key search tokens.
+    let f = Fixture::new().await;
+    let before = f.stored().await;
+    for (mode, action) in [
+        ("dry_run", "encrypt"),
+        ("execute", "encrypt"),
+        ("verify", "verify"),
+    ] {
+        // When a non-rewrap job inspects the old-key rows.
+        let result = f.job(mode, action).await;
+
+        // Then stale rows remain unchanged and are not classified as invalid.
+        assert_eq!(f.stored().await, before, "{mode}/{action}");
+        let progress = &result["progress"];
+        assert_eq!(progress["stale"], 5, "{mode}/{action}");
+        assert_eq!(progress["invalid_envelopes"], 0, "{mode}/{action}");
+        assert_eq!(progress["invalid_sample_ids"], json!([]), "{mode}/{action}");
+        assert_eq!(progress["pass"], mode != "verify", "{mode}/{action}");
+    }
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn previous_key_token_corruption_is_invalid_for_non_rewrap_jobs() {
+    // Given the same five stale envelopes with exactly one corrupted token.
+    let f = Fixture::new().await;
+    let mut before = f.stored().await;
+    let token = before[1].1.as_mut().unwrap();
+    token[0] ^= 1;
+    let client = f.db.pool().get().await.unwrap();
+    assert_eq!(
+        client
+            .execute(
+                "UPDATE conversation_share_groups SET name_search_token=$1 WHERE id=$2",
+                &[token, &f.group],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    drop(client);
+
+    for (mode, action) in [
+        ("dry_run", "encrypt"),
+        ("execute", "encrypt"),
+        ("verify", "verify"),
+    ] {
+        // When a non-rewrap job validates the tokens.
+        let result = f.job(mode, action).await;
+
+        // Then only the corrupted row is invalid; valid stale peers stay valid.
+        assert_eq!(f.stored().await, before, "{mode}/{action}");
+        let progress = &result["progress"];
+        assert_eq!(progress["stale"], 5, "{mode}/{action}");
+        assert_eq!(progress["invalid_envelopes"], 1, "{mode}/{action}");
+        assert_eq!(
+            progress["invalid_sample_ids"],
+            json!([f.group.to_string()]),
+            "{mode}/{action}"
+        );
+        assert_eq!(progress["pass"], false, "{mode}/{action}");
+    }
+    f.cleanup().await;
+}

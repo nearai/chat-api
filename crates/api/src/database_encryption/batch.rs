@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Context;
 use database::field_encryption::KeyRing;
 
 pub(super) struct Batch<'a, 'tx> {
@@ -60,15 +61,14 @@ impl Batch<'_, '_> {
                 }
                 (plaintext, false, true)
             }
-            StoredValue::Stale { plaintext, .. } => {
+            StoredValue::Stale { plaintext, key_id } => {
                 progress.record(self.field, |c| c.stale += 1);
                 if self.action != "rewrap" {
-                    if !search_token_matches(
-                        self.ring.write_key(),
-                        self.field,
-                        &plaintext,
-                        stored_token.as_deref(),
-                    ) {
+                    let key = self
+                        .ring
+                        .lookup(key_id)
+                        .context("authenticated encryption key missing from ring")?;
+                    if !search_token_matches(key, self.field, &plaintext, stored_token.as_deref()) {
                         progress.invalid(self.field, id);
                     }
                     return Ok(());
