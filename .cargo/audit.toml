@@ -1,0 +1,5 @@
+[advisories]
+# Unmaintained notice only, no vulnerability; transitive via aws-smithy-http,
+# aws-smithy-runtime, aws-smithy-types, and hyper. No maintained replacement can
+# be selected from this workspace; remove when the parent crates drop pin-utils.
+ignore = ["RUSTSEC-2026-0441"]

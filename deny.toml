@@ -9,6 +9,9 @@ yanked = "deny"
 unmaintained = "all"
 unsound = "all"
 unused-ignored-advisory = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0441", reason = "Unmaintained notice only, no vulnerability; transitive via aws-smithy-http, aws-smithy-runtime, aws-smithy-types, and hyper. No maintained replacement can be selected from this workspace; remove when the parent crates drop pin-utils." },
+]
 
 [bans]
 multiple-versions = "warn"
