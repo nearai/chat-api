@@ -1,5 +1,6 @@
 use anyhow::{ensure, Result};
-use sha2::{Digest, Sha256};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
@@ -56,9 +57,14 @@ impl KeyRing {
         self.keys
             .iter()
             .map(|(id, key)| {
+                // HMAC pads this fixed 32-byte key to SHA-256's 64-byte block size.
+                let mut key_block = Zeroizing::new([0; 64]);
+                key_block[..key.len()].copy_from_slice(key);
+                let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new((&*key_block).into());
+                mac.update(b"near-key-fingerprint/v1");
                 (
                     id.clone(),
-                    hex::encode(Sha256::digest(key))[..16].to_owned(),
+                    hex::encode(mac.finalize().into_bytes())[..16].to_owned(),
                 )
             })
             .collect()
@@ -105,12 +111,31 @@ mod tests {
         assert_eq!(ring.ids(), ["new", "old"]);
         assert_eq!(ring.lookup("old"), Some(&previous_key));
         assert!(ring.lookup("missing").is_none());
-        assert_eq!(
-            ring.fingerprints()["new"],
-            &hex::encode(Sha256::digest(current_key))[..16]
-        );
         assert!(!format!("{ring:?}").contains(&hex::encode(current_key)));
         assert!(!format!("{ring:?}").contains(&format!("{current_key:?}")));
+    }
+
+    #[test]
+    fn fingerprints_use_domain_separated_hmac_sha256() {
+        use hmac::{Hmac, Mac};
+
+        let current_key = crate::random_key();
+        let previous_key = crate::random_key();
+        let ring = KeyRing::new(
+            "new".into(),
+            current_key,
+            vec![("old".into(), previous_key)],
+        )
+        .unwrap();
+
+        let fingerprints = ring.fingerprints();
+
+        for (id, key) in [("new", current_key), ("old", previous_key)] {
+            let mut reference = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+            reference.update(b"near-key-fingerprint/v1");
+            let expected = hex::encode(reference.finalize().into_bytes());
+            assert_eq!(fingerprints[id], expected[..16]);
+        }
     }
 
     #[test]

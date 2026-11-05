@@ -431,6 +431,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app_state = AppState {
         db_pool: db.pool().clone(),
+        database_encryption_worker: Default::default(),
         oauth_service,
         email_auth_service,
         email_auth_trusted_proxy_count: config.email_auth.trusted_proxy_count,
@@ -474,7 +475,10 @@ async fn main() -> anyhow::Result<()> {
         account_deletion_task_publisher,
     };
 
-    api::database_encryption::recover_jobs(app_state.clone()).await;
+    tokio::spawn(api::database_encryption::recover_jobs_periodically(
+        app_state.clone(),
+        std::time::Duration::from_secs(30),
+    ));
 
     // Create router with CORS support
     let app = create_router_with_cors(app_state, config.cors.clone());

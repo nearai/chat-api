@@ -429,6 +429,7 @@ pub async fn create_test_server_with_state(
     // Create application state
     let app_state = AppState {
         db_pool: db.pool().clone(),
+        database_encryption_worker: Default::default(),
         oauth_service,
         email_auth_service,
         email_auth_trusted_proxy_count: config.email_auth.trusted_proxy_count,

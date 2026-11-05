@@ -82,9 +82,16 @@ individual fields can resume normally.
 Jobs commit one bounded batch at a time. Retrying an interrupted job is safe:
 authenticated envelopes are detected and skipped, and cursor/progress state is
 durable. The active-scope index prevents duplicate jobs for the same canonical
-scope, and the process-local worker semaphore prevents connection-pool
-exhaustion. A PostgreSQL transaction advisory lock serializes each batch across replicas.
-Between batches, connections and database locks are released. A failed deploy may be
+scope, and each server's worker semaphore prevents connection-pool
+exhaustion without blocking workers in independent servers or databases.
+A PostgreSQL transaction advisory lock reserves one job at a time
+across replicas. One ownership transaction and connection remain open for the
+job's lifetime, including throttle delays; disconnecting or aborting the worker
+releases ownership. Each batch uses a separate transaction and releases its
+connection and application row locks before any delay. Recovery checks for
+queued or interrupted running jobs immediately at startup and every 30 seconds
+afterward, so a dead worker's job can
+resume without restarting a surviving replica. A failed deploy may be
 rolled back only to a version that supports dual reads; rolling back to a
 plaintext-only reader after encrypted writes begin makes data unreadable.
 
@@ -242,13 +249,16 @@ separated by commas. Supported sources are `file:/path/to/hex-key` (trimmed
 64-character hex), `dstack:derivation/path` (32 bytes from the dstack key API),
 and `hex:<64 hex characters>` for local/test use only, explicitly enabled with
 `DB_ENCRYPTION_ALLOW_INLINE_KEYS=true`. Key files must be readable only by the
-service user. IDs and resolved key bytes must each be unique. IDs contain
+service user. Prefer `file:` or `dstack:` sources for deployed services; inline
+`hex:` keys can leak through environment inspection and deployment metadata.
+IDs and resolved key bytes must each be unique. IDs contain
 1–64 ASCII letters, digits, dots, underscores, or hyphens. Resolution failures
 stop both the API and task worker before they start processing work.
 
 When set, this variable replaces `DB_ENCRYPTION_KEY_FILE` and `DB_ENCRYPTION_KEY`
 as key sources. A legacy `DB_ENCRYPTION_KEY_ID` still present in the environment
-must match an ID in the ring, or startup fails. When the ring variable is absent,
+must match an ID in the ring, or startup fails. When the ring variable is absent
+or empty after trimming whitespace,
 the existing configuration and file precedence apply. Keep the same resolved
 keys, IDs, and ordering on every API replica and task worker. Both write gates retain their existing meaning.
 
@@ -296,7 +306,10 @@ Submit to `POST /v1/admin/database-encryption/jobs`:
 Use `mode: "execute"` after inspecting the dry run. Execute requires the global
 write gate, plus the agent-secret gate when agent credentials are selected.
 `batch_delay_ms` accepts 0–10000 and sleeps between batches after their
-transactions commit, with their connections and advisory locks released.
+transactions commit, with batch connections and application row locks released.
+The separate ownership transaction retains the global advisory lock and one
+connection during the delay, preventing another replica from taking over an
+active job or losing its dry-run conflict projection.
 Cancellation is checked at least every 500 ms during the delay. Supply the delay
 in one place (prefer the request top level); supplying it there and in
 `scope.options` is rejected, even when both are zero. Verification requests
@@ -317,6 +330,19 @@ transaction and resume from their saved cursor.
 
 `GET /v1/admin/database-encryption/keys` uses the same admin authentication as
 other encryption endpoints. It returns the write ID, read-only IDs, short
-SHA-256 key fingerprints, and write-gate states. It never returns key material.
+HMAC-SHA256 key fingerprints, and write-gate states. Fingerprints use
+`HMAC-SHA256(key, "near-key-fingerprint/v1")`, truncated to 16 hexadecimal
+characters. It never returns key material.
 Use it to compare the configuration of replicas before enabling new writes
 and before `rewrap`. Fingerprints, IDs, and ordering must agree everywhere.
+
+The response describes only the API replica that handled the request. A shared
+load-balanced URL can repeatedly reach the same replica and cannot establish
+fleet-wide agreement. Query each replica's exposed host port or direct address
+using the normal admin authorization. For TLS, retain the service hostname and
+SNI with `curl --resolve <service-hostname>:<host-port>:<replica-ip>` and request
+`https://<service-hostname>:<host-port>/v1/admin/database-encryption/keys`.
+If replica ports are loopback-only, make the request from the host or use an SSH
+tunnel to that specific port. Record the replica address with its response and
+compare every replica's write ID, read IDs, fingerprints, and gates. Task workers
+do not expose this API; check their resolved deployment configuration separately.

@@ -38,6 +38,43 @@ impl Drop for EncryptionEnv {
 
 #[test]
 #[serial]
+fn blank_ring_falls_back_to_legacy_inline_key() {
+    let _env = EncryptionEnv::new();
+    let legacy_key = super::random_key_hex();
+    std::env::set_var("DB_ENCRYPTION_KEY", &legacy_key);
+    std::env::set_var("DB_ENCRYPTION_KEY_ID", "existing");
+    for blank in ["", " \t\r\n"] {
+        std::env::set_var("DB_ENCRYPTION_KEYS", blank);
+
+        let config = DatabaseEncryptionConfig::default();
+
+        assert!(config.keys.is_none());
+        assert_eq!(config.key, legacy_key);
+        assert_eq!(config.key_id, "existing");
+    }
+}
+
+#[test]
+#[serial]
+fn blank_ring_falls_back_to_legacy_key_file() {
+    let _env = EncryptionEnv::new();
+    let legacy_key = super::random_key_hex();
+    let legacy_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(legacy_file.path(), format!("{legacy_key}\n")).unwrap();
+    std::env::set_var("DB_ENCRYPTION_KEY_FILE", legacy_file.path());
+    std::env::set_var("DB_ENCRYPTION_KEY", super::random_key_hex());
+    for blank in ["", " \t\r\n"] {
+        std::env::set_var("DB_ENCRYPTION_KEYS", blank);
+
+        let config = DatabaseEncryptionConfig::default();
+
+        assert!(config.keys.is_none());
+        assert_eq!(config.key, legacy_key);
+    }
+}
+
+#[test]
+#[serial]
 fn rejects_ring_that_drops_explicit_legacy_id() {
     let _env = EncryptionEnv::new();
     std::env::set_var("DB_ENCRYPTION_KEYS", "new=file:/keys/new");

@@ -1,6 +1,33 @@
 use super::*;
 
 pub(super) async fn run_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
+    // A separate transaction holds whole-job ownership across batch commits and
+    // throttle waits. Disconnect/abort rolls it back and releases ownership.
+    let mut owner = state.db_pool.get().await?;
+    let ownership = owner.transaction().await?;
+    let locked: bool = ownership
+        .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&WORKER_LOCK])
+        .await?
+        .get(0);
+    if !locked {
+        return Ok(());
+    }
+    let running = ownership.query_opt(
+        "SELECT id FROM database_encryption_jobs WHERE status='running' ORDER BY created_at,id LIMIT 1",
+        &[],
+    ).await?;
+    if running.is_some_and(|row| row.get::<_, Uuid>(0) != id) {
+        return Ok(());
+    }
+    let result = run_owned_job(state, id).await;
+    if result.is_err() {
+        mark_job_failed(state, id, "batch_failed", "batch_failed").await?;
+    }
+    ownership.rollback().await?;
+    result
+}
+
+async fn run_owned_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
     let mut first = true;
     // Task-local state survives returning pooled connections between batches.
     // A recovered dry run starts over because this state is never persisted.
@@ -34,13 +61,10 @@ async fn run_batch(
     let tx = client.transaction().await?;
     tx.batch_execute("SET LOCAL statement_timeout='30s'")
         .await?;
-    // Transaction ownership releases this lock on commit, rollback, or disconnect.
-    tx.query_one("SELECT pg_advisory_xact_lock($1)", &[&WORKER_LOCK])
-        .await?;
     let Some(job) = tx.query_opt("UPDATE database_encryption_jobs SET status='running',started_at=COALESCE(started_at,NOW()) WHERE id=$1 AND status IN ('queued','running') RETURNING mode,scope,batch_size,max_rows,cursor,progress,actions,cancel_requested_at IS NOT NULL", &[&id]).await? else { return Ok(None) };
     if job.get::<_, bool>(7) {
         tx.execute(
-            "UPDATE database_encryption_jobs SET status='cancelled',completed_at=NOW() WHERE id=$1",
+            "UPDATE database_encryption_jobs SET status='cancelled',completed_at=NOW() WHERE id=$1 AND status='running'",
             &[&id],
         )
         .await?;
@@ -50,7 +74,7 @@ async fn run_batch(
     let mode: String = job.get(0);
     let scope: Scope = serde_json::from_value(job.get(1))?;
     if !scope.tables.is_empty() || scope.fields.is_empty() {
-        tx.execute("UPDATE database_encryption_jobs SET status='failed',completed_at=NOW(),last_error_class='scope_requires_confirmation',last_error_message='Legacy job scope is not pinned; review the fields and create a new job' WHERE id=$1", &[&id]).await?;
+        tx.execute("UPDATE database_encryption_jobs SET status=CASE WHEN cancel_requested_at IS NULL THEN 'failed' ELSE 'cancelled' END,completed_at=NOW(),last_error_class=CASE WHEN cancel_requested_at IS NULL THEN 'scope_requires_confirmation' END,last_error_message=CASE WHEN cancel_requested_at IS NULL THEN 'Legacy job scope is not pinned; review the fields and create a new job' END WHERE id=$1 AND status='running'", &[&id]).await?;
         tx.commit().await?;
         return Ok(None);
     }
@@ -67,7 +91,7 @@ async fn run_batch(
     let mut checkpoint = checkpoint::Checkpoint::restore(first && replay, job.get(4), job.get(5))?;
     let fields = selected(&scope).map_err(|_| anyhow::anyhow!("invalid scope"))?;
     if write_gate_blocks(&mode, execute_writes_enabled(state, &fields)) {
-        tx.execute("UPDATE database_encryption_jobs SET status='failed',completed_at=NOW(),last_error_class='write_disabled',last_error_message='Database encryption writes are disabled for the selected scope' WHERE id=$1", &[&id]).await?;
+        tx.execute("UPDATE database_encryption_jobs SET status=CASE WHEN cancel_requested_at IS NULL THEN 'failed' ELSE 'cancelled' END,completed_at=NOW(),last_error_class=CASE WHEN cancel_requested_at IS NULL THEN 'write_disabled' END,last_error_message=CASE WHEN cancel_requested_at IS NULL THEN 'Database encryption writes are disabled for the selected scope' END WHERE id=$1 AND status='running'", &[&id]).await?;
         tx.commit().await?;
         return Ok(None);
     }
@@ -104,12 +128,21 @@ async fn run_batch(
             mode: &mode,
             action,
         };
+        let mut rewrites = Vec::with_capacity(rows.len());
         for row in &rows {
             checkpoint.after = row.get(0);
             processor
-                .process(row, &mut checkpoint.progress, projection)
+                .process(row, &mut checkpoint.progress, projection, &mut rewrites)
                 .await?;
         }
+        let updated = writes::write_batch(&processor, &rewrites).await? as i64;
+        checkpoint.progress.record(field, |counts| {
+            if action == "encrypt" {
+                counts.encrypted += updated;
+            } else if action == "rewrap" {
+                counts.rewrapped += updated;
+            }
+        });
         checkpoint.progress.token_conflicts_estimated = projection.estimated();
         scope.options.batch_delay_ms.unwrap_or_default()
     };

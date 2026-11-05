@@ -14,11 +14,11 @@ async fn duplicate_delay_locations_are_rejected() {
 }
 
 #[tokio::test]
-async fn large_delay_releases_database_resources_and_cancels_promptly() {
+async fn large_delay_releases_batch_resources_and_cancels_after_last_row() {
     let f = Fixture::new().await;
     let response = f.server.post("/v1/admin/database-encryption/jobs")
         .add_header(HeaderName::from_static("authorization"), f.auth.clone())
-        .json(&json!({"mode":"dry_run","scope":{"tables":["files"]},"batch_size":1,"batch_delay_ms":10000,"actions":["rewrap"]})).await;
+        .json(&json!({"mode":"dry_run","scope":{"tables":["files"]},"batch_size":1,"max_rows":1,"batch_delay_ms":10000,"actions":["rewrap"]})).await;
     assert_eq!(response.status_code(), 202);
     let accepted: Value = response.json();
     let id = accepted["job_id"].as_str().unwrap();
@@ -31,6 +31,7 @@ async fn large_delay_releases_database_resources_and_cancels_promptly() {
                 .await;
             let status: Value = status.json();
             if status["progress"]["processed"] == 1 {
+                assert_eq!(status["status"], "running");
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -54,16 +55,24 @@ async fn large_delay_releases_database_resources_and_cancels_promptly() {
             .unwrap();
     }
     assert!(
-        locked,
-        "worker advisory lock must be released during the delay"
+        !locked,
+        "job ownership must prevent a second worker taking over during the delay"
     );
     let held: i64 = client.query_one("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='idle in transaction'", &[]).await.unwrap().get(0);
-    assert_eq!(held, 0);
+    assert_eq!(held, 1, "only the job ownership transaction remains open");
+    client
+        .query_one(
+            "SELECT filename FROM files WHERE id=$1 FOR UPDATE NOWAIT",
+            &[&f.file],
+        )
+        .await
+        .expect("the batch releases its application row locks during the delay");
     drop(client);
     let pool = f.db.pool().status().unwrap();
     assert_eq!(
-        pool.available, pool.size,
-        "delay must return its pooled connection"
+        pool.available + 1,
+        pool.size,
+        "only the job ownership connection remains reserved during the delay"
     );
     let started = tokio::time::Instant::now();
     let response = f
@@ -81,8 +90,12 @@ async fn large_delay_releases_database_resources_and_cancels_promptly() {
                 .await;
             let status: Value = response.json();
             if status["status"] == "cancelled" {
+                assert_eq!(status["progress"]["processed"], 1);
+                assert!(!status["completed_at"].is_null());
                 break;
             }
+            assert_ne!(status["status"], "completed", "{status}");
+            assert_ne!(status["status"], "failed", "{status}");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

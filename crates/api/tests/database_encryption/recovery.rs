@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 #[tokio::test]
-async fn recovered_dry_run_replays_projection_and_matches_execute_conflicts() {
+async fn recovered_dry_run_restarts_in_memory_state_and_matches_execute_conflicts() {
     let f = Fixture::new().await;
     let previous_key = random_key();
     let mut config = f.db.pool().field_encryption().unwrap();

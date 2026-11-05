@@ -87,7 +87,7 @@ pub async fn create_job(
     client.execute("INSERT INTO database_encryption_jobs(id,mode,status,scope,actions,batch_size,max_rows,admin_actor) VALUES($1,$2,'queued',$3,$4,$5,$6,$7)", &[&id,&mode,&scope_value,&actions_value,&req.batch_size,&req.max_rows,&admin.user_id.0]).await.map_err(internal)?;
     drop(client);
     tokio::spawn(async move {
-        let Ok(_permit) = worker().acquire().await else {
+        let Ok(_permit) = state.database_encryption_worker.semaphore.acquire().await else {
             return;
         };
         if let Err(_error) = run_job(&state, id).await {

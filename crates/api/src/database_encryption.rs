@@ -6,17 +6,12 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::sync::OnceLock;
-use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 const MAX_BATCH_BYTES: i64 = 8 * 1024 * 1024;
 const WORKER_LOCK: i64 = 0x4e45415243484154;
-static WORKER: OnceLock<Semaphore> = OnceLock::new();
-
-fn worker() -> &'static Semaphore {
-    WORKER.get_or_init(|| Semaphore::new(1))
-}
+mod worker_state;
+pub use worker_state::WorkerState;
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -189,8 +184,8 @@ pub use jobs::create_job;
 pub use requests::CreateJobRequest;
 use requests::Mode;
 mod requests;
-pub use lifecycle::recover_jobs;
 use lifecycle::{execute_writes_enabled, mark_job_failed, write_gate_blocks};
+pub use lifecycle::{recover_jobs, recover_jobs_periodically};
 use progress::*;
 use registry::*;
 use values::*;

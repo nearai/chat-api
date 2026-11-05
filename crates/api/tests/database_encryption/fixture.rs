@@ -5,6 +5,7 @@ use http::{HeaderName, HeaderValue};
 use serde_json::{json, Value};
 use services::db_pool::FieldEncryptionConfig;
 use std::sync::LazyLock;
+use std::time::Duration;
 use uuid::Uuid;
 
 pub static OLD: LazyLock<[u8; 32]> = LazyLock::new(random_key);
@@ -29,6 +30,7 @@ pub struct Fixture {
     pub oauth: Uuid,
     pub email: String,
     pub name: String,
+    _recovery: RecoveryTask,
     _cleanup: DatabaseCleanup,
 }
 
@@ -47,6 +49,10 @@ pub fn ring_config() -> FieldEncryptionConfig {
 
 impl Fixture {
     pub async fn new() -> Self {
+        Self::with_recovery_interval(Duration::from_millis(10)).await
+    }
+
+    pub async fn with_recovery_interval(interval: Duration) -> Self {
         dotenvy::dotenv().ok();
         let config = config::Config::from_env();
         let control = Database::from_config(&config.database).await.unwrap();
@@ -106,6 +112,9 @@ impl Fixture {
         drop(client);
         let login = mock_login(&server, "rotation@admin.org").await;
         let auth = HeaderValue::from_str(&format!("Bearer {login}")).unwrap();
+        let recovery = RecoveryTask(tokio::spawn(
+            api::database_encryption::recover_jobs_periodically(state.clone(), interval),
+        ));
         Self {
             server,
             db,
@@ -120,6 +129,7 @@ impl Fixture {
             oauth,
             email,
             name,
+            _recovery: recovery,
             _cleanup: cleanup,
         }
     }
@@ -141,9 +151,13 @@ impl Fixture {
                 .add_header(HeaderName::from_static("authorization"), self.auth.clone())
                 .await;
             let result: Value = response.json();
-            if matches!(result["status"].as_str(), Some("completed" | "failed")) {
-                assert_eq!(result["status"], "completed", "{result}");
-                return result;
+            match result["status"].as_str() {
+                Some("completed") => return result,
+                Some("cancelled" | "failed") => {
+                    panic!("rotation job {id} terminated before completion: {result}");
+                }
+                Some("queued" | "running") => {}
+                status => panic!("rotation job {id} returned an invalid status {status:?}"),
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
@@ -195,6 +209,14 @@ impl Fixture {
     pub async fn cleanup(self) {
         // The guard also runs when construction or an assertion panics.
         drop(self);
+    }
+}
+
+struct RecoveryTask(tokio::task::JoinHandle<()>);
+
+impl Drop for RecoveryTask {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

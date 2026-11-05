@@ -1019,7 +1019,11 @@ impl Drop for DatabaseEncryptionConfig {
 
 impl Default for DatabaseEncryptionConfig {
     fn default() -> Self {
-        let mut keys = zeroize::Zeroizing::new(std::env::var("DB_ENCRYPTION_KEYS").ok());
+        let mut keys = zeroize::Zeroizing::new(
+            std::env::var("DB_ENCRYPTION_KEYS")
+                .ok()
+                .filter(|raw| !raw.trim().is_empty()),
+        );
         if let Some(raw) = keys.as_ref() {
             let sources = encryption_keys::parse_encryption_keys(raw)
                 .unwrap_or_else(|message| panic!("{message}"));

@@ -15,6 +15,7 @@ impl Batch<'_, '_> {
         row: &deadpool_postgres::tokio_postgres::Row,
         progress: &mut Progress,
         projection: &mut projection::Projection,
+        rewrites: &mut Vec<super::writes::RowRewrite>,
     ) -> anyhow::Result<()> {
         let id: Uuid = row.get(0);
         progress.record(self.field, |c| c.processed += 1);
@@ -123,6 +124,9 @@ impl Batch<'_, '_> {
                 progress.conflict(self.field, id);
                 return Ok(());
             }
+        } else if self.action == "encrypt" || self.field.token.is_none() {
+            rewrites.push(rewrite);
+            return Ok(());
         } else if !super::writes::write_row(self, &rewrite).await? {
             progress.conflict(self.field, id);
             return Ok(());

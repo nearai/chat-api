@@ -32,6 +32,6 @@ pub(super) async fn finish(
                 && missing_encryption_contexts == 0
                 && inventory.unclassified.is_empty()
                 && inventory.legacy_confidential.is_empty());
-    tx.execute("UPDATE database_encryption_jobs SET status='completed',completed_at=NOW(),progress=progress||$2 WHERE id=$1", &[&id, &json!({"pass":pass,"missing_encryption_contexts":missing_encryption_contexts,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
+    tx.execute("UPDATE database_encryption_jobs SET status=CASE WHEN cancel_requested_at IS NULL THEN 'completed' ELSE 'cancelled' END,completed_at=NOW(),progress=progress||$2 WHERE id=$1 AND status='running'", &[&id, &json!({"pass":pass,"missing_encryption_contexts":missing_encryption_contexts,"legacy_confidential":inventory.legacy_confidential,"unclassified":inventory.unclassified})]).await?;
     Ok(())
 }
