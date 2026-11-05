@@ -149,3 +149,11 @@ Key variables (see `crates/config/src/lib.rs` for defaults):
 - Run the repo's dependency audit and introduce no new high or critical advisories; commit the lockfile.
 - Never commit secrets, keys, or tokens.
 - Fill the PR template (risk/impact, testing, rollback) and get a non-author review before merge.
+
+## Accepted dependency advisories
+
+- `RUSTSEC-2026-0441` (`pin-utils`): unmaintained notice only, no vulnerability;
+  transitive via `aws-smithy-http`, `aws-smithy-runtime`, `aws-smithy-types`, and
+  `hyper`. No maintained replacement can be selected from this workspace; remove
+  the exceptions in `deny.toml` and `.cargo/audit.toml` when the parent crates drop
+  `pin-utils`.
