@@ -969,6 +969,7 @@ dependencies = [
 name = "config"
 version = "0.0.0"
 dependencies = [
+ "rand 0.9.5",
  "serde",
  "serial_test",
  "tempfile",

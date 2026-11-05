@@ -77,3 +77,9 @@ pub fn init_tracing_from_config(logging_config: &LoggingConfig) {
         }
     }
 }
+
+#[cfg(test)]
+fn random_key() -> [u8; 32] {
+    use rand::{Rng, TryRngCore};
+    rand::rngs::OsRng.unwrap_err().random()
+}

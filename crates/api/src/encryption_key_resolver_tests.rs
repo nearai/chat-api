@@ -20,7 +20,7 @@ impl DstackKeyFetcher for FakeFetcher {
 
 fn config(raw: Option<String>) -> DatabaseEncryptionConfig {
     DatabaseEncryptionConfig {
-        key: hex::encode([9; 32]),
+        key: hex::encode(crate::random_key()),
         key_id: "legacy".into(),
         keys: raw,
         write_enabled: true,
@@ -38,14 +38,16 @@ fn fetcher(key: Vec<u8>) -> FakeFetcher {
 
 #[tokio::test]
 async fn resolves_ordered_sources_and_preserves_write_gates() {
-    let fake = fetcher(vec![2; 32]);
-    let raw = format!("new=hex:{},old=dstack:db/old", hex::encode([1; 32]));
+    let current_key = crate::random_key();
+    let previous_key = crate::random_key();
+    let fake = fetcher(previous_key.to_vec());
+    let raw = format!("new=hex:{},old=dstack:db/old", hex::encode(current_key));
     let resolved = resolve_field_encryption_with(&config(Some(raw)), &fake)
         .await
         .unwrap();
     assert_eq!(resolved.ring().unwrap().ids(), ["new", "old"]);
-    assert_eq!(resolved.key, [1; 32]);
-    assert_eq!(resolved.previous_keys, vec![("old".into(), [2; 32])]);
+    assert_eq!(resolved.key, current_key);
+    assert_eq!(resolved.previous_keys, vec![("old".into(), previous_key)]);
     assert_eq!(*fake.calls.lock().unwrap(), ["db/old"]);
     assert!(resolved.write_enabled);
     assert!(!resolved.agent_secrets_write_enabled);
@@ -54,24 +56,27 @@ async fn resolves_ordered_sources_and_preserves_write_gates() {
 #[tokio::test]
 async fn legacy_config_uses_single_key_without_fetching() {
     let fake = fetcher(vec![]);
-    let resolved = resolve_field_encryption_with(&config(None), &fake)
+    let settings = config(None);
+    let expected_key = parse_key(&settings.key).unwrap();
+    let resolved = resolve_field_encryption_with(&settings, &fake)
         .await
         .unwrap();
     assert_eq!(resolved.ring().unwrap().ids(), ["legacy"]);
-    assert_eq!(resolved.key, [9; 32]);
+    assert_eq!(resolved.key, expected_key);
     assert!(fake.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn resolves_trimmed_file_and_rejects_invalid_file_contents() {
     let path = std::env::temp_dir().join(format!("db-ring-key-{}", uuid::Uuid::new_v4()));
-    std::fs::write(&path, format!(" {}\n", hex::encode([3; 32]))).unwrap();
+    let key = crate::random_key();
+    std::fs::write(&path, format!(" {}\n", hex::encode(key))).unwrap();
     let settings = config(Some(format!("new=file:{}", path.display())));
     let fake = fetcher(vec![]);
     let resolved = resolve_field_encryption_with(&settings, &fake)
         .await
         .unwrap();
-    assert_eq!(resolved.key, [3; 32]);
+    assert_eq!(resolved.key, key);
     std::fs::write(&path, "sensitive-invalid-content").unwrap();
     let error = resolve_field_encryption_with(&settings, &fake)
         .await
@@ -83,7 +88,7 @@ async fn resolves_trimmed_file_and_rejects_invalid_file_contents() {
 
 #[tokio::test]
 async fn source_errors_fail_closed_without_sensitive_details() {
-    let mut fake = fetcher(vec![1; 31]);
+    let mut fake = fetcher(crate::random_key()[..31].to_vec());
     let settings = config(Some("new=dstack:key/path".into()));
     assert!(resolve_field_encryption_with(&settings, &fake)
         .await
@@ -116,7 +121,7 @@ async fn source_errors_fail_closed_without_sensitive_details() {
 
 #[tokio::test]
 async fn invalid_sources_and_legacy_keys_fail_before_dstack_fetch() {
-    let fake = fetcher(vec![2; 32]);
+    let fake = fetcher(crate::random_key().to_vec());
     for raw in [
         "new=dstack:path,new=file:/key",
         "new=dstack:path,bad=hex:short",
@@ -132,6 +137,6 @@ async fn invalid_sources_and_legacy_keys_fail_before_dstack_fetch() {
     legacy.key_id = "invalid:id".into();
     assert!(resolve_field_encryption_with(&legacy, &fake).await.is_err());
     legacy.key_id = "legacy".into();
-    legacy.key = hex::encode([3; 31]);
+    legacy.key = hex::encode(&crate::random_key()[..31]);
     assert!(resolve_field_encryption_with(&legacy, &fake).await.is_err());
 }

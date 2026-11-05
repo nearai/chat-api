@@ -4,10 +4,16 @@ use database::{field_encryption, Database};
 use http::{HeaderName, HeaderValue};
 use serde_json::{json, Value};
 use services::db_pool::FieldEncryptionConfig;
+use std::sync::LazyLock;
 use uuid::Uuid;
 
-pub const OLD: [u8; 32] = [0x42; 32];
-pub const WRITE: [u8; 32] = [0x53; 32];
+pub static OLD: LazyLock<[u8; 32]> = LazyLock::new(random_key);
+pub static WRITE: LazyLock<[u8; 32]> = LazyLock::new(random_key);
+
+pub fn random_key() -> [u8; 32] {
+    use rand::{Rng, TryRngCore};
+    rand::rngs::OsRng.unwrap_err().random()
+}
 
 pub struct Fixture {
     pub server: TestServer,
@@ -29,9 +35,9 @@ pub struct Fixture {
 
 pub fn ring_config() -> FieldEncryptionConfig {
     FieldEncryptionConfig {
-        key: WRITE,
+        key: *WRITE,
         key_id: "rotation-v2".into(),
-        previous_keys: vec![("db-v1".into(), OLD)],
+        previous_keys: vec![("db-v1".into(), *OLD)],
         write_enabled: true,
         agent_secrets_write_enabled: true,
     }

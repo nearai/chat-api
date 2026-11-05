@@ -70,55 +70,77 @@ mod tests {
         }
     }
 
-    fn ring() -> KeyRing {
+    fn ring(current_key: [u8; 32], previous_key: [u8; 32]) -> KeyRing {
         KeyRing::new(
             "current".into(),
-            [9; 32],
-            vec![("previous".into(), [7; 32])],
+            current_key,
+            vec![("previous".into(), previous_key)],
         )
         .unwrap()
     }
 
     #[test]
     fn authenticated_values_are_current_stale_or_plaintext() {
+        let current_key = crate::random_key();
+        let previous_key = crate::random_key();
+        let ring = ring(current_key, previous_key);
         let id = Uuid::new_v4();
         let field = field(Kind::Text);
-        let current =
-            database::field_encryption::encrypt(&[9; 32], "current", "files", "filename", id, "a")
-                .unwrap();
-        let stale =
-            database::field_encryption::encrypt(&[7; 32], "previous", "files", "filename", id, "b")
-                .unwrap();
+        let current = database::field_encryption::encrypt(
+            &current_key,
+            "current",
+            "files",
+            "filename",
+            id,
+            "a",
+        )
+        .unwrap();
+        let stale = database::field_encryption::encrypt(
+            &previous_key,
+            "previous",
+            "files",
+            "filename",
+            id,
+            "b",
+        )
+        .unwrap();
         assert_eq!(
-            read_value(&ring(), &field, id, &current).unwrap(),
+            read_value(&ring, &field, id, &current).unwrap(),
             StoredValue::Current("a".into())
         );
         assert_eq!(
-            read_value(&ring(), &field, id, &stale).unwrap(),
+            read_value(&ring, &field, id, &stale).unwrap(),
             StoredValue::Stale("b".into())
         );
         assert_eq!(
-            read_value(&ring(), &field, id, "hello").unwrap(),
+            read_value(&ring, &field, id, "hello").unwrap(),
             StoredValue::Plaintext("hello".into())
         );
-        assert!(read_value(&ring(), &field, Uuid::new_v4(), &stale).is_err());
-        let unknown =
-            database::field_encryption::encrypt(&[7; 32], "unknown", "files", "filename", id, "c")
-                .unwrap();
-        assert!(read_value(&ring(), &field, id, &unknown).is_err());
+        assert!(read_value(&ring, &field, Uuid::new_v4(), &stale).is_err());
+        let unknown = database::field_encryption::encrypt(
+            &previous_key,
+            "unknown",
+            "files",
+            "filename",
+            id,
+            "c",
+        )
+        .unwrap();
+        assert!(read_value(&ring, &field, id, &unknown).is_err());
         let tampered = current.replace("\"key_id\":\"current\"", "\"key_id\":\"previous\"");
-        assert!(read_value(&ring(), &field, id, &tampered).is_err());
+        assert!(read_value(&ring, &field, id, &tampered).is_err());
     }
 
     #[test]
     fn malformed_agent_envelopes_are_invalid() {
+        let ring = ring(crate::random_key(), crate::random_key());
         let field = field(Kind::AgentSecret);
         for value in [
             r#"{"__near_db_encrypted":true}"#,
             r#"{"__near_db_encrypted":false}"#,
         ] {
             assert!(
-                read_value(&ring(), &field, Uuid::nil(), value).is_err(),
+                read_value(&ring, &field, Uuid::nil(), value).is_err(),
                 "agent marker must not become plaintext"
             );
         }

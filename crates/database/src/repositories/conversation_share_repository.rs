@@ -1060,20 +1060,24 @@ mod tests {
     #[test]
     fn lookup_tokens_include_previous_keys_with_recipient_normalization() {
         // Given a repository whose write and previous keys differ.
+        let current_key = crate::random_key();
+        let previous_key = crate::random_key();
         let pool = DbPool::uninitialized();
         pool.set_field_encryption(FieldEncryptionConfig {
-            key: [47; 32],
+            key: current_key,
             key_id: "current".into(),
-            previous_keys: vec![("previous".into(), [59; 32])],
+            previous_keys: vec![("previous".into(), previous_key)],
             write_enabled: true,
             agent_secrets_write_enabled: false,
         });
         let repository = PostgresConversationShareRepository::new(pool);
         let domain = "conversation_shares.recipient_value";
         let current =
-            crate::field_encryption::search_token(&[47; 32], domain, "user@example.com").unwrap();
+            crate::field_encryption::search_token(&current_key, domain, "user@example.com")
+                .unwrap();
         let previous =
-            crate::field_encryption::search_token(&[59; 32], domain, "user@example.com").unwrap();
+            crate::field_encryption::search_token(&previous_key, domain, "user@example.com")
+                .unwrap();
 
         // When a recipient lookup includes spaces and uppercase text.
         let tokens = repository.lookup_tokens(domain, " USER@EXAMPLE.COM ");

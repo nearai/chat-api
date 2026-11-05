@@ -82,25 +82,36 @@ mod tests {
 
     #[test]
     fn order_lookup_fingerprints_and_redaction() {
-        let ring =
-            KeyRing::new("new".into(), [0x21; 32], vec![("old".into(), [0x42; 32])]).unwrap();
+        let current_key = crate::random_key();
+        let previous_key = crate::random_key();
+        let ring = KeyRing::new(
+            "new".into(),
+            current_key,
+            vec![("old".into(), previous_key)],
+        )
+        .unwrap();
         assert_eq!(ring.write_id(), "new");
         assert_eq!(ring.ids(), ["new", "old"]);
-        assert_eq!(ring.lookup("old"), Some(&[0x42; 32]));
+        assert_eq!(ring.lookup("old"), Some(&previous_key));
         assert!(ring.lookup("missing").is_none());
         assert_eq!(
             ring.fingerprints()["new"],
-            &hex::encode(Sha256::digest([0x21; 32]))[..16]
+            &hex::encode(Sha256::digest(current_key))[..16]
         );
-        assert!(!format!("{ring:?}").contains(&"21".repeat(32)));
-        assert!(!format!("{ring:?}").contains("33, 33"));
+        assert!(!format!("{ring:?}").contains(&hex::encode(current_key)));
+        assert!(!format!("{ring:?}").contains(&format!("{current_key:?}")));
     }
 
     #[test]
     fn rejects_duplicate_and_invalid_ids() {
-        assert!(KeyRing::new("same".into(), [1; 32], vec![("same".into(), [2; 32])]).is_err());
+        assert!(KeyRing::new(
+            "same".into(),
+            crate::random_key(),
+            vec![("same".into(), crate::random_key())]
+        )
+        .is_err());
         for id in ["", "has space", "unsafe:separator", &"x".repeat(65)] {
-            assert!(KeyRing::new(id.into(), [1; 32], vec![]).is_err());
+            assert!(KeyRing::new(id.into(), crate::random_key(), vec![]).is_err());
         }
     }
 }

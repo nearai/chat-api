@@ -136,18 +136,19 @@ mod tests {
 
     #[test]
     fn field_encryption_ring_propagates_to_existing_clones() {
+        let previous_key = crate::random_key();
         let handle = DbPool::uninitialized();
         let clone = handle.clone();
         handle.set_field_encryption(FieldEncryptionConfig {
-            key: [1; 32],
+            key: crate::random_key(),
             key_id: "new".into(),
-            previous_keys: vec![("old".into(), [2; 32])],
+            previous_keys: vec![("old".into(), previous_key)],
             write_enabled: false,
             agent_secrets_write_enabled: true,
         });
         let config = clone.field_encryption().unwrap();
         assert_eq!(config.ring().unwrap().ids(), ["new", "old"]);
-        assert_eq!(config.ring().unwrap().lookup("old"), Some(&[2; 32]));
+        assert_eq!(config.ring().unwrap().lookup("old"), Some(&previous_key));
         assert!(!config.write_enabled);
         assert!(config.agent_secrets_write_enabled);
     }

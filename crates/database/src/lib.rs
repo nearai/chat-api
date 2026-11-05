@@ -407,6 +407,12 @@ fn direct_pool_config(config: &config::DatabaseConfig) -> Result<deadpool_postgr
 }
 
 #[cfg(test)]
+fn random_key() -> [u8; 32] {
+    use rand::{Rng, TryRngCore};
+    rand::rngs::OsRng.unwrap_err().random()
+}
+
+#[cfg(test)]
 mod direct_connection_tests {
     use super::*;
 

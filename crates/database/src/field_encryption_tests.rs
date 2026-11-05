@@ -66,16 +66,23 @@ fn encryption_and_search_use_distinct_subkeys() {
 }
 #[test]
 fn previous_key_round_trip_enforces_context_and_unknown_id() {
-    let ring = KeyRing::new("new".into(), [1; 32], vec![("old".into(), [2; 32])]).unwrap();
+    let current_key = test_key();
+    let previous_key = test_key();
+    let ring = KeyRing::new(
+        "new".into(),
+        current_key,
+        vec![("old".into(), previous_key)],
+    )
+    .unwrap();
     let row = Uuid::new_v4();
-    let encrypted = encrypt(&[2; 32], "old", "files", "filename", row, "before.txt").unwrap();
+    let encrypted = encrypt(&previous_key, "old", "files", "filename", row, "before.txt").unwrap();
     assert_eq!(
         decrypt_with_ring(&encrypted, &ring, "files", "filename", row).unwrap(),
         "before.txt"
     );
     assert!(decrypt_with_ring(&encrypted, &ring, "files", "filename", Uuid::new_v4()).is_err());
     assert!(decrypt_with_ring(&encrypted, &ring, "other", "filename", row).is_err());
-    let current_only = KeyRing::new("new".into(), [1; 32], vec![]).unwrap();
+    let current_only = KeyRing::new("new".into(), current_key, vec![]).unwrap();
     assert_eq!(
         decrypt_with_ring(&encrypted, &current_only, "files", "filename", row)
             .unwrap_err()
@@ -89,15 +96,22 @@ fn previous_key_round_trip_enforces_context_and_unknown_id() {
 
 #[test]
 fn lookup_tokens_follow_ring_order_and_write_primitive_stays_compatible() {
-    let ring = KeyRing::new("new".into(), [1; 32], vec![("old".into(), [2; 32])]).unwrap();
+    let current_key = test_key();
+    let previous_key = test_key();
+    let ring = KeyRing::new(
+        "new".into(),
+        current_key,
+        vec![("old".into(), previous_key)],
+    )
+    .unwrap();
     let tokens = search_tokens_for_lookup(&ring, "groups.name", "name").unwrap();
     assert_ne!(tokens[0], tokens[1]);
     assert_eq!(
         tokens[0],
-        search_token(&[1; 32], "groups.name", "name").unwrap()
+        search_token(&current_key, "groups.name", "name").unwrap()
     );
     assert_eq!(
         tokens[1],
-        search_token_with_key(&[2; 32], "groups.name", "name").unwrap()
+        search_token_with_key(&previous_key, "groups.name", "name").unwrap()
     );
 }

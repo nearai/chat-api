@@ -1,4 +1,4 @@
-use super::fixture::Fixture;
+use super::fixture::{random_key, Fixture};
 use database::field_encryption;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -6,12 +6,15 @@ use uuid::Uuid;
 #[tokio::test]
 async fn recovered_dry_run_replays_projection_and_matches_execute_conflicts() {
     let f = Fixture::new().await;
+    let previous_key = random_key();
     let mut config = f.db.pool().field_encryption().unwrap();
-    config.previous_keys.push(("rotation-v0".into(), [31; 32]));
+    config
+        .previous_keys
+        .push(("rotation-v0".into(), previous_key));
     f.db.pool().set_field_encryption(config);
     let later = Uuid::from_u128(u128::MAX);
     let raw = field_encryption::encrypt(
-        &[31; 32],
+        &previous_key,
         "rotation-v0",
         "conversation_share_groups",
         "name",
@@ -20,7 +23,7 @@ async fn recovered_dry_run_replays_projection_and_matches_execute_conflicts() {
     )
     .unwrap();
     let token =
-        field_encryption::search_token(&[31; 32], "conversation_share_groups.name", &f.name)
+        field_encryption::search_token(&previous_key, "conversation_share_groups.name", &f.name)
             .unwrap();
     let client = f.db.pool().get().await.unwrap();
     client.execute("INSERT INTO conversation_share_groups(id,owner_user_id,name,name_search_token) VALUES($1,$2,$3,$4)",&[&later,&f.user,&raw,&token]).await.unwrap();

@@ -126,7 +126,7 @@ fn disabled_write_gate_blocks_only_execute_batches() {
 
 #[test]
 fn search_token_validation_rejects_missing_stale_and_copied_tokens() {
-    let key = [7u8; 32];
+    let key = crate::random_key();
     let field = FIELDS
         .iter()
         .find(|field| field.table == "conversation_shares" && field.column == "recipient_value")

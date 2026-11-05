@@ -150,7 +150,7 @@ mod tests {
     fn field_credentials_read_previous_keys() {
         // Given a credential written before the write key rotated.
         let id = Uuid::new_v4();
-        let previous_key = [17; 32];
+        let previous_key = crate::random_key();
         let ciphertext = field_encryption::encrypt(
             &previous_key,
             "previous",
@@ -161,7 +161,7 @@ mod tests {
         )
         .unwrap();
         let config = FieldEncryptionConfig {
-            key: [29; 32],
+            key: crate::random_key(),
             key_id: "current".into(),
             previous_keys: vec![("previous".into(), previous_key)],
             write_enabled: true,

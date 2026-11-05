@@ -79,10 +79,8 @@ mod tests {
 
     #[test]
     fn parses_ordered_sources_and_redacts_values() {
-        let raw = format!(
-            "new=hex:{}, old=file:/keys/old, older=dstack:db/older",
-            "ab".repeat(32)
-        );
+        let key = crate::random_key_hex();
+        let raw = format!("new=hex:{key}, old=file:/keys/old, older=dstack:db/older");
         let keys = parse_encryption_keys(&raw).unwrap();
         assert_eq!(
             keys.iter()
@@ -92,7 +90,7 @@ mod tests {
         );
         assert_eq!(keys[1].source, KeySource::File("/keys/old".into()));
         assert_eq!(keys[2].source, KeySource::Dstack("db/older".into()));
-        assert!(!format!("{keys:?}").contains(&"ab".repeat(32)));
+        assert!(!format!("{keys:?}").contains(&key));
     }
 
     #[test]

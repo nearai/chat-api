@@ -296,7 +296,7 @@ mod tests {
     fn filename_reads_previous_keys() {
         // Given a filename written under a previous key with its original row context.
         let id = Uuid::new_v4();
-        let previous_key = [31; 32];
+        let previous_key = crate::random_key();
         let ciphertext = crate::field_encryption::encrypt(
             &previous_key,
             "previous",
@@ -308,7 +308,7 @@ mod tests {
         .unwrap();
         let pool = DbPool::uninitialized();
         pool.set_field_encryption(FieldEncryptionConfig {
-            key: [43; 32],
+            key: crate::random_key(),
             key_id: "current".into(),
             previous_keys: vec![("previous".into(), previous_key)],
             write_enabled: true,

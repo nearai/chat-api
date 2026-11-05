@@ -1039,6 +1039,13 @@ impl Default for DatabaseEncryptionConfig {
 }
 
 #[cfg(test)]
+fn random_key_hex() -> String {
+    use rand::{Rng, TryRngCore};
+    let key: [u8; 32] = rand::rngs::OsRng.unwrap_err().random();
+    key.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
@@ -1117,7 +1124,8 @@ mod tests {
     #[test]
     #[serial]
     fn database_encryption_ring_overrides_legacy_file() {
-        std::env::set_var("DB_ENCRYPTION_KEYS", format!("new=hex:{}", "22".repeat(32)));
+        let key = random_key_hex();
+        std::env::set_var("DB_ENCRYPTION_KEYS", format!("new=hex:{key}"));
         std::env::set_var("DB_ENCRYPTION_KEY_FILE", "/no-such-key-ring-test-file");
         let loaded = std::panic::catch_unwind(DatabaseEncryptionConfig::default);
         std::env::remove_var("DB_ENCRYPTION_KEYS");
@@ -1129,7 +1137,7 @@ mod tests {
         let config = loaded.unwrap();
         assert!(config.key.is_empty());
         assert!(config.keys.is_some());
-        assert!(!format!("{config:?}").contains(&"22".repeat(32)));
+        assert!(!format!("{config:?}").contains(&key));
     }
 
     #[test]
