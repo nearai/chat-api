@@ -173,7 +173,7 @@ Reports include:
 ### Deployment
 
 - **Automatic TEE detection** via `dstack-sdk`
-- **VPC authentication** for secure key management (set `VPC_SHARED_SECRET_FILE`)
+- **VPC authentication** for secure key management (set `VPC_SHARED_SECRET_FILE`, or `SERVICE_LOGIN_SECRET_FILE`, which takes precedence when both are set)
 - **Reproducible builds** required for attestation verification
 - **Development mode**: `DEV=true` returns mock attestation data
 - **Production mode**: `DEV=false` requires TEE execution and generates real attestation reports

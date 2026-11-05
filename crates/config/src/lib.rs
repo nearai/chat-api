@@ -477,7 +477,8 @@ fn parse_lukka_aml_policy() -> ParsedLukkaAmlPolicy {
 /// Configuration for VPC authentication to obtain API keys dynamically
 #[derive(Debug, Clone, Deserialize)]
 pub struct VpcAuthConfig {
-    /// Path to the file containing the VPC shared secret
+    /// Path to the file containing the login signing secret
+    /// (`SERVICE_LOGIN_SECRET_FILE`, falling back to `VPC_SHARED_SECRET_FILE`)
     pub shared_secret_file: Option<String>,
     /// Client ID for VPC authentication
     pub client_id: String,
@@ -486,11 +487,20 @@ pub struct VpcAuthConfig {
 impl Default for VpcAuthConfig {
     fn default() -> Self {
         Self {
-            shared_secret_file: std::env::var("VPC_SHARED_SECRET_FILE").ok(),
+            shared_secret_file: select_login_secret_file(
+                std::env::var("SERVICE_LOGIN_SECRET_FILE").ok(),
+                std::env::var("VPC_SHARED_SECRET_FILE").ok(),
+            ),
             client_id: std::env::var("VPC_CLIENT_ID")
                 .unwrap_or_else(|_| "chat-api-client".to_string()),
         }
     }
+}
+
+/// Prefer `SERVICE_LOGIN_SECRET_FILE` when set; otherwise fall back to
+/// `VPC_SHARED_SECRET_FILE`.
+fn select_login_secret_file(service: Option<String>, legacy: Option<String>) -> Option<String> {
+    service.or(legacy)
 }
 
 impl VpcAuthConfig {
@@ -1031,6 +1041,18 @@ impl Default for DatabaseEncryptionConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn login_secret_file_prefers_service_secret() {
+        let pick = super::select_login_secret_file;
+        assert_eq!(
+            pick(Some("a".into()), Some("b".into())).as_deref(),
+            Some("a")
+        );
+        assert_eq!(pick(None, Some("b".into())).as_deref(), Some("b"));
+        assert_eq!(pick(Some("a".into()), None).as_deref(), Some("a"));
+        assert_eq!(pick(None, None), None);
+    }
+
     use super::*;
     use serial_test::serial;
     use std::ffi::OsString;
