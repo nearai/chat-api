@@ -8,13 +8,20 @@ pub(super) struct RowRewrite {
     pub(super) token: Option<Vec<u8>>,
 }
 
-/// Only token rewraps need row savepoints to isolate unique violations.
+pub(super) struct BatchWriteResult {
+    pub(super) updated: u64,
+    pub(super) conflicts: Vec<Uuid>,
+}
+
 pub(super) async fn write_batch(
     batch: &batch::Batch<'_, '_>,
     rewrites: &[RowRewrite],
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<BatchWriteResult> {
     if rewrites.is_empty() {
-        return Ok(0);
+        return Ok(BatchWriteResult {
+            updated: 0,
+            conflicts: Vec::new(),
+        });
     }
     let ids: Vec<_> = rewrites.iter().map(|row| row.id).collect();
     let values: Vec<_> = rewrites.iter().map(|row| row.value.as_str()).collect();
@@ -37,13 +44,51 @@ pub(super) async fn write_batch(
             column = field.column,
         )
     };
-    let updated = if field.token.is_some() {
-        let tokens: Vec<_> = rewrites.iter().map(|row| row.token.as_deref()).collect();
-        batch.tx.execute(&sql, &[&ids, &values, &tokens]).await?
-    } else {
-        batch.tx.execute(&sql, &[&ids, &values]).await?
-    };
-    Ok(updated)
+    if field.token.is_none() {
+        return Ok(BatchWriteResult {
+            updated: batch.tx.execute(&sql, &[&ids, &values]).await?,
+            conflicts: Vec::new(),
+        });
+    }
+    batch.tx.batch_execute("SAVEPOINT token_batch").await?;
+    let tokens: Vec<_> = rewrites.iter().map(|row| row.token.as_deref()).collect();
+    match batch.tx.execute(&sql, &[&ids, &values, &tokens]).await {
+        Ok(updated) => {
+            batch
+                .tx
+                .batch_execute("RELEASE SAVEPOINT token_batch")
+                .await?;
+            Ok(BatchWriteResult {
+                updated,
+                conflicts: Vec::new(),
+            })
+        }
+        Err(error) if error.code() == Some(&SqlState::UNIQUE_VIOLATION) => {
+            batch
+                .tx
+                .batch_execute("ROLLBACK TO SAVEPOINT token_batch; RELEASE SAVEPOINT token_batch")
+                .await?;
+            let mut result = BatchWriteResult {
+                updated: 0,
+                conflicts: Vec::new(),
+            };
+            for rewrite in rewrites {
+                if write_row(batch, rewrite).await? {
+                    result.updated += 1;
+                } else {
+                    result.conflicts.push(rewrite.id);
+                }
+            }
+            Ok(result)
+        }
+        Err(error) => {
+            batch
+                .tx
+                .batch_execute("ROLLBACK TO SAVEPOINT token_batch; RELEASE SAVEPOINT token_batch")
+                .await?;
+            Err(error.into())
+        }
+    }
 }
 
 /// Keep the envelope and token atomic, while isolating unique violations per row.
@@ -55,10 +100,7 @@ pub(super) async fn write_row(
     let value = &rewrite.value;
     let token = rewrite.token.as_deref();
     let field = batch.field;
-    let rewrap = batch.action == "rewrap";
-    if rewrap {
-        batch.tx.batch_execute("SAVEPOINT rewrap_row").await?;
-    }
+    batch.tx.batch_execute("SAVEPOINT token_row").await?;
     let row_id = row_id_expression(field, None);
     let result = if let Some((token_column, _)) = field.token {
         let sql = format!(
@@ -77,21 +119,25 @@ pub(super) async fn write_row(
     };
     match result {
         Ok(updated) => {
-            if rewrap {
-                batch
-                    .tx
-                    .batch_execute("RELEASE SAVEPOINT rewrap_row")
-                    .await?;
-            }
-            Ok(updated > 0)
-        }
-        Err(error) if rewrap && error.code() == Some(&SqlState::UNIQUE_VIOLATION) => {
             batch
                 .tx
-                .batch_execute("ROLLBACK TO SAVEPOINT rewrap_row; RELEASE SAVEPOINT rewrap_row")
+                .batch_execute("RELEASE SAVEPOINT token_row")
+                .await?;
+            Ok(updated > 0)
+        }
+        Err(error) if error.code() == Some(&SqlState::UNIQUE_VIOLATION) => {
+            batch
+                .tx
+                .batch_execute("ROLLBACK TO SAVEPOINT token_row; RELEASE SAVEPOINT token_row")
                 .await?;
             Ok(false)
         }
-        Err(error) => Err(error.into()),
+        Err(error) => {
+            batch
+                .tx
+                .batch_execute("ROLLBACK TO SAVEPOINT token_row; RELEASE SAVEPOINT token_row")
+                .await?;
+            Err(error.into())
+        }
     }
 }

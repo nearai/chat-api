@@ -135,14 +135,17 @@ async fn run_batch(
                 .process(row, &mut checkpoint.progress, projection, &mut rewrites)
                 .await?;
         }
-        let updated = writes::write_batch(&processor, &rewrites).await? as i64;
+        let result = writes::write_batch(&processor, &rewrites).await?;
         checkpoint.progress.record(field, |counts| {
             if action == "encrypt" {
-                counts.encrypted += updated;
+                counts.encrypted += result.updated as i64;
             } else if action == "rewrap" {
-                counts.rewrapped += updated;
+                counts.rewrapped += result.updated as i64;
             }
         });
+        for id in result.conflicts {
+            checkpoint.progress.conflict(field, id);
+        }
         checkpoint.progress.token_conflicts_estimated = projection.estimated();
         scope.options.batch_delay_ms.unwrap_or_default()
     };
