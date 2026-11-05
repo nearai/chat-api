@@ -26,8 +26,8 @@ impl PostgresConversationShareRepository {
     ) -> Result<String, ConversationError> {
         match self.pool.field_encryption() {
             Some(config) if config.write_enabled => crate::field_encryption::encrypt(
-                &config.key,
-                &config.key_id,
+                config.ring().write_key(),
+                config.ring().write_id(),
                 table,
                 column,
                 id,
@@ -48,9 +48,7 @@ impl PostgresConversationShareRepository {
         match self.pool.field_encryption() {
             Some(config) => crate::field_encryption::decrypt_if_encrypted_with_ring(
                 value,
-                &config
-                    .ring()
-                    .map_err(|e| ConversationError::DatabaseError(e.to_string()))?,
+                config.ring(),
                 table,
                 column,
                 id,
@@ -69,8 +67,12 @@ impl PostgresConversationShareRepository {
         self.pool
             .field_encryption()
             .map(|config| {
-                crate::field_encryption::search_token(&config.key, domain, &normalized)
-                    .map_err(|e| ConversationError::DatabaseError(e.to_string()))
+                crate::field_encryption::search_token(
+                    config.ring().write_key(),
+                    domain,
+                    &normalized,
+                )
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))
             })
             .transpose()
     }
@@ -84,10 +86,8 @@ impl PostgresConversationShareRepository {
         } else {
             value.trim().to_lowercase()
         };
-        let ring = config
-            .ring()
-            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-        crate::field_encryption::search_tokens_for_lookup(&ring, domain, &normalized)
+        let ring = config.ring();
+        crate::field_encryption::search_tokens_for_lookup(ring, domain, &normalized)
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))
     }
 
@@ -1064,9 +1064,12 @@ mod tests {
         let previous_key = crate::random_key();
         let pool = DbPool::uninitialized();
         pool.set_field_encryption(FieldEncryptionConfig {
-            key: current_key,
-            key_id: "current".into(),
-            previous_keys: vec![("previous".into(), previous_key)],
+            ring: services::encryption_key_ring::KeyRing::new(
+                "current".into(),
+                current_key,
+                vec![("previous".into(), previous_key)],
+            )
+            .unwrap(),
             write_enabled: true,
             agent_secrets_write_enabled: false,
         });

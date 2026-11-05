@@ -29,15 +29,17 @@ pub struct Fixture {
     pub oauth: Uuid,
     pub email: String,
     pub name: String,
-    database_name: String,
-    control: Database,
+    _cleanup: DatabaseCleanup,
 }
 
 pub fn ring_config() -> FieldEncryptionConfig {
     FieldEncryptionConfig {
-        key: *WRITE,
-        key_id: "rotation-v2".into(),
-        previous_keys: vec![("db-v1".into(), *OLD)],
+        ring: field_encryption::KeyRing::new(
+            "rotation-v2".into(),
+            *WRITE,
+            vec![("db-v1".into(), *OLD)],
+        )
+        .unwrap(),
         write_enabled: true,
         agent_secrets_write_enabled: true,
     }
@@ -57,6 +59,10 @@ impl Fixture {
             .batch_execute(&format!("CREATE DATABASE {database_name}"))
             .await
             .unwrap();
+        let cleanup = DatabaseCleanup {
+            database_name: database_name.clone(),
+            config: config.database.clone(),
+        };
         let (server, db, state) = create_test_server_with_state(TestServerConfig {
             database_name: Some(database_name.clone()),
             field_encryption: Some(ring_config()),
@@ -114,8 +120,7 @@ impl Fixture {
             oauth,
             email,
             name,
-            database_name,
-            control,
+            _cleanup: cleanup,
         }
     }
 
@@ -188,24 +193,41 @@ impl Fixture {
     }
 
     pub async fn cleanup(self) {
-        let Self {
-            server,
-            db,
-            state,
-            control,
-            database_name,
-            ..
-        } = self;
-        drop(server);
-        drop(db);
-        drop(state);
-        control
-            .pool()
-            .get()
-            .await
-            .unwrap()
-            .batch_execute(&format!("DROP DATABASE {database_name} WITH (FORCE)"))
-            .await
-            .unwrap();
+        // The guard also runs when construction or an assertion panics.
+        drop(self);
+    }
+}
+
+struct DatabaseCleanup {
+    database_name: String,
+    config: config::DatabaseConfig,
+}
+
+impl Drop for DatabaseCleanup {
+    fn drop(&mut self) {
+        let database_name = self.database_name.clone();
+        let config = self.config.clone();
+        // A fresh runtime/connection avoids waiting on tasks owned by the test's
+        // current-thread runtime while it is unwinding or dropping the fixture.
+        let cleanup = std::thread::spawn(move || -> anyhow::Result<()> {
+            tokio::runtime::Runtime::new()?.block_on(async move {
+                let control = Database::from_config(&config).await?;
+                control
+                    .pool()
+                    .get()
+                    .await?
+                    .batch_execute(&format!("DROP DATABASE {database_name} WITH (FORCE)"))
+                    .await?;
+                Ok(())
+            })
+        })
+        .join();
+        if !matches!(cleanup, Ok(Ok(()))) {
+            if std::thread::panicking() {
+                eprintln!("isolated rotation database cleanup failed during unwinding");
+            } else {
+                panic!("isolated rotation database cleanup failed");
+            }
+        }
     }
 }

@@ -1,39 +1,16 @@
 use super::*;
 
-/// Temporary, session-local simulation; only row ids and HMAC tokens are stored.
-/// PostgreSQL spills growing temporary relations to disk instead of retaining a
-/// field's entire projection in application memory. Batch commits preserve it.
-pub(super) async fn initialize(client: &deadpool_postgres::Object) -> anyhow::Result<()> {
-    clear_session(client).await?;
+/// Only row ids and HMAC tokens are stored, scoped to a job rather than a pooled
+/// session so connections can be returned between committed batches.
+pub(super) async fn clear(
+    client: &impl deadpool_postgres::GenericClient,
+    job_id: Uuid,
+) -> anyhow::Result<()> {
     client
-        .batch_execute(
-            "CREATE TEMPORARY TABLE near_db_encryption_projection (
-            row_id UUID PRIMARY KEY,
-            token BYTEA NOT NULL
-         ) ON COMMIT PRESERVE ROWS;
-         CREATE INDEX near_db_encryption_projection_token
-            ON near_db_encryption_projection(token)",
+        .execute(
+            "DELETE FROM database_encryption_projection WHERE job_id=$1",
+            &[&job_id],
         )
-        .await?;
-    Ok(())
-}
-
-pub(super) async fn clear_session(client: &deadpool_postgres::Object) -> anyhow::Result<()> {
-    // Inspecting the current session's namespace does not create one or require
-    // TEMP privilege. Ordinary encrypt/verify jobs issue no temporary DDL.
-    let exists: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM pg_class
-         WHERE relnamespace=pg_my_temp_schema() AND relname='near_db_encryption_projection')",
-            &[],
-        )
-        .await?
-        .get(0);
-    if !exists {
-        return Ok(());
-    }
-    client
-        .batch_execute("DROP TABLE pg_temp.near_db_encryption_projection")
         .await?;
     Ok(())
 }
@@ -62,11 +39,11 @@ pub(super) async fn try_rewrite(
         "SELECT EXISTS (
             SELECT 1 FROM {table} target JOIN {table} other ON {constraint}
             WHERE target.id=$1 AND other.id<>$1 AND other.{column}=$2
-                AND NOT EXISTS (SELECT 1 FROM pg_temp.near_db_encryption_projection projected
-                                WHERE projected.row_id=other.id)
+                AND NOT EXISTS (SELECT 1 FROM database_encryption_projection projected
+                                WHERE projected.job_id=$3 AND projected.row_id=other.id)
             UNION ALL
             SELECT 1 FROM {table} target
-            JOIN pg_temp.near_db_encryption_projection projected ON projected.token=$2
+            JOIN database_encryption_projection projected ON projected.job_id=$3 AND projected.token=$2
             JOIN {table} other ON other.id=projected.row_id AND {constraint}
             WHERE target.id=$1 AND other.id<>$1
         )",
@@ -74,7 +51,7 @@ pub(super) async fn try_rewrite(
     );
     let conflicts: bool = batch
         .tx
-        .query_one(&sql, &[&rewrite.id, &token])
+        .query_one(&sql, &[&rewrite.id, &token, &batch.job_id])
         .await?
         .get(0);
     if conflicts {
@@ -83,8 +60,8 @@ pub(super) async fn try_rewrite(
     batch
         .tx
         .execute(
-            "INSERT INTO pg_temp.near_db_encryption_projection(row_id,token) VALUES($1,$2)",
-            &[&rewrite.id, &token],
+            "INSERT INTO database_encryption_projection(row_id,token,job_id) VALUES($1,$2,$3)",
+            &[&rewrite.id, &token, &batch.job_id],
         )
         .await?;
     Ok(true)

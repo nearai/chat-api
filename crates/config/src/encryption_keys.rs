@@ -1,10 +1,19 @@
 use std::{collections::HashSet, fmt};
+use zeroize::Zeroize;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum KeySource {
     File(String),
     Dstack(String),
     Hex(String),
+}
+
+impl Drop for KeySource {
+    fn drop(&mut self) {
+        if let Self::Hex(value) = self {
+            value.zeroize();
+        }
+    }
 }
 
 impl fmt::Debug for KeySource {

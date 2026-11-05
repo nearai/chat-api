@@ -276,15 +276,8 @@ async fn agent_credentials_roll_out_and_backfill_without_the_old_app_key() {
     .enumerate()
     {
         assert_eq!(
-            field_encryption::decrypt(
-                &config.key,
-                &config.key_id,
-                table,
-                column,
-                id,
-                &stored[index]
-            )
-            .unwrap(),
+            field_encryption::decrypt_with_ring(&stored[index], config.ring(), table, column, id)
+                .unwrap(),
             expected
         );
     }

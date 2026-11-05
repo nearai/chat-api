@@ -38,8 +38,8 @@ pub struct VerifyRequest {
     #[serde(default)]
     scope: Scope,
     batch_size: Option<i64>,
-    #[serde(default, deserialize_with = "batch_delay")]
-    batch_delay_ms: u64,
+    #[serde(default, deserialize_with = "requests::optional_batch_delay")]
+    batch_delay_ms: Option<u64>,
     #[serde(default = "yes")]
     fail_on_approved_plaintext_without_reason: bool,
 }

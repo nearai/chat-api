@@ -58,7 +58,7 @@ pub(super) async fn inventory(state: &AppState) -> anyhow::Result<Inventory> {
 }
 
 pub(super) async fn inventory_with_client(
-    client: &deadpool_postgres::Object,
+    client: &impl deadpool_postgres::GenericClient,
 ) -> anyhow::Result<Inventory> {
     let rows = client.query("SELECT columns.table_name,columns.column_name,columns.data_type FROM information_schema.columns columns JOIN information_schema.tables tables USING(table_schema,table_name) WHERE columns.table_schema='public' AND tables.table_type='BASE TABLE' AND columns.table_name <> 'refinery_schema_history' ORDER BY columns.table_name,columns.ordinal_position", &[]).await?;
     let mut inventory = Inventory::default();

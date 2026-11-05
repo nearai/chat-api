@@ -22,21 +22,15 @@ pub struct DbPool {
 
 #[derive(Clone)]
 pub struct FieldEncryptionConfig {
-    pub key: [u8; 32],
-    pub key_id: String,
-    pub previous_keys: Vec<(String, [u8; 32])>,
+    pub ring: crate::encryption_key_ring::KeyRing,
     pub write_enabled: bool,
     /// Separate rollout gate for fields previously encrypted by the dstack app key.
     pub agent_secrets_write_enabled: bool,
 }
 
 impl FieldEncryptionConfig {
-    pub fn ring(&self) -> anyhow::Result<crate::encryption_key_ring::KeyRing> {
-        crate::encryption_key_ring::KeyRing::new(
-            self.key_id.clone(),
-            self.key,
-            self.previous_keys.clone(),
-        )
+    pub const fn ring(&self) -> &crate::encryption_key_ring::KeyRing {
+        &self.ring
     }
 }
 
@@ -140,15 +134,18 @@ mod tests {
         let handle = DbPool::uninitialized();
         let clone = handle.clone();
         handle.set_field_encryption(FieldEncryptionConfig {
-            key: crate::random_key(),
-            key_id: "new".into(),
-            previous_keys: vec![("old".into(), previous_key)],
+            ring: crate::encryption_key_ring::KeyRing::new(
+                "new".into(),
+                crate::random_key(),
+                vec![("old".into(), previous_key)],
+            )
+            .unwrap(),
             write_enabled: false,
             agent_secrets_write_enabled: true,
         });
         let config = clone.field_encryption().unwrap();
-        assert_eq!(config.ring().unwrap().ids(), ["new", "old"]);
-        assert_eq!(config.ring().unwrap().lookup("old"), Some(&previous_key));
+        assert_eq!(config.ring().ids(), ["new", "old"]);
+        assert_eq!(config.ring().lookup("old"), Some(&previous_key));
         assert!(!config.write_enabled);
         assert!(config.agent_secrets_write_enabled);
     }

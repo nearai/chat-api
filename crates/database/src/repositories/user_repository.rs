@@ -275,8 +275,7 @@ impl UserRepository for PostgresUserRepository {
         let encryption = self.pool.field_encryption();
         let ring = encryption
             .as_ref()
-            .map(services::db_pool::FieldEncryptionConfig::ring)
-            .transpose()?;
+            .map(services::db_pool::FieldEncryptionConfig::ring);
         let lookup_tokens = |domain: &str, values: &[String]| -> anyhow::Result<Vec<Vec<u8>>> {
             let Some(ring) = &ring else {
                 return Ok(Vec::new());

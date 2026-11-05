@@ -211,3 +211,8 @@ mod lookups;
 mod recovery;
 #[path = "database_encryption/rotation.rs"]
 mod rotation;
+#[path = "database_encryption/throttle.rs"]
+mod throttle;
+
+#[path = "database_encryption/counts.rs"]
+mod counts;

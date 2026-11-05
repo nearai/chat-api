@@ -1009,22 +1009,60 @@ impl fmt::Debug for DatabaseEncryptionConfig {
     }
 }
 
+impl Drop for DatabaseEncryptionConfig {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.key.zeroize();
+        self.keys.zeroize();
+    }
+}
+
 impl Default for DatabaseEncryptionConfig {
     fn default() -> Self {
-        let keys = std::env::var("DB_ENCRYPTION_KEYS").ok();
+        let mut keys = zeroize::Zeroizing::new(std::env::var("DB_ENCRYPTION_KEYS").ok());
+        if let Some(raw) = keys.as_ref() {
+            let sources = encryption_keys::parse_encryption_keys(raw)
+                .unwrap_or_else(|message| panic!("{message}"));
+            if let Ok(existing_id) = std::env::var("DB_ENCRYPTION_KEY_ID") {
+                assert!(
+                    sources.iter().any(|source| source.key_id == existing_id),
+                    "DB_ENCRYPTION_KEYS must retain the explicitly configured DB_ENCRYPTION_KEY_ID; existing envelopes require their original key id"
+                );
+            }
+            assert!(
+                !sources.iter().any(|source| matches!(&source.source, encryption_keys::KeySource::Hex(_)))
+                    || std::env::var("DB_ENCRYPTION_ALLOW_INLINE_KEYS").as_deref() == Ok("true"),
+                "DB_ENCRYPTION_KEYS hex sources require DB_ENCRYPTION_ALLOW_INLINE_KEYS=true (local/test only)"
+            );
+
+            if std::env::var_os("DB_ENCRYPTION_KEY").is_some()
+                || std::env::var_os("DB_ENCRYPTION_KEY_FILE").is_some()
+            {
+                eprintln!("Warning: DB_ENCRYPTION_KEYS is set; ignoring DB_ENCRYPTION_KEY and DB_ENCRYPTION_KEY_FILE");
+            }
+        }
         let key = if keys.is_some() {
             String::new()
         } else if let Ok(path) = std::env::var("DB_ENCRYPTION_KEY_FILE") {
-            std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("Failed to read DB_ENCRYPTION_KEY_FILE at {path}: {e}"))
-                .trim()
-                .to_string()
+            let contents = zeroize::Zeroizing::new(std::fs::read(&path)
+                .unwrap_or_else(|error| {
+                    let key_id = std::env::var("DB_ENCRYPTION_KEY_ID").unwrap_or_else(|_| "db-v1".into());
+                    eprintln!("Database encryption key file read failed: key_id={key_id:?} path={path:?} kind={:?}", error.kind());
+                    panic!("DB_ENCRYPTION_KEY_FILE could not be read");
+                }));
+            std::str::from_utf8(&contents)
+                .unwrap_or_else(|_| {
+                    let key_id = std::env::var("DB_ENCRYPTION_KEY_ID").unwrap_or_else(|_| "db-v1".into());
+                    eprintln!("Database encryption key file read failed: key_id={key_id:?} path={path:?} kind={:?}", std::io::ErrorKind::InvalidData);
+                    panic!("DB_ENCRYPTION_KEY_FILE could not be read");
+                })
+                .trim().to_owned()
         } else {
             std::env::var("DB_ENCRYPTION_KEY").unwrap_or_default()
         };
         Self {
             key,
-            keys,
+            keys: keys.take(),
             key_id: std::env::var("DB_ENCRYPTION_KEY_ID").unwrap_or_else(|_| "db-v1".to_string()),
             write_enabled: std::env::var("DB_ENCRYPTION_WRITE_ENABLED")
                 .ok()
@@ -1037,6 +1075,9 @@ impl Default for DatabaseEncryptionConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod encryption_config_tests;
 
 #[cfg(test)]
 fn random_key_hex() -> String {
@@ -1127,9 +1168,11 @@ mod tests {
         let key = random_key_hex();
         std::env::set_var("DB_ENCRYPTION_KEYS", format!("new=hex:{key}"));
         std::env::set_var("DB_ENCRYPTION_KEY_FILE", "/no-such-key-ring-test-file");
+        std::env::set_var("DB_ENCRYPTION_ALLOW_INLINE_KEYS", "true");
         let loaded = std::panic::catch_unwind(DatabaseEncryptionConfig::default);
         std::env::remove_var("DB_ENCRYPTION_KEYS");
         std::env::remove_var("DB_ENCRYPTION_KEY_FILE");
+        std::env::remove_var("DB_ENCRYPTION_ALLOW_INLINE_KEYS");
         assert!(
             loaded.is_ok(),
             "ring configuration must supersede the legacy file"

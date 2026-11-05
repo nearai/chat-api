@@ -8,9 +8,19 @@ async fn recovered_dry_run_replays_projection_and_matches_execute_conflicts() {
     let f = Fixture::new().await;
     let previous_key = random_key();
     let mut config = f.db.pool().field_encryption().unwrap();
-    config
-        .previous_keys
-        .push(("rotation-v0".into(), previous_key));
+    let mut previous_keys = config
+        .ring()
+        .keys()
+        .skip(1)
+        .map(|(id, key)| (id.to_owned(), *key))
+        .collect::<Vec<_>>();
+    previous_keys.push(("rotation-v0".into(), previous_key));
+    config.ring = field_encryption::KeyRing::new(
+        config.ring().write_id().into(),
+        *config.ring().write_key(),
+        previous_keys,
+    )
+    .unwrap();
     f.db.pool().set_field_encryption(config);
     let later = Uuid::from_u128(u128::MAX);
     let raw = field_encryption::encrypt(

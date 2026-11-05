@@ -9,24 +9,28 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 pub const MARKER: &str = "__near_db_encrypted";
 pub const DEFAULT_KEY_ID: &str = "db-v1";
 const AEAD_KEY_INFO: &[u8] = b"near-chat-db-aead-v1";
 const SEARCH_KEY_INFO: &[u8] = b"near-chat-db-search-v1";
 
-fn derive_key(master_key: &[u8; 32], info: &[u8]) -> Result<[u8; 32]> {
-    let mut key = *master_key;
+fn derive_key(master_key: &[u8; 32], info: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    let mut key = Zeroizing::new([0; 32]);
     Hkdf::<Sha256>::new(None, master_key)
-        .expand(info, &mut key)
+        .expand(info, &mut *key)
         .map_err(|_| anyhow!("database encryption key derivation failed"))?;
     Ok(key)
 }
 
 pub fn parse_key(hex_key: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(hex_key).context("database encryption key must be hex encoded")?;
+    let bytes = Zeroizing::new(
+        hex::decode(hex_key).context("database encryption key must be hex encoded")?,
+    );
     let len = bytes.len();
     bytes
+        .as_slice()
         .try_into()
         .map_err(|_| anyhow!("database encryption key must be 32 bytes, got {len}"))
 }
@@ -55,7 +59,7 @@ pub fn encrypt(
     OsRng.fill_bytes(&mut nonce);
     let aad = format!("{table}:{column}:{row_id}");
     let aead_key = derive_key(key, AEAD_KEY_INFO)?;
-    let cipher = Aes256Gcm::new_from_slice(&aead_key).map_err(|_| anyhow!("invalid key"))?;
+    let cipher = Aes256Gcm::new_from_slice(&*aead_key).map_err(|_| anyhow!("invalid key"))?;
     let ciphertext = cipher
         .encrypt(
             &Nonce::from(nonce),
@@ -76,6 +80,7 @@ pub fn encrypt(
     .to_string())
 }
 
+#[cfg(test)]
 pub fn decrypt(
     key: &[u8; 32],
     expected_key_id: &str,
@@ -96,8 +101,19 @@ pub fn decrypt_with_ring(
     row_id: Uuid,
 ) -> Result<String> {
     let value: Value = serde_json::from_str(encoded)?;
-    ensure!(is_envelope(&value), "invalid encrypted envelope");
-    let key = envelope_key_id(&value)
+    decrypt_parsed_with_ring(&value, ring, table, column, row_id)
+}
+
+/// Authenticate an envelope that the caller has already parsed.
+pub fn decrypt_parsed_with_ring(
+    value: &Value,
+    ring: &KeyRing,
+    table: &str,
+    column: &str,
+    row_id: Uuid,
+) -> Result<String> {
+    ensure!(is_envelope(value), "invalid encrypted envelope");
+    let key = envelope_key_id(value)
         .and_then(|id| ring.lookup(id))
         .ok_or_else(|| anyhow!("unsupported encryption key id"))?;
     let nonce: [u8; 12] = BASE64
@@ -115,7 +131,7 @@ pub fn decrypt_with_ring(
     )?;
     let aad = format!("{table}:{column}:{row_id}");
     let aead_key = derive_key(key, AEAD_KEY_INFO)?;
-    let cipher = Aes256Gcm::new_from_slice(&aead_key).map_err(|_| anyhow!("invalid key"))?;
+    let cipher = Aes256Gcm::new_from_slice(&*aead_key).map_err(|_| anyhow!("invalid key"))?;
     let plaintext = cipher
         .decrypt(
             &Nonce::from(nonce),
@@ -128,6 +144,7 @@ pub fn decrypt_with_ring(
     Ok(String::from_utf8(plaintext)?)
 }
 
+#[cfg(test)]
 pub fn decrypt_if_encrypted(
     key: &[u8; 32],
     key_id: &str,
@@ -149,7 +166,7 @@ pub fn decrypt_if_encrypted_with_ring(
 ) -> Result<String> {
     match serde_json::from_str::<Value>(&value) {
         Ok(envelope) if is_envelope(&envelope) => {
-            decrypt_with_ring(&value, ring, table, column, row_id)
+            decrypt_parsed_with_ring(&envelope, ring, table, column, row_id)
         }
         _ => Ok(value),
     }
@@ -173,7 +190,7 @@ pub fn search_token(key: &[u8; 32], domain: &str, value: &str) -> Result<Vec<u8>
 
 pub fn search_token_with_key(key: &[u8; 32], domain: &str, value: &str) -> Result<Vec<u8>> {
     let search_key = derive_key(key, SEARCH_KEY_INFO)?;
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&search_key)
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&*search_key)
         .map_err(|_| anyhow!("invalid search-token key"))?;
     mac.update(b"near-chat-db-search-v1\0");
     mac.update(domain.as_bytes());

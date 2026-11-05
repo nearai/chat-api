@@ -17,8 +17,8 @@ impl PostgresFileRepository {
     fn encode_filename(&self, id: Uuid, value: &str) -> Result<String, FileError> {
         match self.pool.field_encryption() {
             Some(config) if config.write_enabled => crate::field_encryption::encrypt(
-                &config.key,
-                &config.key_id,
+                config.ring().write_key(),
+                config.ring().write_id(),
                 "files",
                 "filename",
                 id,
@@ -47,9 +47,7 @@ impl PostgresFileRepository {
         match self.pool.field_encryption() {
             Some(config) => crate::field_encryption::decrypt_if_encrypted_with_ring(
                 value,
-                &config
-                    .ring()
-                    .map_err(|e| FileError::DatabaseError(e.to_string()))?,
+                config.ring(),
                 "files",
                 "filename",
                 id,
@@ -308,9 +306,12 @@ mod tests {
         .unwrap();
         let pool = DbPool::uninitialized();
         pool.set_field_encryption(FieldEncryptionConfig {
-            key: crate::random_key(),
-            key_id: "current".into(),
-            previous_keys: vec![("previous".into(), previous_key)],
+            ring: services::encryption_key_ring::KeyRing::new(
+                "current".into(),
+                crate::random_key(),
+                vec![("previous".into(), previous_key)],
+            )
+            .unwrap(),
             write_enabled: true,
             agent_secrets_write_enabled: false,
         });

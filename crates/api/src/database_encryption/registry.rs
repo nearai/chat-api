@@ -570,6 +570,7 @@ pub(super) const CLASSIFIED_TABLES: &[&str] = &[
     "conversations",
     "credit_transactions",
     "database_encryption_jobs",
+    "database_encryption_projection",
     "email_verification_challenges",
     "files",
     "house_of_stake_credit_entitlement_snapshots",

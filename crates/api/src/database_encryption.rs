@@ -172,6 +172,7 @@ fn row_id_expression(field: &Field, qualifier: Option<&str>) -> String {
 
 mod batch;
 mod checkpoint;
+mod completion;
 mod inventory;
 mod jobs;
 mod progress;
@@ -179,6 +180,7 @@ mod projection;
 mod registry;
 mod scan;
 mod status;
+mod throttle;
 mod values;
 mod worker;
 mod writes;
@@ -188,9 +190,7 @@ pub use requests::CreateJobRequest;
 use requests::Mode;
 mod requests;
 pub use lifecycle::recover_jobs;
-use lifecycle::{
-    execute_writes_enabled, fail_write_disabled_job, mark_job_failed, write_gate_blocks,
-};
+use lifecycle::{execute_writes_enabled, mark_job_failed, write_gate_blocks};
 use progress::*;
 use registry::*;
 use values::*;
@@ -203,13 +203,13 @@ mod tests;
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
 struct JobOptions {
-    #[serde(default, deserialize_with = "batch_delay")]
-    batch_delay_ms: u64,
+    #[serde(default, deserialize_with = "requests::optional_batch_delay")]
+    batch_delay_ms: Option<u64>,
 }
 
 impl JobOptions {
-    const fn is_default(&self) -> bool {
-        self.batch_delay_ms == 0
+    fn is_default(&self) -> bool {
+        self.batch_delay_ms.is_none_or(|delay| delay == 0)
     }
 }
 

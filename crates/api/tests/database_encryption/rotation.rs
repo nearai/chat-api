@@ -114,7 +114,7 @@ async fn previous_key_rotation_preserves_reads_tokens_and_verification() {
     assert_eq!(f.job("execute", "rewrap").await["progress"]["rewrapped"], 0);
     assert_eq!(f.job("verify", "verify").await["progress"]["pass"], true);
     let mut config = ring_config();
-    config.previous_keys.clear();
+    config.ring = field_encryption::KeyRing::new("rotation-v2".into(), *WRITE, vec![]).unwrap();
     f.db.pool().set_field_encryption(config);
     assert_reads(&f).await;
     assert_eq!(f.job("verify", "verify").await["progress"]["pass"], true);

@@ -195,7 +195,7 @@ fn default_job_options_preserve_legacy_scope_json() {
 
         // Then the previous release's bytes and default delay are preserved.
         assert_eq!(serialized, legacy);
-        assert_eq!(scope.options.batch_delay_ms, 0);
+        assert_eq!(scope.options.batch_delay_ms.unwrap_or_default(), 0);
     }
 }
 
@@ -203,10 +203,10 @@ fn default_job_options_preserve_legacy_scope_json() {
 fn delay_is_bounded_and_persisted_as_job_options() {
     for delay in [0, 1, 10_000] {
         let request: CreateJobRequest = serde_json::from_value(json!({"mode":"dry_run","scope":{"tables":["files"]},"actions":["rewrap"],"batch_delay_ms":delay})).unwrap();
-        assert_eq!(request.batch_delay_ms, delay);
+        assert_eq!(request.batch_delay_ms, Some(delay));
         let scope = Scope {
             options: JobOptions {
-                batch_delay_ms: delay,
+                batch_delay_ms: Some(delay),
             },
             ..Scope::default()
         };
@@ -217,7 +217,7 @@ fn delay_is_bounded_and_persisted_as_job_options() {
             assert_eq!(stored["options"]["batch_delay_ms"], delay);
         }
         let restored: Scope = serde_json::from_value(stored).unwrap();
-        assert_eq!(restored.options.batch_delay_ms, delay);
+        assert_eq!(restored.options.batch_delay_ms.unwrap_or_default(), delay);
     }
     for delay in [-1, 10_001] {
         assert!(serde_json::from_value::<VerifyRequest>(json!({"batch_delay_ms":delay})).is_err());
@@ -243,4 +243,18 @@ fn per_field_progress_and_bounded_samples_survive_resume() {
             .len(),
         10
     );
+}
+
+#[test]
+fn delay_rejects_duplicate_locations_even_when_zero() {
+    for delay in [0, 1, 10_000] {
+        let scope: Scope =
+            serde_json::from_value(json!({"options":{"batch_delay_ms":delay}})).unwrap();
+        assert!(requests::requested_delay(&scope, Some(delay)).is_err());
+        assert_eq!(requests::requested_delay(&scope, None).unwrap(), delay);
+        assert_eq!(
+            requests::requested_delay(&Scope::default(), Some(delay)).unwrap(),
+            delay
+        );
+    }
 }

@@ -4,6 +4,7 @@ pub async fn create_job(
     Extension(admin): Extension<AuthenticatedUser>,
     Json(mut req): Json<CreateJobRequest>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let delay = requests::requested_delay(&req.scope, req.batch_delay_ms)?;
     let config = state
         .db_pool
         .field_encryption()
@@ -40,7 +41,7 @@ pub async fn create_job(
     req.scope = Scope {
         tables: Vec::new(),
         options: JobOptions {
-            batch_delay_ms: req.batch_delay_ms,
+            batch_delay_ms: Some(delay),
         },
         fields: fields
             .iter()

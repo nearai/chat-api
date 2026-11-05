@@ -45,9 +45,9 @@ async fn resolves_ordered_sources_and_preserves_write_gates() {
     let resolved = resolve_field_encryption_with(&config(Some(raw)), &fake)
         .await
         .unwrap();
-    assert_eq!(resolved.ring().unwrap().ids(), ["new", "old"]);
-    assert_eq!(resolved.key, current_key);
-    assert_eq!(resolved.previous_keys, vec![("old".into(), previous_key)]);
+    assert_eq!(resolved.ring().ids(), ["new", "old"]);
+    assert_eq!(resolved.ring().lookup("new"), Some(&current_key));
+    assert_eq!(resolved.ring().lookup("old"), Some(&previous_key));
     assert_eq!(*fake.calls.lock().unwrap(), ["db/old"]);
     assert!(resolved.write_enabled);
     assert!(!resolved.agent_secrets_write_enabled);
@@ -61,8 +61,8 @@ async fn legacy_config_uses_single_key_without_fetching() {
     let resolved = resolve_field_encryption_with(&settings, &fake)
         .await
         .unwrap();
-    assert_eq!(resolved.ring().unwrap().ids(), ["legacy"]);
-    assert_eq!(resolved.key, expected_key);
+    assert_eq!(resolved.ring().ids(), ["legacy"]);
+    assert_eq!(resolved.ring().lookup("legacy"), Some(&expected_key));
     assert!(fake.calls.lock().unwrap().is_empty());
 }
 
@@ -76,7 +76,7 @@ async fn resolves_trimmed_file_and_rejects_invalid_file_contents() {
     let resolved = resolve_field_encryption_with(&settings, &fake)
         .await
         .unwrap();
-    assert_eq!(resolved.key, key);
+    assert_eq!(resolved.ring().lookup("new"), Some(&key));
     std::fs::write(&path, "sensitive-invalid-content").unwrap();
     let error = resolve_field_encryption_with(&settings, &fake)
         .await
@@ -139,4 +139,50 @@ async fn invalid_sources_and_legacy_keys_fail_before_dstack_fetch() {
     legacy.key_id = "legacy".into();
     legacy.key = hex::encode(&crate::random_key()[..31]);
     assert!(resolve_field_encryption_with(&legacy, &fake).await.is_err());
+}
+
+#[derive(Clone)]
+struct LogCapture(std::sync::Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn missing_file_logs_key_id_path_and_error_kind() {
+    let captured = LogCapture(std::sync::Arc::new(Mutex::new(Vec::new())));
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let path = std::env::temp_dir().join(format!("missing-ring-key-{}", uuid::Uuid::new_v4()));
+    let settings = config(Some(format!("previous=file:{}", path.display())));
+    let error = resolve_field_encryption_with(&settings, &fetcher(vec![]))
+        .await
+        .err()
+        .unwrap();
+    let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains("previous"),
+        "diagnostic must identify the failed key"
+    );
+    assert!(
+        log.contains(&path.display().to_string()),
+        "diagnostic must identify the file"
+    );
+    assert!(
+        log.contains("NotFound"),
+        "diagnostic must identify the I/O error kind"
+    );
+    assert!(!error.to_string().contains(&path.display().to_string()));
 }

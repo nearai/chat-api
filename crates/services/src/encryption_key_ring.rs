@@ -2,32 +2,43 @@ use anyhow::{ensure, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use zeroize::{Zeroize, Zeroizing};
 
 /// An ordered set of database master keys; only the first key is used for writes.
 #[derive(Clone)]
 pub struct KeyRing {
-    keys: Vec<(String, [u8; 32])>,
+    keys: Zeroizing<Vec<(String, [u8; 32])>>,
 }
 
 impl KeyRing {
     pub fn new(
         write_id: String,
-        write_key: [u8; 32],
+        mut write_key: [u8; 32],
         previous_keys: Vec<(String, [u8; 32])>,
     ) -> Result<Self> {
-        let mut keys = Vec::with_capacity(previous_keys.len() + 1);
+        let previous_keys = Zeroizing::new(previous_keys);
+        let mut keys = Zeroizing::new(Vec::with_capacity(previous_keys.len() + 1));
         keys.push((write_id, write_key));
-        keys.extend(previous_keys);
+        write_key.zeroize();
+        keys.extend(previous_keys.iter().cloned());
         let mut seen = HashSet::with_capacity(keys.len());
-        for (id, _) in &keys {
+        for (index, (id, key)) in keys.iter().enumerate() {
             validate_key_id(id)?;
             ensure!(seen.insert(id), "duplicate database encryption key id");
+            ensure!(
+                keys[..index].iter().all(|(_, previous)| previous != key),
+                "duplicate database encryption key bytes"
+            );
         }
         Ok(Self { keys })
     }
 
     pub fn write_id(&self) -> &str {
         &self.keys[0].0
+    }
+
+    pub fn write_key(&self) -> &[u8; 32] {
+        &self.keys[0].1
     }
 
     pub fn ids(&self) -> Vec<&str> {
@@ -100,6 +111,23 @@ mod tests {
         );
         assert!(!format!("{ring:?}").contains(&hex::encode(current_key)));
         assert!(!format!("{ring:?}").contains(&format!("{current_key:?}")));
+    }
+
+    #[test]
+    fn rejects_identical_bytes_under_distinct_ids() {
+        let key = crate::random_key();
+        let result = KeyRing::new("new".into(), key, vec![("old".into(), key)]);
+        assert!(result.is_err(), "identical key bytes must not have two ids");
+        assert!(result.unwrap_err().to_string().contains("key bytes"));
+        let result = KeyRing::new(
+            "new".into(),
+            crate::random_key(),
+            vec![("old".into(), key), ("oldest".into(), key)],
+        );
+        assert!(
+            result.is_err(),
+            "previous keys must also have distinct bytes"
+        );
     }
 
     #[test]

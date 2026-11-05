@@ -13,8 +13,8 @@ impl Checkpoint {
         cursor: Value,
         progress: Value,
     ) -> anyhow::Result<Self> {
-        // The projection lives in the database session, so a recovered dry run
-        // must replay its earlier rows to rebuild it and recount each row once.
+        // Recovery replays dry-run rows to rebuild job-scoped conflict state
+        // against current data and recount each row once.
         if replay_projection {
             return Ok(Self::default());
         }

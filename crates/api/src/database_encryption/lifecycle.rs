@@ -13,16 +13,6 @@ pub(super) fn write_gate_blocks(mode: &str, write_enabled: bool) -> bool {
     mode == "execute" && !write_enabled
 }
 
-pub(super) async fn fail_write_disabled_job(state: &AppState, id: Uuid) -> anyhow::Result<()> {
-    mark_job_failed(
-        state,
-        id,
-        "write_disabled",
-        "Database encryption writes are disabled for the selected scope",
-    )
-    .await
-}
-
 pub(super) async fn mark_job_failed(
     state: &AppState,
     id: Uuid,
@@ -41,6 +31,7 @@ pub(super) async fn mark_job_failed(
             &[&id, &error_class, &error_message],
         )
         .await?;
+    projection::clear(&client, id).await?;
     Ok(())
 }
 

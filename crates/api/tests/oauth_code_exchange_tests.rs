@@ -385,13 +385,12 @@ async fn provider_verifiers_are_encrypted_independently_of_the_write_gate() {
             let envelope: serde_json::Value = serde_json::from_str(&stored)
                 .expect("provider verifier must never be stored as plaintext");
             assert!(database::field_encryption::is_envelope(&envelope));
-            let verifier = database::field_encryption::decrypt(
-                &encryption.key,
-                &encryption.key_id,
+            let verifier = database::field_encryption::decrypt_with_ring(
+                &stored,
+                encryption.ring(),
                 "oauth_states",
                 "provider_code_verifier",
                 id,
-                &stored,
             )
             .unwrap();
             assert_eq!(pkce_challenge(&verifier), query["code_challenge"]);

@@ -2,9 +2,9 @@ use super::*;
 use database::field_encryption::KeyRing;
 
 pub(super) struct Batch<'a, 'tx> {
+    pub(super) job_id: Uuid,
     pub(super) tx: &'a deadpool_postgres::Transaction<'tx>,
     pub(super) field: &'a Field,
-    pub(super) config: &'a services::db_pool::FieldEncryptionConfig,
     pub(super) ring: &'a KeyRing,
     pub(super) mode: &'a str,
     pub(super) action: &'a str,
@@ -20,11 +20,6 @@ impl Batch<'_, '_> {
         progress.record(self.field, |c| c.processed += 1);
         let raw: Option<String> = row.get(1);
         let Some(raw) = raw else { return Ok(()) };
-        if let Some(key_id) = stored_key_id(&raw) {
-            progress.record(self.field, |c| {
-                *c.by_key_id.entry(key_id.clone()).or_default() += 1
-            });
-        }
         let classified = match read_value(self.ring, self.field, id, &raw) {
             Ok(value) => value,
             Err(error) => {
@@ -38,12 +33,17 @@ impl Batch<'_, '_> {
                 return Ok(());
             }
         };
+        if let Some(key_id) = classified.key_id(self.ring) {
+            progress.record(self.field, |c| {
+                *c.by_key_id.entry(key_id.to_owned()).or_default() += 1
+            });
+        }
         let stored_token: Option<Vec<u8>> = row.get(2);
         let (plaintext, stale, token_only) = match classified {
             StoredValue::Current(plaintext) => {
                 progress.record(self.field, |c| c.already_current += 1);
                 let matches = search_token_matches(
-                    &self.config.key,
+                    self.ring.write_key(),
                     self.field,
                     &plaintext,
                     stored_token.as_deref(),
@@ -59,11 +59,11 @@ impl Batch<'_, '_> {
                 }
                 (plaintext, false, true)
             }
-            StoredValue::Stale(plaintext) => {
+            StoredValue::Stale { plaintext, .. } => {
                 progress.record(self.field, |c| c.stale += 1);
                 if self.action != "rewrap" {
                     if !search_token_matches(
-                        &self.config.key,
+                        self.ring.write_key(),
                         self.field,
                         &plaintext,
                         stored_token.as_deref(),
@@ -98,7 +98,7 @@ impl Batch<'_, '_> {
             .token
             .map(|(_, domain)| {
                 database::field_encryption::search_token(
-                    &self.config.key,
+                    self.ring.write_key(),
                     domain,
                     &normalized_token_value(domain, &plaintext),
                 )
@@ -109,8 +109,8 @@ impl Batch<'_, '_> {
             raw
         } else {
             database::field_encryption::encrypt(
-                &self.config.key,
-                &self.config.key_id,
+                self.ring.write_key(),
+                self.ring.write_id(),
                 self.field.table,
                 self.field.column,
                 id,

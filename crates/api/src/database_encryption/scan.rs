@@ -8,7 +8,7 @@ async fn counts(
         .db_pool
         .field_encryption()
         .ok_or_else(|| anyhow::anyhow!("database encryption is not configured"))?;
-    let ring = config.ring()?;
+    let ring = config.ring();
     let client = state.db_pool.get().await?;
     let mut result = Vec::new();
     for field in fields {
@@ -48,20 +48,27 @@ async fn counts(
                 count.empty += 1;
                 continue;
             };
-            if let Some(key_id) = stored_key_id(&raw) {
-                *count.by_key_id.entry(key_id).or_default() += 1;
+            let classified = read_value(ring, field, row.get(0), &raw);
+            if let Ok(value) = &classified {
+                if let Some(key_id) = value.key_id(ring) {
+                    *count.by_key_id.entry(key_id.to_owned()).or_default() += 1;
+                }
             }
-            match read_value(&ring, field, row.get(0), &raw) {
+            match classified {
                 Ok(StoredValue::Current(plaintext)) => {
                     let stored_token: Option<Vec<u8>> = row.get(2);
-                    if search_token_matches(&config.key, field, &plaintext, stored_token.as_deref())
-                    {
+                    if search_token_matches(
+                        ring.write_key(),
+                        field,
+                        &plaintext,
+                        stored_token.as_deref(),
+                    ) {
                         count.encrypted += 1
                     } else {
                         count.invalid_envelope += 1
                     }
                 }
-                Ok(StoredValue::Stale(_)) => {
+                Ok(StoredValue::Stale { .. }) => {
                     count.stale += 1;
                     count.encrypted += 1;
                 }
@@ -113,7 +120,7 @@ pub async fn keys(
         .db_pool
         .field_encryption()
         .ok_or_else(|| bad("database encryption is not configured"))?;
-    let ring = config.ring().map_err(internal)?;
+    let ring = config.ring();
     Ok(Json(json!({
         "write_key_id":ring.write_id(),
         "read_key_ids":ring.ids().into_iter().filter(|id| *id != ring.write_id()).collect::<Vec<_>>(),

@@ -82,8 +82,8 @@ Jobs commit one bounded batch at a time. Retrying an interrupted job is safe:
 authenticated envelopes are detected and skipped, and cursor/progress state is
 durable. The active-scope index prevents duplicate jobs for the same canonical
 scope, and the process-local worker semaphore prevents connection-pool
-exhaustion. A PostgreSQL session advisory lock held for the complete job
-serializes workers across replicas. A failed deploy may be
+exhaustion. A PostgreSQL transaction advisory lock serializes each batch across replicas.
+Between batches, connections and database locks are released. A failed deploy may be
 rolled back only to a version that supports dual reads; rolling back to a
 plaintext-only reader after encrypted writes begin makes data unreadable.
 
@@ -239,24 +239,35 @@ included in logs.
 write key; later entries are read-only keys. Each entry is `<key_id>=<source>`,
 separated by commas. Supported sources are `file:/path/to/hex-key` (trimmed
 64-character hex), `dstack:derivation/path` (32 bytes from the dstack key API),
-and `hex:<64 hex characters>` for local use. IDs must be unique and contain
+and `hex:<64 hex characters>` for local/test use only, explicitly enabled with
+`DB_ENCRYPTION_ALLOW_INLINE_KEYS=true`. Key files must be readable only by the
+service user. IDs and resolved key bytes must each be unique. IDs contain
 1–64 ASCII letters, digits, dots, underscores, or hyphens. Resolution failures
 stop both the API and task worker before they start processing work.
 
-When set, this variable replaces `DB_ENCRYPTION_KEY_FILE`, `DB_ENCRYPTION_KEY`,
-and `DB_ENCRYPTION_KEY_ID`. When absent, the existing configuration and file
-precedence apply. Keep the same resolved keys, IDs, and ordering on every API
-replica and task worker. Both write gates retain their existing meaning.
+When set, this variable replaces `DB_ENCRYPTION_KEY_FILE` and `DB_ENCRYPTION_KEY`
+as key sources. A legacy `DB_ENCRYPTION_KEY_ID` still present in the environment
+must match an ID in the ring, or startup fails. When the ring variable is absent,
+the existing configuration and file precedence apply. Keep the same resolved
+keys, IDs, and ordering on every API replica and task worker. Both write gates retain their existing meaning.
+
+An envelope is decrypted by the ID it carries: keep the old key in the ring
+under the exact ID it was written with. Use the existing `DB_ENCRYPTION_KEY_ID`
+(`db-v1` by default), even when changing its source from an environment variable
+to a file. Do not rename that ID while its envelopes remain stored.
 
 Rotate in three states, completing each rollout before advancing:
 
 1. **Old key first.** Deploy ring-aware readers everywhere with
-   `DB_ENCRYPTION_KEYS=key-v1=file:/run/secrets/key-v1`. Before enabling rotation,
+   `DB_ENCRYPTION_KEYS=db-v1=file:/run/secrets/chat_api_db_encryption_key,key-v2=file:/run/secrets/key-v2`. Before enabling rotation,
    verify the existing encrypted data and its search tokens.
 2. **New key first.** Configure
-   `DB_ENCRYPTION_KEYS=key-v2=file:/run/secrets/key-v2,key-v1=file:/run/secrets/key-v1`
-   everywhere. New envelopes and search tokens use `key-v2`; old envelopes and
-   tokens remain readable and queryable. Run a scoped `rewrap` dry run, inspect
+   `DB_ENCRYPTION_KEYS=key-v2=file:/run/secrets/key-v2,db-v1=file:/run/secrets/chat_api_db_encryption_key`
+   everywhere. A replica still on the previous configuration keeps writing
+   old-key envelopes and search tokens during this rollout. Compare the keys
+   endpoint's fingerprints and write ID across every API replica and task worker
+   before running `rewrap`; verification catches stragglers. New envelopes and
+   search tokens use `key-v2`; old envelopes and tokens remain readable and queryable. Run a scoped `rewrap` dry run, inspect
    counts, then execute it for every registered confidential field. Rewrap
    authenticates each old envelope with its original context and updates the
    envelope and search token atomically. It also repairs current envelopes whose
@@ -264,7 +275,9 @@ Rotate in three states, completing each rollout before advancing:
    ciphertext are left for the separate `encrypt` action.
 3. **New key only.** Complete an unbounded verification with the full ring,
    requiring `progress.pass=true`, no stale envelopes, and no incorrect search
-   tokens. Then remove `key-v1` from every process and verify again. Keep old
+   tokens. Then configure `DB_ENCRYPTION_KEYS=key-v2=file:/run/secrets/key-v2`
+   on every process and remove or update the legacy `DB_ENCRYPTION_KEY_ID`
+   environment variable. Verify again. Keep old
    keys available under the backup-retention policy for restoring older backups.
 
 Submit to `POST /v1/admin/database-encryption/jobs`:
@@ -282,15 +295,20 @@ Submit to `POST /v1/admin/database-encryption/jobs`:
 Use `mode: "execute"` after inspecting the dry run. Execute requires the global
 write gate, plus the agent-secret gate when agent credentials are selected.
 `batch_delay_ms` accepts 0–10000 and sleeps between batches after their
-transactions commit; verification requests accept it too. Poll the ordinary job
+transactions commit, with their connections and advisory locks released.
+Cancellation is checked at least every 500 ms during the delay. Supply the delay
+in one place (prefer the request top level); supplying it there and in
+`scope.options` is rejected, even when both are zero. Verification requests
+accept it too. Poll the ordinary job
 endpoint. Progress includes `stale`, `rewrapped`, `already_current`,
 `tokens_rewritten`, `token_conflicts`, and key-ID counts. A unique-token conflict
 leaves the row unchanged and records its ID; other rows continue. Resolve
 conflicts and invalid rows before verification and key removal. Recovered rewrap
-dry runs replay their scope from the beginning to rebuild the temporary conflict
-projection and recompute counts; application rows remain unchanged.
+dry runs replay their scope from the beginning to rebuild their job-scoped
+conflict projection and recompute counts; application rows remain unchanged.
 
 `GET /v1/admin/database-encryption/keys` uses the same admin authentication as
 other encryption endpoints. It returns the write ID, read-only IDs, short
 SHA-256 key fingerprints, and write-gate states. It never returns key material.
-Use it to compare the configuration of replicas before enabling new writes.
+Use it to compare the configuration of replicas before enabling new writes
+and before `rewrap`. Fingerprints, IDs, and ordering must agree everywhere.

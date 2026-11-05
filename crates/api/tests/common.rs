@@ -144,9 +144,12 @@ pub async fn create_test_server_with_state(
         .expect("test database encryption key must be valid");
     db.pool()
         .set_field_encryption(services::db_pool::FieldEncryptionConfig {
-            key,
-            key_id: config.database_encryption.key_id.clone(),
-            previous_keys: vec![],
+            ring: database::field_encryption::KeyRing::new(
+                config.database_encryption.key_id.clone(),
+                key,
+                vec![],
+            )
+            .expect("valid test encryption ring"),
             write_enabled: config.database_encryption.write_enabled,
             agent_secrets_write_enabled: config.database_encryption.agent_secrets_write_enabled,
         });
