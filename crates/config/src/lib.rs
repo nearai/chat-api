@@ -1,3 +1,4 @@
+pub mod encryption_keys;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt;
@@ -982,6 +983,9 @@ pub struct DatabaseEncryptionConfig {
     /// database field encryption and its admin endpoints.
     pub key: String,
     pub key_id: String,
+    /// Ordered key sources; replaces the legacy single-key configuration.
+    #[serde(default)]
+    pub keys: Option<String>,
     /// Enables encrypted repository writes and execute-mode backfills.
     pub write_enabled: bool,
     /// Migrate agent provisioning secrets only after every reader supports field envelopes.
@@ -994,6 +998,7 @@ impl fmt::Debug for DatabaseEncryptionConfig {
         formatter
             .debug_struct("DatabaseEncryptionConfig")
             .field("key", &"[REDACTED]")
+            .field("keys", &self.keys.as_ref().map(|_| "[REDACTED]"))
             .field("key_id", &self.key_id)
             .field("write_enabled", &self.write_enabled)
             .field(
@@ -1006,7 +1011,10 @@ impl fmt::Debug for DatabaseEncryptionConfig {
 
 impl Default for DatabaseEncryptionConfig {
     fn default() -> Self {
-        let key = if let Ok(path) = std::env::var("DB_ENCRYPTION_KEY_FILE") {
+        let keys = std::env::var("DB_ENCRYPTION_KEYS").ok();
+        let key = if keys.is_some() {
+            String::new()
+        } else if let Ok(path) = std::env::var("DB_ENCRYPTION_KEY_FILE") {
             std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("Failed to read DB_ENCRYPTION_KEY_FILE at {path}: {e}"))
                 .trim()
@@ -1016,6 +1024,7 @@ impl Default for DatabaseEncryptionConfig {
         };
         Self {
             key,
+            keys,
             key_id: std::env::var("DB_ENCRYPTION_KEY_ID").unwrap_or_else(|_| "db-v1".to_string()),
             write_enabled: std::env::var("DB_ENCRYPTION_WRITE_ENABLED")
                 .ok()
@@ -1103,6 +1112,24 @@ mod tests {
         std::env::set_var("DATABASE_TLS_ENABLED", "true");
         std::env::set_var("DATABASE_CONNECTION_MODE", "typo");
         assert!(std::panic::catch_unwind(DatabaseConfig::default).is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn database_encryption_ring_overrides_legacy_file() {
+        std::env::set_var("DB_ENCRYPTION_KEYS", format!("new=hex:{}", "22".repeat(32)));
+        std::env::set_var("DB_ENCRYPTION_KEY_FILE", "/no-such-key-ring-test-file");
+        let loaded = std::panic::catch_unwind(DatabaseEncryptionConfig::default);
+        std::env::remove_var("DB_ENCRYPTION_KEYS");
+        std::env::remove_var("DB_ENCRYPTION_KEY_FILE");
+        assert!(
+            loaded.is_ok(),
+            "ring configuration must supersede the legacy file"
+        );
+        let config = loaded.unwrap();
+        assert!(config.key.is_empty());
+        assert!(config.keys.is_some());
+        assert!(!format!("{config:?}").contains(&"22".repeat(32)));
     }
 
     #[test]

@@ -273,58 +273,35 @@ impl UserRepository for PostgresUserRepository {
             .map(|row| row.get("provider_user_id"))
             .collect();
         let encryption = self.pool.field_encryption();
-        let email_share_token = user_email.as_ref().and_then(|value| {
-            encryption.as_ref().and_then(|config| {
-                crate::field_encryption::search_token(
-                    &config.key,
-                    "conversation_shares.recipient_value",
-                    &value.trim().to_lowercase(),
-                )
-                .ok()
-            })
-        });
-        let email_member_token = user_email.as_ref().and_then(|value| {
-            encryption.as_ref().and_then(|config| {
-                crate::field_encryption::search_token(
-                    &config.key,
-                    "conversation_share_group_members.member_value",
-                    &value.trim().to_lowercase(),
-                )
-                .ok()
-            })
-        });
-        let near_share_tokens: Vec<Vec<u8>> = encryption
+        let ring = encryption
             .as_ref()
-            .map(|config| {
-                near_account_ids
-                    .iter()
-                    .filter_map(|value| {
-                        crate::field_encryption::search_token(
-                            &config.key,
-                            "conversation_shares.recipient_value",
-                            &value.trim().to_lowercase(),
-                        )
-                        .ok()
-                    })
-                    .collect()
+            .map(services::db_pool::FieldEncryptionConfig::ring)
+            .transpose()?;
+        let lookup_tokens = |domain: &str, values: &[String]| -> anyhow::Result<Vec<Vec<u8>>> {
+            let Some(ring) = &ring else {
+                return Ok(Vec::new());
+            };
+            values.iter().try_fold(Vec::new(), |mut tokens, value| {
+                tokens.extend(crate::field_encryption::search_tokens_for_lookup(
+                    ring,
+                    domain,
+                    &value.trim().to_lowercase(),
+                )?);
+                Ok(tokens)
             })
-            .unwrap_or_default();
-        let near_member_tokens: Vec<Vec<u8>> = encryption
-            .as_ref()
-            .map(|config| {
-                near_account_ids
-                    .iter()
-                    .filter_map(|value| {
-                        crate::field_encryption::search_token(
-                            &config.key,
-                            "conversation_share_group_members.member_value",
-                            &value.trim().to_lowercase(),
-                        )
-                        .ok()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        };
+        let email_share_tokens =
+            lookup_tokens("conversation_shares.recipient_value", user_email.as_slice())?;
+        let email_member_tokens = lookup_tokens(
+            "conversation_share_group_members.member_value",
+            user_email.as_slice(),
+        )?;
+        let near_share_tokens =
+            lookup_tokens("conversation_shares.recipient_value", &near_account_ids)?;
+        let near_member_tokens = lookup_tokens(
+            "conversation_share_group_members.member_value",
+            &near_account_ids,
+        )?;
 
         let verified_conversation_ids: HashSet<&str> = cloud_deleted_conversation_ids
             .iter()
@@ -373,9 +350,9 @@ impl UserRepository for PostgresUserRepository {
                 "DELETE FROM conversation_shares
                  WHERE share_type = 'direct'
                    AND recipient_type = 'email'
-                   AND (recipient_value_search_token = $2 OR
+                   AND (recipient_value_search_token = ANY($2) OR
                         (recipient_value_search_token IS NULL AND LOWER(recipient_value) = LOWER($1)))",
-                &[&email, &email_share_token],
+                &[&email, &email_share_tokens],
             )
             .await
             .map_err(anyhow::Error::from)?;
@@ -383,9 +360,9 @@ impl UserRepository for PostgresUserRepository {
             tx.execute(
                 "DELETE FROM conversation_share_group_members
                  WHERE member_type = 'email'
-                   AND (member_value_search_token = $2 OR
+                   AND (member_value_search_token = ANY($2) OR
                         (member_value_search_token IS NULL AND LOWER(member_value) = LOWER($1)))",
-                &[&email, &email_member_token],
+                &[&email, &email_member_tokens],
             )
             .await
             .map_err(anyhow::Error::from)?;

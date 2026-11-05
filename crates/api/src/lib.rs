@@ -2,6 +2,7 @@ pub mod cloud_api;
 pub mod common;
 pub mod consts;
 pub mod database_encryption;
+pub mod encryption_key_resolver;
 pub mod error;
 pub mod middleware;
 pub mod model_pricing;

@@ -135,18 +135,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Connecting to database...");
     let db = database::Database::from_config(&config.database).await?;
 
-    if config.database_encryption.key.is_empty() {
-        anyhow::bail!("DB_ENCRYPTION_KEY or DB_ENCRYPTION_KEY_FILE is required");
-    }
-    let key = database::field_encryption::parse_key(&config.database_encryption.key)?;
-    database::field_encryption::validate_key_id(&config.database_encryption.key_id)?;
-    db.pool()
-        .set_field_encryption(services::db_pool::FieldEncryptionConfig {
-            key,
-            key_id: config.database_encryption.key_id.clone(),
-            write_enabled: config.database_encryption.write_enabled,
-            agent_secrets_write_enabled: config.database_encryption.agent_secrets_write_enabled,
-        });
+    let field_encryption =
+        api::encryption_key_resolver::resolve_field_encryption(&config.database_encryption).await?;
+    db.pool().set_field_encryption(field_encryption);
 
     tracing::info!("Running migrations...");
     db.run_migrations().await?;

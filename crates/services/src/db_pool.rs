@@ -24,9 +24,20 @@ pub struct DbPool {
 pub struct FieldEncryptionConfig {
     pub key: [u8; 32],
     pub key_id: String,
+    pub previous_keys: Vec<(String, [u8; 32])>,
     pub write_enabled: bool,
     /// Separate rollout gate for fields previously encrypted by the dstack app key.
     pub agent_secrets_write_enabled: bool,
+}
+
+impl FieldEncryptionConfig {
+    pub fn ring(&self) -> anyhow::Result<crate::encryption_key_ring::KeyRing> {
+        crate::encryption_key_ring::KeyRing::new(
+            self.key_id.clone(),
+            self.key,
+            self.previous_keys.clone(),
+        )
+    }
 }
 
 impl DbPool {
@@ -121,6 +132,24 @@ mod tests {
         cfg.pool = Some(PoolConfig::new(max_size));
         cfg.create_pool(Some(Runtime::Tokio1), tokio_postgres::NoTls)
             .expect("lazy pool must build without connecting")
+    }
+
+    #[test]
+    fn field_encryption_ring_propagates_to_existing_clones() {
+        let handle = DbPool::uninitialized();
+        let clone = handle.clone();
+        handle.set_field_encryption(FieldEncryptionConfig {
+            key: [1; 32],
+            key_id: "new".into(),
+            previous_keys: vec![("old".into(), [2; 32])],
+            write_enabled: false,
+            agent_secrets_write_enabled: true,
+        });
+        let config = clone.field_encryption().unwrap();
+        assert_eq!(config.ring().unwrap().ids(), ["new", "old"]);
+        assert_eq!(config.ring().unwrap().lookup("old"), Some(&[2; 32]));
+        assert!(!config.write_enabled);
+        assert!(config.agent_secrets_write_enabled);
     }
 
     #[tokio::test]

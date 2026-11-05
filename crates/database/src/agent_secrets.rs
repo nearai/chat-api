@@ -49,7 +49,7 @@ pub fn decrypt(
     if is_field_envelope(value) {
         let config =
             config.ok_or_else(|| anyhow!("database field encryption is not configured"))?;
-        field_encryption::decrypt(&config.key, &config.key_id, table, column, row_id, value)
+        field_encryption::decrypt_with_ring(value, &config.ring()?, table, column, row_id)
     } else {
         decrypt_legacy(value)
     }
@@ -84,6 +84,7 @@ mod tests {
         let config = FieldEncryptionConfig {
             key: rand::random(),
             key_id: "test-v1".into(),
+            previous_keys: Vec::new(),
             write_enabled: true,
             agent_secrets_write_enabled: true,
         };
@@ -146,6 +147,41 @@ mod tests {
     }
 
     #[test]
+    fn field_credentials_read_previous_keys() {
+        // Given a credential written before the write key rotated.
+        let id = Uuid::new_v4();
+        let previous_key = [17; 32];
+        let ciphertext = field_encryption::encrypt(
+            &previous_key,
+            "previous",
+            "agent_instances",
+            "instance_token",
+            id,
+            "credential",
+        )
+        .unwrap();
+        let config = FieldEncryptionConfig {
+            key: [29; 32],
+            key_id: "current".into(),
+            previous_keys: vec![("previous".into(), previous_key)],
+            write_enabled: true,
+            agent_secrets_write_enabled: true,
+        };
+
+        // When the credential is read after rotation.
+        let plaintext = decrypt(
+            Some(&config),
+            "agent_instances",
+            "instance_token",
+            id,
+            &ciphertext,
+        );
+
+        // Then the configured previous key still authenticates it.
+        assert_eq!(plaintext.unwrap(), "credential");
+    }
+
+    #[test]
     fn plaintext_compatibility_does_not_hide_damaged_ciphertext() {
         let id = Uuid::new_v4();
         for plaintext in ["historical-token", "user:pass", "https://example.com/token"] {
@@ -177,6 +213,7 @@ mod tests {
         let config = FieldEncryptionConfig {
             key: rand::random(),
             key_id: "test-v1".into(),
+            previous_keys: Vec::new(),
             write_enabled: false,
             agent_secrets_write_enabled: true,
         };

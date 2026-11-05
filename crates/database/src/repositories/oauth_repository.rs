@@ -48,13 +48,12 @@ impl PostgresOAuthRepository {
         value: String,
     ) -> anyhow::Result<String> {
         match self.pool.field_encryption() {
-            Some(config) => crate::field_encryption::decrypt_if_encrypted(
-                &config.key,
-                &config.key_id,
+            Some(config) => crate::field_encryption::decrypt_if_encrypted_with_ring(
+                value,
+                &config.ring()?,
                 table,
                 column,
                 id,
-                value,
             ),
             None => Ok(value),
         }

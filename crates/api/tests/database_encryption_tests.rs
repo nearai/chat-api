@@ -200,3 +200,14 @@ async fn encrypted_group_names_preserve_raw_uniqueness() {
         3
     );
 }
+
+#[path = "database_encryption/edges.rs"]
+mod edges;
+#[path = "database_encryption/fixture.rs"]
+mod fixture;
+#[path = "database_encryption/lookups.rs"]
+mod lookups;
+#[path = "database_encryption/recovery.rs"]
+mod recovery;
+#[path = "database_encryption/rotation.rs"]
+mod rotation;
