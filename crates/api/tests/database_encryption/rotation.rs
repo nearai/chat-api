@@ -187,3 +187,87 @@ async fn previous_key_token_corruption_is_invalid_for_non_rewrap_jobs() {
     }
     f.cleanup().await;
 }
+
+#[tokio::test]
+async fn scan_validates_previous_key_tokens_and_preserves_invalid_rows() {
+    let f = Fixture::new().await;
+    let valid_scan = f
+        .server
+        .post("/v1/admin/database-encryption/scan")
+        .add_header(HeaderName::from_static("authorization"), f.auth.clone())
+        .json(&json!({"scope":{"fields":[{"table":"conversation_share_groups","column":"name"}]}}))
+        .await;
+    assert_eq!(valid_scan.status_code(), 200);
+    let valid_scan: Value = valid_scan.json();
+    assert_eq!(valid_scan["totals"]["stale"], 1);
+    assert_eq!(valid_scan["totals"]["invalid_envelope"], 0);
+
+    let original: Vec<u8> =
+        f.db.pool()
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT name_search_token FROM conversation_share_groups WHERE id=$1",
+                &[&f.group],
+            )
+            .await
+            .unwrap()
+            .get(0);
+    for corrupted in [
+        Some({
+            let mut token = original.clone();
+            token[0] ^= 1;
+            token
+        }),
+        None,
+    ] {
+        let client = f.db.pool().get().await.unwrap();
+        client
+            .execute(
+                "UPDATE conversation_share_groups SET name_search_token=$1 WHERE id=$2",
+                &[&corrupted, &f.group],
+            )
+            .await
+            .unwrap();
+        drop(client);
+
+        let scan = f.server.post("/v1/admin/database-encryption/scan")
+            .add_header(HeaderName::from_static("authorization"), f.auth.clone())
+            .json(&json!({"scope":{"fields":[{"table":"conversation_share_groups","column":"name"}]}}))
+            .await;
+        assert_eq!(scan.status_code(), 200);
+        let scan: Value = scan.json();
+        assert_eq!(scan["totals"]["stale"], 1);
+        assert_eq!(scan["totals"]["encrypted"], 0);
+        assert_eq!(scan["totals"]["invalid_envelope"], 1);
+
+        let stored: Option<Vec<u8>> =
+            f.db.pool()
+                .get()
+                .await
+                .unwrap()
+                .query_one(
+                    "SELECT name_search_token FROM conversation_share_groups WHERE id=$1",
+                    &[&f.group],
+                )
+                .await
+                .unwrap()
+                .get(0);
+        assert_eq!(stored, corrupted);
+        let verify = f.job("verify", "verify").await;
+        assert_eq!(verify["progress"]["invalid_envelopes"], 1);
+        assert_eq!(verify["progress"]["pass"], false);
+
+        let client = f.db.pool().get().await.unwrap();
+        client
+            .execute(
+                "UPDATE conversation_share_groups SET name_search_token=$1 WHERE id=$2",
+                &[&Some(original.clone()), &f.group],
+            )
+            .await
+            .unwrap();
+        drop(client);
+    }
+    f.cleanup().await;
+}

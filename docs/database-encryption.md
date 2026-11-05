@@ -79,9 +79,11 @@ another batch. Review the intended fields and create a new dry-run/execute job;
 do not edit the stored scope or reuse its cursor. Old jobs that already specify
 individual fields can resume normally.
 
-Jobs commit one bounded batch at a time. Retrying an interrupted job is safe:
-authenticated envelopes are detected and skipped, and cursor/progress state is
-durable. The active-scope index prevents duplicate jobs for the same canonical
+Jobs commit one bounded batch at a time. Retrying an interrupted job is safe
+only with the same ordered encryption key ring (key IDs and fingerprints):
+durable cursors bind that ring context, and recovery fails closed if it is
+missing or changed. Authenticated envelopes are detected and skipped, and
+cursor/progress state is durable. The active-scope index prevents duplicate jobs for the same canonical
 scope, and each server's worker semaphore prevents connection-pool
 exhaustion without blocking workers in independent servers or databases.
 A PostgreSQL transaction advisory lock reserves one job at a time

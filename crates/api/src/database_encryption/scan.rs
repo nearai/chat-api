@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Context;
 async fn counts(
     state: &AppState,
     fields: &[&Field],
@@ -68,9 +69,17 @@ async fn counts(
                         count.invalid_envelope += 1
                     }
                 }
-                Ok(StoredValue::Stale { .. }) => {
+                Ok(StoredValue::Stale { plaintext, key_id }) => {
                     count.stale += 1;
-                    count.encrypted += 1;
+                    let key = ring
+                        .lookup(key_id)
+                        .context("authenticated encryption key missing from ring")?;
+                    let stored_token: Option<Vec<u8>> = row.get(2);
+                    if search_token_matches(key, field, &plaintext, stored_token.as_deref()) {
+                        count.encrypted += 1;
+                    } else {
+                        count.invalid_envelope += 1;
+                    }
                 }
                 Ok(StoredValue::LegacyEncrypted(_)) => count.legacy_encrypted += 1,
                 Ok(StoredValue::Plaintext(_)) => count.plaintext += 1,

@@ -88,7 +88,42 @@ async fn run_batch(
         .first()
         .ok_or_else(|| anyhow::anyhow!("missing job action"))?;
     let replay = mode == "dry_run";
-    let mut checkpoint = checkpoint::Checkpoint::restore(first && replay, job.get(4), job.get(5))?;
+    let cursor: Value = job.get(4);
+    let progress: Value = job.get(5);
+    let mut checkpoint = match checkpoint::Checkpoint::restore(
+        first && replay,
+        cursor.clone(),
+        progress.clone(),
+        ring,
+    ) {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            let cancelled: bool = tx.query_one("SELECT cancel_requested_at IS NOT NULL FROM database_encryption_jobs WHERE id=$1", &[&id]).await?.get(0);
+            if cancelled {
+                tx.execute("UPDATE database_encryption_jobs SET status='cancelled',completed_at=NOW() WHERE id=$1 AND status='running'", &[&id]).await?;
+            } else if let Some(reason) = error.downcast_ref::<checkpoint::RingContextError>() {
+                let (class, message) = match reason {
+                    checkpoint::RingContextError::Missing => (
+                        "checkpoint_key_config_missing",
+                        "Durable checkpoint has no encryption key context",
+                    ),
+                    checkpoint::RingContextError::Changed => (
+                        "key_ring_changed",
+                        "Configured database encryption key ring changed since checkpoint",
+                    ),
+                };
+                let mut failed_progress = progress::Progress::from_value(progress)?;
+                if mode == "verify" {
+                    failed_progress.fail();
+                }
+                tx.execute("UPDATE database_encryption_jobs SET status='failed',completed_at=NOW(),last_error_class=$2,last_error_message=$3,progress=$4 WHERE id=$1 AND status='running'", &[&id, &class, &message, &serde_json::to_value(failed_progress)?]).await?;
+            } else {
+                return Err(error);
+            }
+            tx.commit().await?;
+            return Ok(None);
+        }
+    };
     let fields = selected(&scope).map_err(|_| anyhow::anyhow!("invalid scope"))?;
     if write_gate_blocks(&mode, execute_writes_enabled(state, &fields)) {
         tx.execute("UPDATE database_encryption_jobs SET status=CASE WHEN cancel_requested_at IS NULL THEN 'failed' ELSE 'cancelled' END,completed_at=NOW(),last_error_class=CASE WHEN cancel_requested_at IS NULL THEN 'write_disabled' END,last_error_message=CASE WHEN cancel_requested_at IS NULL THEN 'Database encryption writes are disabled for the selected scope' END WHERE id=$1 AND status='running'", &[&id]).await?;
@@ -154,7 +189,7 @@ async fn run_batch(
         &[
             &id,
             &serde_json::to_value(&checkpoint.progress)?,
-            &json!({"field_index":checkpoint.field_index,"after_id":checkpoint.after}),
+            &json!({"field_index":checkpoint.field_index,"after_id":checkpoint.after,"ring_context":checkpoint.ring_context}),
         ],
     )
     .await?;

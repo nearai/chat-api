@@ -26,9 +26,19 @@ pub(super) struct Progress {
     pub(super) totals: Counters,
     pub(super) token_conflicts_estimated: bool,
     pub(super) fields: BTreeMap<String, Counters>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) pass: Option<bool>,
 }
 
 impl Progress {
+    pub(super) fn from_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        Ok(serde_json::from_value(value)?)
+    }
+
+    pub(super) fn fail(&mut self) {
+        self.pass = Some(false);
+    }
+
     pub(super) fn record(&mut self, field: &Field, update: impl Fn(&mut Counters)) {
         update(&mut self.totals);
         update(
