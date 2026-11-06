@@ -29,8 +29,8 @@ impl PostgresOAuthRepository {
     ) -> anyhow::Result<String> {
         match self.pool.field_encryption() {
             Some(config) if config.write_enabled => crate::field_encryption::encrypt(
-                &config.key,
-                &config.key_id,
+                config.ring().write_key(),
+                config.ring().write_id(),
                 table,
                 column,
                 id,
@@ -48,13 +48,12 @@ impl PostgresOAuthRepository {
         value: String,
     ) -> anyhow::Result<String> {
         match self.pool.field_encryption() {
-            Some(config) => crate::field_encryption::decrypt_if_encrypted(
-                &config.key,
-                &config.key_id,
+            Some(config) => crate::field_encryption::decrypt_if_encrypted_with_ring(
+                value,
+                config.ring(),
                 table,
                 column,
                 id,
-                value,
             ),
             None => Ok(value),
         }
@@ -71,8 +70,8 @@ impl PostgresOAuthRepository {
             anyhow::anyhow!("field encryption configuration is required for provider PKCE")
         })?;
         crate::field_encryption::encrypt(
-            &config.key,
-            &config.key_id,
+            config.ring().write_key(),
+            config.ring().write_id(),
             "oauth_states",
             "provider_code_verifier",
             id,

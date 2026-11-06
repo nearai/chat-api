@@ -10,7 +10,9 @@ description = "Configuration management for cloud-api"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 url = "2.5"
+zeroize = "1.8.2"
 
 [dev-dependencies]
+rand = "0.9.2"
 tempfile = "3.0"
 serial_test = "3.0"

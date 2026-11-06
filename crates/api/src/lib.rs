@@ -2,6 +2,7 @@ pub mod cloud_api;
 pub mod common;
 pub mod consts;
 pub mod database_encryption;
+pub mod encryption_key_resolver;
 pub mod error;
 pub mod middleware;
 pub mod model_pricing;
@@ -75,4 +76,10 @@ pub fn init_tracing_from_config(logging_config: &LoggingConfig) {
             }
         }
     }
+}
+
+#[cfg(test)]
+fn random_key() -> [u8; 32] {
+    use rand::{Rng, TryRngCore};
+    rand::rngs::OsRng.unwrap_err().random()
 }

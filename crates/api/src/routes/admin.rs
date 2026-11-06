@@ -3537,6 +3537,10 @@ pub async fn admin_patch_instance(
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
         .route(
+            "/database-encryption/keys",
+            get(crate::database_encryption::keys),
+        )
+        .route(
             "/database-encryption/scan",
             post(crate::database_encryption::scan),
         )

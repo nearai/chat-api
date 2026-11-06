@@ -31,6 +31,8 @@ const TEST_DATABASE_ENCRYPTION_KEY: &str =
 /// Configuration for test server with Cloud API mocking
 #[derive(Default)]
 pub struct TestServerConfig {
+    pub database_name: Option<String>,
+    pub field_encryption: Option<services::db_pool::FieldEncryptionConfig>,
     pub vpc_credentials: Option<VpcCredentials>,
     pub cloud_api_base_url: String,
     /// Override for the LLM proxy's upstream base URL (e.g. WireMock for tests).
@@ -118,6 +120,9 @@ pub async fn create_test_server_with_state(
 
     // Load configuration
     let mut config = config::Config::from_env();
+    if let Some(name) = &test_config.database_name {
+        config.database.database = name.clone();
+    }
     if let Some(enabled) = test_config.database_encryption_write_enabled {
         config.database_encryption.write_enabled = enabled;
     }
@@ -139,20 +144,31 @@ pub async fn create_test_server_with_state(
         .expect("test database encryption key must be valid");
     db.pool()
         .set_field_encryption(services::db_pool::FieldEncryptionConfig {
-            key,
-            key_id: config.database_encryption.key_id.clone(),
+            ring: database::field_encryption::KeyRing::new(
+                config.database_encryption.key_id.clone(),
+                key,
+                vec![],
+            )
+            .expect("valid test encryption ring"),
             write_enabled: config.database_encryption.write_enabled,
             agent_secrets_write_enabled: config.database_encryption.agent_secrets_write_enabled,
         });
+    if let Some(encryption) = test_config.field_encryption {
+        db.pool().set_field_encryption(encryption);
+    }
 
     // Run migrations only once, even when tests run in parallel
-    MIGRATIONS_INITIALIZED
-        .get_or_init(|| async {
-            db.run_migrations()
-                .await
-                .expect("Failed to run database migrations");
-        })
-        .await;
+    if test_config.database_name.is_some() {
+        db.run_migrations().await.expect("isolated test migrations");
+    } else {
+        MIGRATIONS_INITIALIZED
+            .get_or_init(|| async {
+                db.run_migrations()
+                    .await
+                    .expect("Failed to run database migrations");
+            })
+            .await;
+    }
 
     // Get repositories
     let user_repo = db.user_repository();
@@ -413,6 +429,7 @@ pub async fn create_test_server_with_state(
     // Create application state
     let app_state = AppState {
         db_pool: db.pool().clone(),
+        database_encryption_worker: Default::default(),
         oauth_service,
         email_auth_service,
         email_auth_trusted_proxy_count: config.email_auth.trusted_proxy_count,

@@ -26,8 +26,8 @@ impl PostgresConversationShareRepository {
     ) -> Result<String, ConversationError> {
         match self.pool.field_encryption() {
             Some(config) if config.write_enabled => crate::field_encryption::encrypt(
-                &config.key,
-                &config.key_id,
+                config.ring().write_key(),
+                config.ring().write_id(),
                 table,
                 column,
                 id,
@@ -46,13 +46,12 @@ impl PostgresConversationShareRepository {
         value: String,
     ) -> Result<String, ConversationError> {
         match self.pool.field_encryption() {
-            Some(config) => crate::field_encryption::decrypt_if_encrypted(
-                &config.key,
-                &config.key_id,
+            Some(config) => crate::field_encryption::decrypt_if_encrypted_with_ring(
+                value,
+                config.ring(),
                 table,
                 column,
                 id,
-                value,
             )
             .map_err(|e| ConversationError::DatabaseError(e.to_string())),
             None => Ok(value),
@@ -68,10 +67,39 @@ impl PostgresConversationShareRepository {
         self.pool
             .field_encryption()
             .map(|config| {
-                crate::field_encryption::search_token(&config.key, domain, &normalized)
-                    .map_err(|e| ConversationError::DatabaseError(e.to_string()))
+                crate::field_encryption::search_token(
+                    config.ring().write_key(),
+                    domain,
+                    &normalized,
+                )
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))
             })
             .transpose()
+    }
+
+    fn lookup_tokens(&self, domain: &str, value: &str) -> Result<Vec<Vec<u8>>, ConversationError> {
+        let Some(config) = self.pool.field_encryption() else {
+            return Ok(Vec::new());
+        };
+        let normalized = if domain == "conversation_share_groups.name" {
+            value.to_string()
+        } else {
+            value.trim().to_lowercase()
+        };
+        let ring = config.ring();
+        crate::field_encryption::search_tokens_for_lookup(ring, domain, &normalized)
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))
+    }
+
+    fn lookup_tokens_for_values(
+        &self,
+        domain: &str,
+        values: &[String],
+    ) -> Result<Vec<Vec<u8>>, ConversationError> {
+        values.iter().try_fold(Vec::new(), |mut tokens, value| {
+            tokens.extend(self.lookup_tokens(domain, value)?);
+            Ok(tokens)
+        })
     }
 
     fn map_permission(value: &str) -> Result<SharePermission, ConversationError> {
@@ -210,9 +238,11 @@ impl PostgresConversationShareRepository {
             .map(|recipient| self.token("conversation_shares.recipient_value", &recipient.value))
             .transpose()?
             .flatten();
-        let existing_direct_id = if let (ShareType::Direct, Some(recipient), Some(token)) =
+        let existing_direct_id = if let (ShareType::Direct, Some(recipient), Some(_)) =
             (&share.share_type, &share.recipient, &recipient_token)
         {
+            let lookup_tokens =
+                self.lookup_tokens("conversation_shares.recipient_value", &recipient.value)?;
             let lock_key = format!(
                 "direct-share:{}:{}:{}",
                 share.conversation_id,
@@ -230,14 +260,14 @@ impl PostgresConversationShareRepository {
                 .query(
                     "SELECT id FROM conversation_shares
                      WHERE conversation_id=$1 AND share_type='direct' AND recipient_type=$2
-                       AND (recipient_value_search_token=$3 OR
+                       AND (recipient_value_search_token=ANY($3) OR
                             (recipient_value_search_token IS NULL AND LOWER(recipient_value)=LOWER($4)))
                      ORDER BY recipient_value_search_token IS NULL
                      FOR UPDATE",
                     &[
                         &share.conversation_id,
                         &recipient.kind.as_str(),
-                        token,
+                        &lookup_tokens,
                         &recipient.value,
                     ],
                 )
@@ -349,6 +379,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
 
         let group_id = Uuid::new_v4();
         let name_token = self.token("conversation_share_groups.name", name)?;
+        let name_lookup_tokens = self.lookup_tokens("conversation_share_groups.name", name)?;
         let lock_key = format!("share-group:{}:{}", owner_user_id.0, name);
         transaction
             .query_one(
@@ -361,9 +392,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .query_opt(
                 "SELECT id FROM conversation_share_groups
                  WHERE owner_user_id=$1 AND
-                       (name_search_token=$2 OR (name_search_token IS NULL AND name=$3))
+                       (name_search_token=ANY($2) OR (name_search_token IS NULL AND name=$3))
                  LIMIT 1 FOR UPDATE",
-                &[&owner_user_id.0, &name_token, &name],
+                &[&owner_user_id.0, &name_lookup_tokens, &name],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?
@@ -467,23 +498,26 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         // Use UNNEST to create pairs of (type, value) from arrays
         // This is safer than dynamic SQL construction and maintains correct pair matching
         // UNNEST with multiple arrays creates rows where elements at the same position are paired
-        let member_types: Vec<String> = member_identifiers
-            .iter()
-            .map(|m| m.kind.as_str().to_string())
-            .collect();
-        let member_values_lower: Vec<String> = member_identifiers
-            .iter()
-            .map(|m| m.value.to_lowercase())
-            .collect();
-        let member_tokens: Vec<Option<Vec<u8>>> = member_identifiers
-            .iter()
-            .map(|member| {
-                self.token(
-                    "conversation_share_group_members.member_value",
-                    &member.value,
-                )
-            })
-            .collect::<Result<_, _>>()?;
+        let mut member_types = Vec::new();
+        let mut member_values_lower = Vec::new();
+        let mut member_tokens = Vec::new();
+        for member in member_identifiers {
+            let tokens = self.lookup_tokens(
+                "conversation_share_group_members.member_value",
+                &member.value,
+            )?;
+            if tokens.is_empty() {
+                member_types.push(member.kind.as_str().to_string());
+                member_values_lower.push(member.value.to_lowercase());
+                member_tokens.push(None);
+            } else {
+                for token in tokens {
+                    member_types.push(member.kind.as_str().to_string());
+                    member_values_lower.push(member.value.to_lowercase());
+                    member_tokens.push(Some(token));
+                }
+            }
+        }
 
         // Use parameterized query with UNNEST to safely match (type, value) pairs
         // This avoids dynamic SQL construction while maintaining correct pairing semantics
@@ -492,9 +526,14 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                 "SELECT DISTINCT g.id, g.owner_user_id, g.name, g.created_at, g.updated_at
                  FROM conversation_share_groups g
                  JOIN conversation_share_group_members m ON g.id = m.group_id
-                 JOIN UNNEST($1::text[], $2::text[], $3::bytea[]) AS search(member_type, member_value, member_token)
+                 JOIN (
+                     SELECT member_type, member_value, ARRAY_AGG(member_token) AS member_tokens
+                     FROM UNNEST($1::text[], $2::text[], $3::bytea[])
+                          AS keys(member_type, member_value, member_token)
+                     GROUP BY member_type, member_value
+                 ) AS search
                    ON m.member_type = search.member_type
-                   AND (m.member_value_search_token = search.member_token OR
+                   AND (m.member_value_search_token = ANY(search.member_tokens) OR
                         (m.member_value_search_token IS NULL AND LOWER(m.member_value) = search.member_value))
                  ORDER BY g.created_at, g.id",
                 &[&member_types, &member_values_lower, &member_tokens],
@@ -564,6 +603,35 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .transaction()
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        if let Some(name) = name {
+            let lock_key = format!("share-group:{}:{}", owner_user_id.0, name);
+            transaction
+                .query_one(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    &[&lock_key],
+                )
+                .await
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+            let tokens = self.lookup_tokens("conversation_share_groups.name", name)?;
+            if transaction
+                .query_opt(
+                    "SELECT id FROM conversation_share_groups
+                     WHERE owner_user_id=$1 AND id<>$2
+                       AND (name_search_token=ANY($3) OR
+                            (name_search_token IS NULL AND name=$4))
+                     LIMIT 1 FOR UPDATE",
+                    &[&owner_user_id.0, &group_id, &tokens, &name],
+                )
+                .await
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?
+                .is_some()
+            {
+                return Err(ConversationError::DatabaseError(
+                    "share group name already exists".into(),
+                ));
+            }
+        }
 
         let stored_name = name
             .map(|value| self.encode("conversation_share_groups", "name", group_id, value))
@@ -815,17 +883,15 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let email_token = self.token("conversation_shares.recipient_value", email)?;
+        let email_token = self.lookup_tokens("conversation_shares.recipient_value", email)?;
         let group_email_token =
-            self.token("conversation_share_group_members.member_value", email)?;
-        let near_tokens: Vec<Option<Vec<u8>>> = near_accounts
-            .iter()
-            .map(|value| self.token("conversation_shares.recipient_value", value))
-            .collect::<Result<_, _>>()?;
-        let group_near_tokens: Vec<Option<Vec<u8>>> = near_accounts
-            .iter()
-            .map(|value| self.token("conversation_share_group_members.member_value", value))
-            .collect::<Result<_, _>>()?;
+            self.lookup_tokens("conversation_share_group_members.member_value", email)?;
+        let near_tokens =
+            self.lookup_tokens_for_values("conversation_shares.recipient_value", near_accounts)?;
+        let group_near_tokens = self.lookup_tokens_for_values(
+            "conversation_share_group_members.member_value",
+            near_accounts,
+        )?;
         let row = client
             .query_opt(
                 "SELECT permission FROM (
@@ -834,7 +900,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE conversation_id = $1
                        AND share_type = 'direct'
                        AND (
-                            (recipient_type = 'email' AND (recipient_value_search_token = $4 OR (recipient_value_search_token IS NULL AND LOWER(recipient_value) = LOWER($2))))
+                            (recipient_type = 'email' AND (recipient_value_search_token = ANY($4) OR (recipient_value_search_token IS NULL AND LOWER(recipient_value) = LOWER($2))))
                             OR
                             (recipient_type = 'near' AND (recipient_value_search_token = ANY($5) OR (recipient_value_search_token IS NULL AND recipient_value = ANY($3))))
                        )
@@ -846,7 +912,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE cs.conversation_id = $1
                        AND cs.share_type = 'group'
                        AND (
-                            (cgm.member_type = 'email' AND (cgm.member_value_search_token = $6 OR (cgm.member_value_search_token IS NULL AND LOWER(cgm.member_value) = LOWER($2))))
+                            (cgm.member_type = 'email' AND (cgm.member_value_search_token = ANY($6) OR (cgm.member_value_search_token IS NULL AND LOWER(cgm.member_value) = LOWER($2))))
                             OR
                             (cgm.member_type = 'near' AND (cgm.member_value_search_token = ANY($7) OR (cgm.member_value_search_token IS NULL AND cgm.member_value = ANY($3))))
                        )
@@ -914,17 +980,15 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let email_token = self.token("conversation_shares.recipient_value", email)?;
+        let email_token = self.lookup_tokens("conversation_shares.recipient_value", email)?;
         let group_email_token =
-            self.token("conversation_share_group_members.member_value", email)?;
-        let near_tokens: Vec<Option<Vec<u8>>> = near_accounts
-            .iter()
-            .map(|value| self.token("conversation_shares.recipient_value", value))
-            .collect::<Result<_, _>>()?;
-        let group_near_tokens: Vec<Option<Vec<u8>>> = near_accounts
-            .iter()
-            .map(|value| self.token("conversation_share_group_members.member_value", value))
-            .collect::<Result<_, _>>()?;
+            self.lookup_tokens("conversation_share_group_members.member_value", email)?;
+        let near_tokens =
+            self.lookup_tokens_for_values("conversation_shares.recipient_value", near_accounts)?;
+        let group_near_tokens = self.lookup_tokens_for_values(
+            "conversation_share_group_members.member_value",
+            near_accounts,
+        )?;
         // Query to find all conversations shared with the user via direct shares,
         // group memberships, or organization patterns. We take the highest permission
         // (write > read) for each conversation. Excludes conversations owned by the user.
@@ -938,7 +1002,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE share_type = 'direct'
                        AND owner_user_id != $3
                        AND (
-                            (recipient_type = 'email' AND (recipient_value_search_token = $4 OR (recipient_value_search_token IS NULL AND LOWER(recipient_value) = LOWER($1))))
+                            (recipient_type = 'email' AND (recipient_value_search_token = ANY($4) OR (recipient_value_search_token IS NULL AND LOWER(recipient_value) = LOWER($1))))
                             OR
                             (recipient_type = 'near' AND (recipient_value_search_token = ANY($5) OR (recipient_value_search_token IS NULL AND recipient_value = ANY($2))))
                        )
@@ -951,7 +1015,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE cs.share_type = 'group'
                        AND cs.owner_user_id != $3
                        AND (
-                            (cgm.member_type = 'email' AND (cgm.member_value_search_token = $6 OR (cgm.member_value_search_token IS NULL AND LOWER(cgm.member_value) = LOWER($1))))
+                            (cgm.member_type = 'email' AND (cgm.member_value_search_token = ANY($6) OR (cgm.member_value_search_token IS NULL AND LOWER(cgm.member_value) = LOWER($1))))
                             OR
                             (cgm.member_type = 'near' AND (cgm.member_value_search_token = ANY($7) OR (cgm.member_value_search_token IS NULL AND cgm.member_value = ANY($2))))
                        )
@@ -985,5 +1049,43 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .collect();
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use services::db_pool::FieldEncryptionConfig;
+
+    #[test]
+    fn lookup_tokens_include_previous_keys_with_recipient_normalization() {
+        // Given a repository whose write and previous keys differ.
+        let current_key = crate::random_key();
+        let previous_key = crate::random_key();
+        let pool = DbPool::uninitialized();
+        pool.set_field_encryption(FieldEncryptionConfig {
+            ring: services::encryption_key_ring::KeyRing::new(
+                "current".into(),
+                current_key,
+                vec![("previous".into(), previous_key)],
+            )
+            .unwrap(),
+            write_enabled: true,
+            agent_secrets_write_enabled: false,
+        });
+        let repository = PostgresConversationShareRepository::new(pool);
+        let domain = "conversation_shares.recipient_value";
+        let current =
+            crate::field_encryption::search_token(&current_key, domain, "user@example.com")
+                .unwrap();
+        let previous =
+            crate::field_encryption::search_token(&previous_key, domain, "user@example.com")
+                .unwrap();
+
+        // When a recipient lookup includes spaces and uppercase text.
+        let tokens = repository.lookup_tokens(domain, " USER@EXAMPLE.COM ");
+
+        // Then both generations match, with the write key first.
+        assert_eq!(tokens.unwrap(), vec![current, previous]);
     }
 }

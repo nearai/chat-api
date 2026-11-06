@@ -17,8 +17,8 @@ impl PostgresFileRepository {
     fn encode_filename(&self, id: Uuid, value: &str) -> Result<String, FileError> {
         match self.pool.field_encryption() {
             Some(config) if config.write_enabled => crate::field_encryption::encrypt(
-                &config.key,
-                &config.key_id,
+                config.ring().write_key(),
+                config.ring().write_id(),
                 "files",
                 "filename",
                 id,
@@ -45,13 +45,12 @@ impl PostgresFileRepository {
         }
         let id = Self::encryption_context(file_id)?;
         match self.pool.field_encryption() {
-            Some(config) => crate::field_encryption::decrypt_if_encrypted(
-                &config.key,
-                &config.key_id,
+            Some(config) => crate::field_encryption::decrypt_if_encrypted_with_ring(
+                value,
+                config.ring(),
                 "files",
                 "filename",
                 id,
-                value,
             )
             .map_err(|e| FileError::DatabaseError(e.to_string())),
             None => Ok(value),
@@ -283,5 +282,45 @@ impl FileRepository for PostgresFileRepository {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use services::db_pool::FieldEncryptionConfig;
+
+    #[test]
+    fn filename_reads_previous_keys() {
+        // Given a filename written under a previous key with its original row context.
+        let id = Uuid::new_v4();
+        let previous_key = crate::random_key();
+        let ciphertext = crate::field_encryption::encrypt(
+            &previous_key,
+            "previous",
+            "files",
+            "filename",
+            id,
+            "report.pdf",
+        )
+        .unwrap();
+        let pool = DbPool::uninitialized();
+        pool.set_field_encryption(FieldEncryptionConfig {
+            ring: services::encryption_key_ring::KeyRing::new(
+                "current".into(),
+                crate::random_key(),
+                vec![("previous".into(), previous_key)],
+            )
+            .unwrap(),
+            write_enabled: true,
+            agent_secrets_write_enabled: false,
+        });
+        let repository = PostgresFileRepository::new(pool);
+
+        // When the filename is loaded after rotation.
+        let plaintext = repository.decode_filename(&format!("file-{id}"), ciphertext);
+
+        // Then it is readable through the configured previous key.
+        assert_eq!(plaintext.unwrap(), "report.pdf");
     }
 }

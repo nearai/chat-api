@@ -6,6 +6,7 @@ pub mod bi_metrics;
 pub mod consts;
 pub mod conversation;
 pub mod db_pool;
+pub mod encryption_key_ring;
 pub mod file;
 pub mod metrics;
 pub mod model;
@@ -19,3 +20,9 @@ pub mod user_usage;
 pub mod vpc;
 
 pub use types::{SessionId, UserId};
+
+#[cfg(test)]
+fn random_key() -> [u8; 32] {
+    use rand::{Rng, TryRngCore};
+    rand::rngs::OsRng.unwrap_err().random()
+}

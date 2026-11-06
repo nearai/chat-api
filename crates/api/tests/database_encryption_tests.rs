@@ -200,3 +200,29 @@ async fn encrypted_group_names_preserve_raw_uniqueness() {
         3
     );
 }
+
+#[path = "database_encryption/edges.rs"]
+mod edges;
+#[path = "database_encryption/fixture.rs"]
+mod fixture;
+#[path = "database_encryption/lookups.rs"]
+mod lookups;
+#[path = "database_encryption/periodic_recovery.rs"]
+mod periodic_recovery;
+#[path = "database_encryption/recovery.rs"]
+mod recovery;
+#[path = "database_encryption/rotation.rs"]
+mod rotation;
+#[path = "database_encryption/throttle.rs"]
+mod throttle;
+
+#[path = "database_encryption/access.rs"]
+mod access;
+#[path = "database_encryption/batch_updates.rs"]
+mod batch_updates;
+#[path = "database_encryption/counts.rs"]
+mod counts;
+#[path = "database_encryption/queue.rs"]
+mod queue;
+#[path = "database_encryption/secrets_rotation.rs"]
+mod secrets_rotation;

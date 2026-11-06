@@ -20,8 +20,8 @@ pub fn encrypt(
             "DB_ENCRYPTION_WRITE_ENABLED must also be enabled"
         );
         field_encryption::encrypt(
-            &config.key,
-            &config.key_id,
+            config.ring().write_key(),
+            config.ring().write_id(),
             table,
             column,
             row_id,
@@ -49,7 +49,7 @@ pub fn decrypt(
     if is_field_envelope(value) {
         let config =
             config.ok_or_else(|| anyhow!("database field encryption is not configured"))?;
-        field_encryption::decrypt(&config.key, &config.key_id, table, column, row_id, value)
+        field_encryption::decrypt_with_ring(value, config.ring(), table, column, row_id)
     } else {
         decrypt_legacy(value)
     }
@@ -82,8 +82,12 @@ mod tests {
     #[test]
     fn field_credentials_require_the_correct_key_and_row_context() {
         let config = FieldEncryptionConfig {
-            key: rand::random(),
-            key_id: "test-v1".into(),
+            ring: services::encryption_key_ring::KeyRing::new(
+                "test-v1".into(),
+                rand::random(),
+                Vec::new(),
+            )
+            .unwrap(),
             write_enabled: true,
             agent_secrets_write_enabled: true,
         };
@@ -132,7 +136,12 @@ mod tests {
         )
         .is_err());
         let wrong_key = FieldEncryptionConfig {
-            key: rand::random(),
+            ring: services::encryption_key_ring::KeyRing::new(
+                "test-v1".into(),
+                rand::random(),
+                vec![],
+            )
+            .unwrap(),
             ..config
         };
         assert!(decrypt(
@@ -143,6 +152,44 @@ mod tests {
             &ciphertext
         )
         .is_err());
+    }
+
+    #[test]
+    fn field_credentials_read_previous_keys() {
+        // Given a credential written before the write key rotated.
+        let id = Uuid::new_v4();
+        let previous_key = crate::random_key();
+        let ciphertext = field_encryption::encrypt(
+            &previous_key,
+            "previous",
+            "agent_instances",
+            "instance_token",
+            id,
+            "credential",
+        )
+        .unwrap();
+        let config = FieldEncryptionConfig {
+            ring: services::encryption_key_ring::KeyRing::new(
+                "current".into(),
+                crate::random_key(),
+                vec![("previous".into(), previous_key)],
+            )
+            .unwrap(),
+            write_enabled: true,
+            agent_secrets_write_enabled: true,
+        };
+
+        // When the credential is read after rotation.
+        let plaintext = decrypt(
+            Some(&config),
+            "agent_instances",
+            "instance_token",
+            id,
+            &ciphertext,
+        );
+
+        // Then the configured previous key still authenticates it.
+        assert_eq!(plaintext.unwrap(), "credential");
     }
 
     #[test]
@@ -175,8 +222,12 @@ mod tests {
     #[test]
     fn agent_gate_cannot_bypass_the_global_write_gate() {
         let config = FieldEncryptionConfig {
-            key: rand::random(),
-            key_id: "test-v1".into(),
+            ring: services::encryption_key_ring::KeyRing::new(
+                "test-v1".into(),
+                rand::random(),
+                Vec::new(),
+            )
+            .unwrap(),
             write_enabled: false,
             agent_secrets_write_enabled: true,
         };

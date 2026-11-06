@@ -9,39 +9,33 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 pub const MARKER: &str = "__near_db_encrypted";
 pub const DEFAULT_KEY_ID: &str = "db-v1";
 const AEAD_KEY_INFO: &[u8] = b"near-chat-db-aead-v1";
 const SEARCH_KEY_INFO: &[u8] = b"near-chat-db-search-v1";
 
-fn derive_key(master_key: &[u8; 32], info: &[u8]) -> Result<[u8; 32]> {
-    let mut key = *master_key;
+fn derive_key(master_key: &[u8; 32], info: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    let mut key = Zeroizing::new([0; 32]);
     Hkdf::<Sha256>::new(None, master_key)
-        .expand(info, &mut key)
+        .expand(info, &mut *key)
         .map_err(|_| anyhow!("database encryption key derivation failed"))?;
     Ok(key)
 }
 
 pub fn parse_key(hex_key: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(hex_key).context("database encryption key must be hex encoded")?;
+    let bytes = Zeroizing::new(
+        hex::decode(hex_key).context("database encryption key must be hex encoded")?,
+    );
     let len = bytes.len();
     bytes
+        .as_slice()
         .try_into()
         .map_err(|_| anyhow!("database encryption key must be 32 bytes, got {len}"))
 }
 
-pub fn validate_key_id(key_id: &str) -> Result<()> {
-    ensure!(
-        !key_id.is_empty()
-            && key_id.len() <= 64
-            && key_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
-        "database encryption key id must be 1-64 safe ASCII characters"
-    );
-    Ok(())
-}
+pub use services::encryption_key_ring::{validate_key_id, KeyRing};
 
 pub fn is_envelope(value: &Value) -> bool {
     value[MARKER] == true
@@ -65,7 +59,7 @@ pub fn encrypt(
     OsRng.fill_bytes(&mut nonce);
     let aad = format!("{table}:{column}:{row_id}");
     let aead_key = derive_key(key, AEAD_KEY_INFO)?;
-    let cipher = Aes256Gcm::new_from_slice(&aead_key).map_err(|_| anyhow!("invalid key"))?;
+    let cipher = Aes256Gcm::new_from_slice(&*aead_key).map_err(|_| anyhow!("invalid key"))?;
     let ciphertext = cipher
         .encrypt(
             &Nonce::from(nonce),
@@ -86,6 +80,7 @@ pub fn encrypt(
     .to_string())
 }
 
+#[cfg(test)]
 pub fn decrypt(
     key: &[u8; 32],
     expected_key_id: &str,
@@ -94,13 +89,33 @@ pub fn decrypt(
     row_id: Uuid,
     encoded: &str,
 ) -> Result<String> {
-    validate_key_id(expected_key_id)?;
+    let ring = KeyRing::new(expected_key_id.into(), *key, vec![])?;
+    decrypt_with_ring(encoded, &ring, table, column, row_id)
+}
+
+pub fn decrypt_with_ring(
+    encoded: &str,
+    ring: &KeyRing,
+    table: &str,
+    column: &str,
+    row_id: Uuid,
+) -> Result<String> {
     let value: Value = serde_json::from_str(encoded)?;
-    ensure!(is_envelope(&value), "invalid encrypted envelope");
-    ensure!(
-        value["key_id"] == expected_key_id,
-        "unsupported encryption key id"
-    );
+    decrypt_parsed_with_ring(&value, ring, table, column, row_id)
+}
+
+/// Authenticate an envelope that the caller has already parsed.
+pub fn decrypt_parsed_with_ring(
+    value: &Value,
+    ring: &KeyRing,
+    table: &str,
+    column: &str,
+    row_id: Uuid,
+) -> Result<String> {
+    ensure!(is_envelope(value), "invalid encrypted envelope");
+    let key = envelope_key_id(value)
+        .and_then(|id| ring.lookup(id))
+        .ok_or_else(|| anyhow!("unsupported encryption key id"))?;
     let nonce: [u8; 12] = BASE64
         .decode(
             value["nonce"]
@@ -116,7 +131,7 @@ pub fn decrypt(
     )?;
     let aad = format!("{table}:{column}:{row_id}");
     let aead_key = derive_key(key, AEAD_KEY_INFO)?;
-    let cipher = Aes256Gcm::new_from_slice(&aead_key).map_err(|_| anyhow!("invalid key"))?;
+    let cipher = Aes256Gcm::new_from_slice(&*aead_key).map_err(|_| anyhow!("invalid key"))?;
     let plaintext = cipher
         .decrypt(
             &Nonce::from(nonce),
@@ -129,6 +144,7 @@ pub fn decrypt(
     Ok(String::from_utf8(plaintext)?)
 }
 
+#[cfg(test)]
 pub fn decrypt_if_encrypted(
     key: &[u8; 32],
     key_id: &str,
@@ -137,17 +153,44 @@ pub fn decrypt_if_encrypted(
     row_id: Uuid,
     value: String,
 ) -> Result<String> {
+    let ring = KeyRing::new(key_id.into(), *key, vec![])?;
+    decrypt_if_encrypted_with_ring(value, &ring, table, column, row_id)
+}
+
+pub fn decrypt_if_encrypted_with_ring(
+    value: String,
+    ring: &KeyRing,
+    table: &str,
+    column: &str,
+    row_id: Uuid,
+) -> Result<String> {
     match serde_json::from_str::<Value>(&value) {
         Ok(envelope) if is_envelope(&envelope) => {
-            decrypt(key, key_id, table, column, row_id, &value)
+            decrypt_parsed_with_ring(&envelope, ring, table, column, row_id)
         }
         _ => Ok(value),
     }
 }
 
+pub fn envelope_key_id(value: &Value) -> Option<&str> {
+    is_envelope(value)
+        .then(|| value["key_id"].as_str())
+        .flatten()
+}
+
+pub fn search_tokens_for_lookup(ring: &KeyRing, domain: &str, value: &str) -> Result<Vec<Vec<u8>>> {
+    ring.keys()
+        .map(|(_, key)| search_token_with_key(key, domain, value))
+        .collect()
+}
+
 pub fn search_token(key: &[u8; 32], domain: &str, value: &str) -> Result<Vec<u8>> {
+    search_token_with_key(key, domain, value)
+}
+
+pub fn search_token_with_key(key: &[u8; 32], domain: &str, value: &str) -> Result<Vec<u8>> {
     let search_key = derive_key(key, SEARCH_KEY_INFO)?;
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&search_key)
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&*search_key)
         .map_err(|_| anyhow!("invalid search-token key"))?;
     mac.update(b"near-chat-db-search-v1\0");
     mac.update(domain.as_bytes());
@@ -157,72 +200,5 @@ pub fn search_token(key: &[u8; 32], domain: &str, value: &str) -> Result<Vec<u8>
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_key() -> [u8; 32] {
-        Aes256Gcm::generate_key(OsRng).into()
-    }
-
-    #[test]
-    fn envelope_round_trips_and_authenticates_context() {
-        let key = test_key();
-        let id = Uuid::new_v4();
-        let encoded = encrypt(&key, "test-v1", "files", "filename", id, "private.txt").unwrap();
-        assert!(!encoded.contains("private.txt"));
-        assert_eq!(
-            decrypt(&key, "test-v1", "files", "filename", id, &encoded).unwrap(),
-            "private.txt"
-        );
-        assert!(decrypt(
-            &key,
-            "test-v1",
-            "files",
-            "filename",
-            Uuid::new_v4(),
-            &encoded
-        )
-        .is_err());
-        assert!(decrypt(&key, "other", "files", "filename", id, &encoded).is_err());
-    }
-
-    #[test]
-    fn plaintext_and_marker_shaped_user_data_remain_readable() {
-        let key = test_key();
-        let id = Uuid::new_v4();
-        for value in ["legacy", r#"{"__near_db_encrypted":true,"user":"value"}"#] {
-            assert_eq!(
-                decrypt_if_encrypted(&key, "test-v1", "files", "filename", id, value.into())
-                    .unwrap(),
-                value
-            );
-        }
-    }
-
-    #[test]
-    fn search_tokens_are_stable_and_domain_separated() {
-        let key = test_key();
-        let a = search_token(&key, "files.provider_id", "file-1").unwrap();
-        assert_eq!(
-            a,
-            search_token(&key, "files.provider_id", "file-1").unwrap()
-        );
-        assert_ne!(
-            a,
-            search_token(&key, "conversations.provider_id", "file-1").unwrap()
-        );
-        assert_ne!(
-            a,
-            search_token(&key, "files.provider_id", "file-2").unwrap()
-        );
-    }
-
-    #[test]
-    fn encryption_and_search_use_distinct_subkeys() {
-        let key = test_key();
-        assert_ne!(
-            derive_key(&key, AEAD_KEY_INFO).unwrap(),
-            derive_key(&key, SEARCH_KEY_INFO).unwrap()
-        );
-    }
-}
+#[path = "field_encryption_tests.rs"]
+mod tests;

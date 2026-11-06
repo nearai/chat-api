@@ -7,6 +7,7 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
+zeroize = "1.8"
 # PostgreSQL client library for async Rust
 # Documentation: https://docs.rs/tokio-postgres/latest/tokio_postgres/
 # Crate: https://crates.io/crates/tokio-postgres

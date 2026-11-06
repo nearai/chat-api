@@ -31,8 +31,8 @@ impl PostgresAgentRepository {
         }
         match self.pool.field_encryption() {
             Some(config) if config.write_enabled => crate::field_encryption::encrypt(
-                &config.key,
-                &config.key_id,
+                config.ring().write_key(),
+                config.ring().write_id(),
                 "agent_instances",
                 column,
                 id,
@@ -64,13 +64,12 @@ impl PostgresAgentRepository {
             );
         }
         match self.pool.field_encryption() {
-            Some(config) => crate::field_encryption::decrypt_if_encrypted(
-                &config.key,
-                &config.key_id,
+            Some(config) => crate::field_encryption::decrypt_if_encrypted_with_ring(
+                value,
+                config.ring(),
                 "agent_instances",
                 column,
                 id,
-                value,
             ),
             None => Ok(value),
         }
