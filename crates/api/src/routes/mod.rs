@@ -8,6 +8,7 @@ pub mod oauth;
 pub mod subscriptions;
 pub mod users;
 
+pub mod browser_session;
 mod cors;
 
 // Re-export validation constants from services crate for API layer usage
@@ -162,6 +163,14 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .merge(subscription_routes) // Subscription routes (requires user auth)
         .merge(credits_routes) // Credits routes (requires user auth)
         .merge(public_subscription_routes) // Public subscription webhook route (no auth)
+        .route(
+            "/v1/auth/session/refresh",
+            axum::routing::post(browser_session::refresh),
+        )
+        .route(
+            "/v1/auth/session/logout",
+            axum::routing::post(browser_session::logout),
+        )
         .nest("/v1/auth", auth_routes)
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)

@@ -1133,3 +1133,112 @@ async fn gateway_setup_timeout_revokes_session_without_restoring_callback_code()
     assert!(!replay.headers().contains_key(SET_COOKIE));
     assert_eq!(gateway.received_requests().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn browser_exchange_returns_both_cookies_and_a_short_lived_access_token() {
+    std::env::set_var("BROWSER_SESSION_USER_ORIGINS", "https://agent.near.ai");
+    let (config, calls) = gateway_config(1, Ok(Some(GATEWAY_COOKIE)));
+    let (server, db) = create_test_server_and_db(config).await;
+    let user = db
+        .user_repository()
+        .create_user(
+            format!("oauth-code-{}@example.com", Uuid::new_v4()),
+            Some("OAuth code test".into()),
+            None,
+        )
+        .await
+        .expect("create test user");
+    let original_session = db
+        .session_repository()
+        .create_session(user.id)
+        .await
+        .expect("create initial session");
+    let original_token = original_session.token.clone().expect("initial token");
+
+    let code = URL_SAFE_NO_PAD.encode([27_u8; 32]);
+    let verifier = "v".repeat(43);
+    db.oauth_repository()
+        .store_callback_code(
+            &sha256_hex(&code),
+            &OAuthCallbackCode {
+                session_id: original_session.session_id,
+                code_challenge: pkce_challenge(&verifier),
+                is_new_user: true,
+                expires_at: Utc::now() + Duration::minutes(2),
+            },
+        )
+        .await
+        .expect("store callback code");
+
+    let wrong_response = server
+        .post("/v1/auth/exchange")
+        .json(&json!({ "code": code, "code_verifier": "w".repeat(43) }))
+        .await;
+    assert_eq!(wrong_response.status_code(), 401);
+    assert!(!wrong_response.headers().contains_key(SET_COOKIE));
+    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(wrong_response.header(CACHE_CONTROL), "no-store");
+
+    let response = server
+        .post("/v1/auth/exchange")
+        .add_header(http::header::ORIGIN, "https://agent.near.ai")
+        .add_header("x-session-client", "user")
+        .json(&json!({ "code": code, "code_verifier": verifier }))
+        .await;
+    assert_eq!(response.status_code(), 200);
+    let cookies: Vec<_> = response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect();
+    assert_eq!(cookies.len(), 2);
+    assert!(cookies.contains(&GATEWAY_COOKIE));
+    assert!(cookies
+        .iter()
+        .any(|cookie| cookie.starts_with("__Host-nearai_user_refresh=")
+            && cookie.contains("Secure; HttpOnly; SameSite=Lax")));
+    assert_eq!(
+        response.header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        "https://agent.near.ai"
+    );
+    assert_eq!(
+        response.header(http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+        "true"
+    );
+    assert_eq!(*calls.lock().unwrap(), vec![user.id]);
+    assert_eq!(response.header(CACHE_CONTROL), "no-store");
+    let body: serde_json::Value = response.json();
+    let expiry =
+        chrono::DateTime::parse_from_rfc3339(body["expires_at"].as_str().unwrap()).unwrap();
+    assert!(expiry <= Utc::now() + Duration::minutes(15));
+    assert!(body.get("refresh_token").is_none());
+    let rotated_token = body["token"].as_str().expect("rotated token");
+    assert_ne!(rotated_token, original_token);
+    assert_eq!(
+        body["session_id"].as_str(),
+        Some(original_session.session_id.to_string().as_str())
+    );
+    assert_eq!(body["is_new_user"], true);
+
+    assert!(db
+        .session_repository()
+        .get_session_by_token_hash(sha256_hex(&original_token))
+        .await
+        .expect("look up original token")
+        .is_none());
+    assert!(db
+        .session_repository()
+        .get_session_by_token_hash(sha256_hex(rotated_token))
+        .await
+        .expect("look up rotated token")
+        .is_some());
+
+    let replay = server
+        .post("/v1/auth/exchange")
+        .json(&json!({ "code": code, "code_verifier": verifier }))
+        .await;
+    assert_eq!(replay.status_code(), 401);
+    assert!(!replay.headers().contains_key(SET_COOKIE));
+    assert_eq!(*calls.lock().unwrap(), vec![user.id]);
+}
