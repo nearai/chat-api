@@ -149,7 +149,9 @@ impl AgentProxyService for AgentProxy {
         }
 
         // Send the request
+        // Errors drop the URL: instance URLs may carry credentials.
         let response = request_builder.send().await.map_err(|e| {
+            let e = e.without_url();
             tracing::error!(
                 "Failed to forward request to agent instance: instance_id={}, error={}",
                 instance.id,
@@ -182,7 +184,7 @@ impl AgentProxyService for AgentProxy {
         let stream = response.bytes_stream();
 
         let stream = Box::pin(stream.map(|result| {
-            result.map_err(|e| anyhow::anyhow!("Failed to read response body: {}", e))
+            result.map_err(|e| anyhow::anyhow!("Failed to read response body: {}", e.without_url()))
         })) as Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>;
 
         tracing::debug!(
@@ -248,6 +250,23 @@ mod tests {
             assert!(result.is_err(), "{instance_url} should be rejected");
         }
         // MockServer verifies on drop that no request reached it.
+    }
+
+    #[tokio::test]
+    async fn forward_request_errors_do_not_include_instance_url() {
+        let proxy = AgentProxy::new();
+        let result = proxy
+            .forward_request(
+                &instance_with_url("https://agent.invalid/?token=secret-instance-token"),
+                "/v1/models",
+                "GET",
+                HeaderMap::new(),
+                Bytes::new(),
+            )
+            .await;
+        let message = format!("{:#}", result.err().expect("request should fail"));
+        assert!(!message.contains("secret-instance-token"), "{message}");
+        assert!(!message.contains("agent.invalid"), "{message}");
     }
 
     #[tokio::test]
