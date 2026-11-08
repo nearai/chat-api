@@ -47,6 +47,11 @@ fn is_forbidden_ipv6(ip: Ipv6Addr) -> bool {
         return true;
     }
 
+    // Cloud instance metadata service (IPv6 endpoint inside fd00::/8)
+    if ip == Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254) {
+        return true;
+    }
+
     // IPv4-mapped and IPv4-compatible addresses
     if let Some(v4) = ip.to_ipv4() {
         return is_forbidden_ipv4(v4);
@@ -188,8 +193,14 @@ pub fn guarded_redirect_policy() -> reqwest::redirect::Policy {
 }
 
 /// Returns a client builder that applies the destination rules at connection time.
+///
+/// Connections are direct (no environment or system proxies) so that every host name
+/// is resolved by [`GuardedResolver`], and no `Referer` header is sent on redirects
+/// because request URLs may carry credentials.
 pub fn guarded_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
+        .no_proxy()
+        .referer(false)
         .dns_resolver(Arc::new(GuardedResolver))
         .redirect(guarded_redirect_policy())
 }
@@ -250,6 +261,7 @@ mod tests {
             "::127.0.0.1",
             "64:ff9b::7f00:1",
             "64:ff9b::a00:202",
+            "fd00:ec2::254",
         ] {
             assert!(
                 is_forbidden_ip(ip.parse().unwrap()),
@@ -307,6 +319,7 @@ mod tests {
             "http://[::1]/",
             "http://[::ffff:127.0.0.1]/",
             "http://[fe80::1]/",
+            "http://[fd00:ec2::254]/latest/meta-data/",
         ] {
             let err = validate_agent_url(raw, "instance_url").unwrap_err();
             assert!(

@@ -354,19 +354,25 @@ async fn fetch_agent_attestations(
             ApiError::bad_gateway("Agent instance has no manager URL; cannot fetch attestation")
         })?;
 
-    // Only contact configured agent managers, using the configured URL
+    // Only contact configured agent managers
     let configured_managers = app_state.agent_service.manager_urls();
-    let manager_base_url = services::agent::url_guard::match_configured_manager(
+    if services::agent::url_guard::match_configured_manager(
         &configured_managers,
         stored_manager_url,
     )
-    .ok_or_else(|| {
+    .is_none()
+    {
         tracing::warn!(
             "Agent instance manager is not configured, skipping attestation: agent_id={}",
             agent_id
         );
-        ApiError::bad_gateway("Agent instance manager is not configured")
-    })?;
+        return Err(ApiError::bad_gateway(
+            "Agent instance manager is not configured",
+        ));
+    }
+    // The stored URL matches a configured manager up to a trailing slash; keep it so
+    // relative path joining below behaves as before.
+    let manager_base_url = stored_manager_url;
 
     let instance_name = &agent_instance.name;
     // URL-encode instance name for safe URL construction
