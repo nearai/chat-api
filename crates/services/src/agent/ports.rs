@@ -397,12 +397,6 @@ pub trait AgentService: Send + Sync {
         offset: i64,
     ) -> anyhow::Result<(Vec<AgentInstance>, i64)>;
 
-    async fn create_instance_from_agent_api(
-        &self,
-        user_id: UserId,
-        params: InstanceCreationParams,
-    ) -> anyhow::Result<AgentInstance>;
-
     /// Create instance with per-instance passkey credentials and streaming lifecycle events.
     /// Calls compose-api /auth/register to set up the instance with unique credentials,
     /// then creates the instance using the session token instead of manager token.
@@ -556,13 +550,6 @@ pub trait AgentService: Send + Sync {
         api_key_id: Uuid,
         instance_id: Uuid,
         user_id: UserId,
-    ) -> anyhow::Result<AgentApiKey>;
-
-    /// Admin: Bind any unbound API key to any instance (no ownership checks).
-    async fn admin_bind_api_key_to_instance(
-        &self,
-        api_key_id: Uuid,
-        instance_id: Uuid,
     ) -> anyhow::Result<AgentApiKey>;
 
     async fn list_api_keys(

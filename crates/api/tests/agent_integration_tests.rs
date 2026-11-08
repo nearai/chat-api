@@ -5,7 +5,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 /// Integration test for complete Agent workflow with real API calls:
-/// 1. Admin creates instance via Agent API
+/// 1. User creates an instance through the owner-authorized API
 /// 2. User retrieves instance
 /// 3. User creates API key
 /// 4. List API keys
@@ -17,75 +17,46 @@ use uuid::Uuid;
 #[tokio::test]
 #[ignore]
 async fn test_agent_real_api_instance_creation() {
-    let (server, _db) = create_test_server_and_db(Default::default()).await;
+    let (server, db) = create_test_server_and_db(Default::default()).await;
 
-    // 1. Create users: admin and regular user
-    let admin_email = "admin@admin.org";
-    let user_email = "testuser_integration@example.com";
+    let user_email = format!("agent-integration-{}@example.com", Uuid::new_v4());
+    let user_token = mock_login(&server, &user_email).await;
 
-    let admin_token = mock_login(&server, admin_email).await;
-    let user_token = mock_login(&server, user_email).await;
+    common::set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {
+                    "stripe": {
+                        "price_id": "price_test_basic"
+                    }
+                },
+                "agent_instances": {
+                    "max": 1
+                }
+            }
+        }),
+    )
+    .await;
+    common::insert_test_subscription(&server, &db, &user_email, false).await;
 
-    // Get user_id for the regular user
-    let user_response = server
-        .get("/v1/users/me")
+    // The owner route enforces the subscription limit before provisioning.
+    let create_instance_response = server
+        .post("/v1/agents/instances")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
-        .await;
-
-    assert_eq!(user_response.status_code(), 200);
-    let user_body: serde_json::Value = user_response.json();
-    let user_id: String = user_body
-        .get("user")
-        .and_then(|u| u.get("id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .expect("User should have id");
-
-    println!(
-        "✓ Created users: admin={}, user={}",
-        admin_email, user_email
-    );
-
-    // 2. Admin creates instance via real Agent API
-    // The chat-api creates an API key on behalf of the user and configures the agent to use it.
-    let create_instance_response = server
-        .post("/v1/admin/agents/instances")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
         .json(&json!({
-            "user_id": user_id,
-            "image": null,
-            "name": format!("test-instance-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap()),
-            "ssh_pubkey": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDLh1Rv3K5Q9X4rq7Xs7X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X test@example.com"
+            "name": format!("test-instance-{}", Uuid::new_v4().simple())
         }))
         .await;
 
-    println!(
-        "✓ Admin create instance response: {}",
-        create_instance_response.status_code()
+    assert_eq!(
+        create_instance_response.status_code(),
+        201,
+        "Owner provisioning requires a configured, reachable Agent API"
     );
-
-    if create_instance_response.status_code() != 201 {
-        let error_body: serde_json::Value = create_instance_response.json();
-        println!("ℹ Instance creation failed:");
-        println!(
-            "  Error: {}",
-            error_body
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-        );
-        println!("\n📝 Ensure AGENT_API_BASE_URL and AGENT_API_TOKEN are set for real Agent API.");
-        println!(
-            "   Run: cargo test --test agent_integration_tests --features test -- --ignored --nocapture"
-        );
-        return;
-    }
 
     // 3. Parse instance response
     let instance_body: serde_json::Value = create_instance_response.json();
@@ -140,7 +111,7 @@ async fn test_agent_real_api_instance_creation() {
         .map(|s| s.to_string())
         .expect("Response should contain api_key");
 
-    println!("✓ Created API key: {}", api_key);
+    println!("✓ Created API key");
 
     // 6. List API keys
     let list_keys_response = server
