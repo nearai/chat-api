@@ -71,7 +71,7 @@ revocation is best effort and the failure is logged; no credential is returned.
 
 1. Apply V43/V44 and deploy the backend with the exact origin lists. Keep
    `SESSION_ENFORCE_SHORT_TOKENS` unset initially for old clients.
-2. Deploy both UI PRs. They purge old persisted credentials, require a fresh login,
+2. Deploy compatible browser clients that purge old persisted credentials, require a fresh login,
    store access tokens only in memory, and restore through the refresh cookie.
    Newly issued user browser sessions cannot access admin routes even during rollout.
 3. Verify production/staging cookies, login methods, multi-tab behavior, reload,
