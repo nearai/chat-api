@@ -14,9 +14,14 @@ use uuid::Uuid;
 ///
 /// NOTE: This test requires valid Agent API credentials in .env file
 /// Set AGENT_API_TOKEN and AGENT_API_BASE_URL before running
+/// Stripe credentials are dummy values because the subscription is seeded directly in the database.
 #[tokio::test]
 #[ignore]
 async fn test_agent_real_api_instance_creation() {
+    // Enable Stripe-backed subscription gating without calling the payment provider.
+    std::env::set_var("STRIPE_SECRET_KEY", "sk_test_dummy");
+    std::env::set_var("STRIPE_WEBHOOK_SECRET", "whsec_dummy");
+
     let (server, db) = create_test_server_and_db(Default::default()).await;
 
     let user_email = format!("agent-integration-{}@example.com", Uuid::new_v4());
