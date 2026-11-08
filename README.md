@@ -20,7 +20,7 @@ A Rust backend service that proxies OpenAI-compatible inference requests to **NE
 ```
 crates/
 ├── api/          # Axum HTTP server, routes, middleware, OpenAPI docs (utoipa)
-├── services/     # Business logic: auth, temporary read views, response proxy, user management
+├── services/     # Business logic: auth, response proxy, user management
 ├── database/     # PostgreSQL (tokio-postgres, deadpool), migrations, repositories
 └── config/       # Environment-based configuration structs
 ```
@@ -30,14 +30,14 @@ crates/
 - **Repository Pattern**: Database access through trait-based repositories (`PostgresUserRepository`, etc.)
 - **Service Layer**: Business logic in `services` crate, injected into `AppState`
 - **NEAR AI Cloud API Proxy**: OpenAI-compatible inference routes forward to NEAR AI Cloud API with auth; Responses requests are stateless
-- **Temporary Migration Surface**: Existing Conversation, File, and sharing GET endpoints, plus four pre-existing Conversation/File/sharing `DELETE` operations, remain available for the Stage I migration/export window. Other ordinary Conversation, File, and sharing writes return `410 Gone`; the existing `DELETE /v1/users/me` account-deletion flow remains available.
+- **Private Chat retirement**: Conversation, File, and sharing endpoints return `410 Gone` with `Cache-Control: no-store`. Users can request an encrypted archive through Feedback at https://private.near.ai.
 - **PostgreSQL deployment modes**: Optional Patroni discovery via `DATABASE_PRIMARY_APP_ID`, plus verified direct TLS connections for managed endpoints such as RDS
 
 ### Request Flow
 
 1. Request → its historical authentication boundary → route handler
 2. `/v1/responses` → validate stateless linkage fields → forward to NEAR AI Cloud API with `store: false`
-3. Temporary Conversation/File/sharing reads and established DELETE operations → their existing auth/ACL checks and, where needed, Cloud read/delete API
+3. Retired Conversation/File/sharing namespaces → a non-cacheable retirement notice, without reading or modifying user data
 4. Usage, subscription, rate-limit, and attestation-related proxy behavior remain local to Chat API
 
 ## Development
@@ -189,14 +189,11 @@ OpenAPI docs available at `/docs`.
 **Key endpoints**:
 - `/v1/auth/*` - OAuth authentication
 - `/v1/responses` - OpenAI-compatible, stateless Responses API (proxied to NEAR AI Cloud API)
-- `/v1/conversations/*` - Temporary Conversation and sharing read views plus established DELETE operations for migration/export
-- `/v1/share-groups` and `/v1/shared-with-me` - Temporary sharing read views and share-group deletion for migration/export
-- `/v1/files/*` - Temporary File views and file deletion for migration/export
 - `/v1/attestation/report` - TEE attestation reports
 - `/v1/users/*` - User management
 - `/v1/admin/*` - Admin operations
 
-**Stage I migration**: all existing Conversation, File, and sharing GET views remain temporarily available for private-chat data export. `GET /v1/conversations/{id}` and `/items` retain their existing optional-auth owner/share/public access checks; other reads retain their existing session and authorization checks. The pre-existing `DELETE /v1/conversations/{id}`, `DELETE /v1/files/{id}`, conversation-share delete, and share-group delete operations also remain available. Other Conversation, File, and sharing state writes (create/update, item creation, upload, share/group creation or update, pin/unpin, archive/unarchive, and clone), plus unsupported methods and descendants within those legacy namespaces, return `410 Gone` with `Cache-Control: no-store`. These views and retained delete operations will be removed in Stage III.
+**Private Chat retirement**: `/v1/conversations`, `/v1/files`, `/v1/share-groups`, and `/v1/shared-with-me`, including their descendants, return `410 Gone` for all resource requests. CORS preflights retain their standard handling. The notice is available without authentication, has `Cache-Control: no-store`, and directs users to Feedback at https://private.near.ai to request an encrypted archive. These APIs are no longer listed in OpenAPI.
 
 **Account-deletion exception**: `DELETE /v1/users/me` remains available. Its existing asynchronous worker continues Cloud Conversation/File cleanup through Cloud API's retained, API-key/workspace-scoped resource DELETE endpoints before it performs local finalization; this flow is outside the retired session-proxy write surface.
 
