@@ -1262,13 +1262,19 @@ pub async fn list_models(
 )]
 pub async fn batch_upsert_models(
     State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Json(request): Json<BatchUpsertModelsRequest>,
 ) -> Result<Json<Vec<ModelResponse>>, ApiError> {
     if request.models.is_empty() {
         return Err(ApiError::bad_request("At least one model must be provided"));
     }
 
-    tracing::info!("Batch upserting {} models", request.models.len());
+    tracing::info!(
+        "Admin: Batch upserting {} models: model_ids={:?}, admin_user_id={}",
+        request.models.len(),
+        request.models.keys().collect::<Vec<_>>(),
+        admin.user_id
+    );
 
     use services::model::ports::{ModelSettings, PartialModelSettings};
 
@@ -1424,13 +1430,18 @@ async fn ensure_proxy_model_exists(
 )]
 pub async fn delete_model(
     State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Path(model_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     if model_id.trim().is_empty() {
         return Err(ApiError::bad_request("model_id cannot be empty"));
     }
 
-    tracing::info!("Deleting model for model_id={}", model_id);
+    tracing::info!(
+        "Admin: Deleting model: model_id={}, admin_user_id={}",
+        model_id,
+        admin.user_id
+    );
 
     let deleted = app_state
         .model_service
@@ -1513,9 +1524,14 @@ pub async fn revoke_vpc_credentials(
 )]
 pub async fn upsert_system_configs(
     State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Json(request): Json<UpsertSystemConfigsRequest>,
 ) -> Result<Json<SystemConfigsResponse>, ApiError> {
-    tracing::info!("Upserting system configs");
+    tracing::info!(
+        "Admin: Upserting system configs: keys={:?}, admin_user_id={}",
+        request.provided_keys(),
+        admin.user_id
+    );
 
     #[cfg(not(feature = "test"))]
     if let Some(ref model_id) = request.default_model {
@@ -1743,12 +1759,13 @@ pub async fn admin_list_all_instances(
 )]
 pub async fn admin_create_instance(
     State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Json(request): Json<AdminCreateInstanceRequest>,
 ) -> Result<(StatusCode, Json<InstanceResponse>), ApiError> {
     tracing::info!(
-        "Admin: Creating agent instance for user_id={}",
-        request.user_id
+        "Admin: Creating agent instance for user_id={}, admin_user_id={}",
+        request.user_id,
+        admin.user_id
     );
 
     let user_id = services::UserId(request.user_id);
@@ -1807,6 +1824,13 @@ pub async fn admin_create_instance(
             );
             ApiError::internal_server_error("Failed to create instance")
         })?;
+
+    tracing::info!(
+        "Admin: Created agent instance: instance_id={}, user_id={}, admin_user_id={}",
+        instance.id,
+        request.user_id,
+        admin.user_id
+    );
 
     Ok((StatusCode::CREATED, Json(instance.into())))
 }
@@ -2147,13 +2171,14 @@ pub struct AdminCreateApiKeyRequest {
 )]
 pub async fn admin_create_unbound_api_key(
     State(app_state): State<AppState>,
-    Extension(_admin): Extension<AuthenticatedUser>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Json(request): Json<AdminCreateApiKeyRequest>,
 ) -> Result<Json<CreateApiKeyResponse>, ApiError> {
     let user_id = services::UserId(request.user_id);
     tracing::info!(
-        "Admin: Creating unbound API key on behalf of user_id={}",
-        user_id
+        "Admin: Creating unbound API key on behalf of user_id={}, admin_user_id={}",
+        user_id,
+        admin.user_id
     );
 
     // Verify target user exists
@@ -2199,6 +2224,13 @@ pub async fn admin_create_unbound_api_key(
                 ApiError::internal_server_error("Failed to create API key")
             }
         })?;
+
+    tracing::info!(
+        "Admin: Created unbound API key: key_id={}, user_id={}, admin_user_id={}",
+        api_key.id,
+        user_id,
+        admin.user_id
+    );
 
     Ok(Json(CreateApiKeyResponse {
         id: api_key.id.to_string(),
@@ -2490,12 +2522,22 @@ pub async fn admin_add_aml_allowlist_entry(
 
     let entry = app_state
         .subscription_service
-        .admin_add_aml_allowlist_entry(request.account_id, request.reason, Some(admin.user_id))
+        .admin_add_aml_allowlist_entry(
+            request.account_id.clone(),
+            request.reason,
+            Some(admin.user_id),
+        )
         .await
         .map_err(|e| {
             tracing::error!(error = ?e, "Failed to add AML allowlist entry");
             ApiError::internal_server_error("Failed to add AML allowlist entry")
         })?;
+
+    tracing::info!(
+        "Admin: Added AML allowlist entry: account_id={}, admin_user_id={}",
+        request.account_id,
+        admin.user_id
+    );
 
     Ok(Json(entry.into()))
 }
@@ -2518,17 +2560,23 @@ pub async fn admin_add_aml_allowlist_entry(
 )]
 pub async fn admin_remove_aml_allowlist_entry(
     State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Path(account_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let removed = app_state
         .subscription_service
-        .admin_remove_aml_allowlist_entry(account_id)
+        .admin_remove_aml_allowlist_entry(account_id.clone())
         .await
         .map_err(|e| {
             tracing::error!(error = ?e, "Failed to remove AML allowlist entry");
             ApiError::internal_server_error("Failed to remove AML allowlist entry")
         })?;
     if removed {
+        tracing::info!(
+            "Admin: Removed AML allowlist entry: account_id={}, admin_user_id={}",
+            account_id,
+            admin.user_id
+        );
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("AML allowlist entry not found"))
@@ -2554,6 +2602,7 @@ pub async fn admin_remove_aml_allowlist_entry(
 )]
 pub async fn admin_set_aml_report_active(
     State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Path(report_id): Path<Uuid>,
     Json(request): Json<AdminAmlReportStatusRequest>,
 ) -> Result<Json<AdminAmlReportResponse>, ApiError> {
@@ -2570,6 +2619,13 @@ pub async fn admin_set_aml_report_active(
                 ApiError::internal_server_error("Failed to update AML report status")
             }
         })?;
+
+    tracing::info!(
+        "Admin: Set AML report status: report_id={}, active={}, admin_user_id={}",
+        report_id,
+        request.active,
+        admin.user_id
+    );
 
     Ok(Json(report.into()))
 }
@@ -2593,13 +2649,17 @@ pub async fn admin_set_aml_report_active(
 )]
 pub async fn admin_create_backup(
     State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
-    tracing::info!("Admin: Creating backup: instance_id={}", instance_uuid);
+    tracing::info!(
+        "Admin: Creating backup: instance_id={}, admin_user_id={}",
+        instance_uuid,
+        admin.user_id
+    );
 
     let instance = app_state
         .agent_repository

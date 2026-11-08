@@ -57,6 +57,7 @@ pub struct TestServerConfig {
     /// Optional override for admin domains allowlist in tests.
     pub admin_domains: Option<Vec<String>>,
     /// Optional override for explicit admin emails allowlist in tests.
+    /// Defaults to `DEFAULT_TEST_ADMIN_EMAILS`.
     pub admin_emails: Option<Vec<String>>,
     /// Optional Stripe client override for tests that need deterministic Stripe responses.
     pub stripe_client: Option<Arc<dyn StripeClientPort>>,
@@ -73,6 +74,98 @@ pub struct TestServerConfig {
     /// Override agent operations for gateway credential issuance tests.
     pub agent_service: Option<Arc<dyn services::agent::AgentService>>,
 }
+
+/// Admin emails allowlisted by default in test servers.
+///
+/// An empty allowlist grants no admin access, so every admin login used by a test
+/// with the default config must be listed here. Tests that need a different
+/// allowlist pass `admin_emails` in `TestServerConfig`.
+const DEFAULT_TEST_ADMIN_EMAILS: &[&str] = &[
+    "admin-instance-routes@admin.org",
+    "admin@admin.org",
+    "admin_delete_missing_instance@admin.org",
+    "admin_lifecycle_invalid_uuid@admin.org",
+    "admin_lifecycle_missing_instance@admin.org",
+    "admin_lifecycle_reason_len@admin.org",
+    "agent-encryption@admin.org",
+    "api-key-admin@admin.org",
+    "bi_admin_clamp@admin.org",
+    "bi_admin_fstat@admin.org",
+    "bi_admin_ftype@admin.org",
+    "bi_admin_hist2@admin.org",
+    "bi_admin_hist@admin.org",
+    "bi_admin_histdata@admin.org",
+    "bi_admin_list_data@admin.org",
+    "bi_admin_min@admin.org",
+    "bi_admin_searchsort@admin.org",
+    "bi_admin_sumdata@admin.org",
+    "bi_admin_sumdate@admin.org",
+    "bi_admin_summary@admin.org",
+    "bi_admin_topcost@admin.org",
+    "bi_admin_topfilt@admin.org",
+    "bi_admin_toptok@admin.org",
+    "bi_admin_uday@admin.org",
+    "bi_admin_umodel@admin.org",
+    "bi_admin_utfilter@admin.org",
+    "bi_admin_uuser@admin.org",
+    "bi_users_admin@admin.org",
+    "chat-completions-system-prompt-no-system-admin@admin.org",
+    "chat-completions-system-prompt-with-system-admin@admin.org",
+    "chat-completions-visibility-non-public-admin@admin.org",
+    "chat-completions-visibility-public-admin@admin.org",
+    "credits_admin@admin.org",
+    "credits_admin_validation@admin.org",
+    "db-backfill-admin@admin.org",
+    "db-encryption-admin@admin.org",
+    "replace_sub_move@admin.org",
+    "replace_sub_not_found@admin.org",
+    "replace_sub_success@admin.org",
+    "rotation@admin.org",
+    "subs_admin@admin.org",
+    "subs_offset_admin@admin.org",
+    "system-prompt-no-instructions-admin@admin.org",
+    "system-prompt-with-instructions-admin@admin.org",
+    "test_admin@admin.org",
+    "test_admin_agent_hosting_public@admin.org",
+    "test_admin_agents@admin.org",
+    "test_admin_cancel@admin.org",
+    "test_admin_config_return@admin.org",
+    "test_admin_configs_update@admin.org",
+    "test_admin_configs_upsert@admin.org",
+    "test_admin_empty_free_allowlist@admin.org",
+    "test_admin_empty_window_limits@admin.org",
+    "test_admin_hot_reload@admin.org",
+    "test_admin_invalid_rate_limit@admin.org",
+    "test_admin_model_allowlist@admin.org",
+    "test_admin_model_blocked@admin.org",
+    "test_admin_model_default@admin.org",
+    "test_admin_model_delete_not_found@admin.org",
+    "test_admin_model_delete_success@admin.org",
+    "test_admin_model_update@admin.org",
+    "test_admin_pagination@admin.org",
+    "test_admin_rate_limit@admin.org",
+    "test_admin_revoke@admin.org",
+    "test_admin_set_success@admin.org",
+    "test_admin_stripe@admin.org",
+    "test_admin_stripe_persist@admin.org",
+    "test_admin_sync@admin.org",
+    "test_admin_top@admin.org",
+    "test_admin_top_cost@admin.org",
+    "test_admin_top_invalid@admin.org",
+    "test_admin_top_limit@admin.org",
+    "test_admin_usage_admin2@admin.org",
+    "test_admin_usage_admin@admin.org",
+    "test_cleanup_admin@admin.org",
+    "test_credits_all_used_admin@admin.org",
+    "test_credits_over_plan_admin@admin.org",
+    "test_free_anchor_admin@admin.org",
+    "test_gating_admin@admin.org",
+    "test_list_plans@admin.org",
+    "test_list_plans_empty@admin.org",
+    "test_setup_admin@admin.org",
+    "visibility-non-public-admin@admin.org",
+    "visibility-public-admin@admin.org",
+];
 
 /// Restrictive rate limit config for rate limit tests.
 /// Use this when tests need to trigger 429 responses (e.g. test_rate_limit_blocks_rapid_requests).
@@ -369,7 +462,12 @@ pub async fn create_test_server_with_state(
         .admin_domains
         .clone()
         .unwrap_or(config.admin.admin_domains);
-    let admin_emails = test_config.admin_emails.clone().unwrap_or_default();
+    let admin_emails = test_config.admin_emails.clone().unwrap_or_else(|| {
+        DEFAULT_TEST_ADMIN_EMAILS
+            .iter()
+            .map(|email| email.to_string())
+            .collect()
+    });
 
     // Add `admin.org` as test admin domain
     admin_domains.push("admin.org".to_string());

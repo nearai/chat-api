@@ -1098,9 +1098,13 @@ async fn test_bi_deployments_limit_minimum() {
 
 #[tokio::test]
 async fn test_bi_deployments_pagination() {
-    let (server, db) = server_and_db().await;
     let run_id = Uuid::new_v4().to_string();
     let admin_email = format!("bi-admin-page-{run_id}@admin.org");
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        admin_emails: Some(vec![admin_email.clone()]),
+        ..Default::default()
+    })
+    .await;
     let admin_token = mock_login(&server, &admin_email).await;
 
     let user = db

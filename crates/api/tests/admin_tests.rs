@@ -208,7 +208,7 @@ async fn test_admin_users_list_allowed_when_email_allowlisted() {
 }
 
 #[tokio::test]
-async fn test_admin_users_list_falls_back_to_domain_when_allowlist_empty() {
+async fn test_admin_users_list_denied_when_allowlist_empty() {
     let server = common::create_test_server_with_config(common::TestServerConfig {
         admin_domains: Some(vec!["admin.org".to_string()]),
         admin_emails: Some(vec![]),
@@ -227,8 +227,13 @@ async fn test_admin_users_list_falls_back_to_domain_when_allowlist_empty() {
 
     assert_eq!(
         response.status_code(),
-        200,
-        "When admin email allowlist is empty, domain allowlist should still grant admin access"
+        403,
+        "When admin email allowlist is empty, no one should get admin access"
+    );
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some("Admin access required")
     );
 }
 

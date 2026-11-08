@@ -851,6 +851,43 @@ pub struct UpsertSystemConfigsRequest {
     pub agent_hosting: Option<AgentHostingConfig>,
 }
 
+impl UpsertSystemConfigsRequest {
+    /// Names of the top-level config keys present in the request (no values).
+    pub fn provided_keys(&self) -> Vec<&'static str> {
+        let Self {
+            default_model,
+            rate_limit,
+            subscription_plans,
+            max_instances_per_manager,
+            credits,
+            max_instances_by_manager_url,
+            auto_route,
+            instance_defaults,
+            agent_hosting,
+        } = self;
+        [
+            ("default_model", default_model.is_some()),
+            ("rate_limit", rate_limit.is_some()),
+            ("subscription_plans", subscription_plans.is_some()),
+            (
+                "max_instances_per_manager",
+                max_instances_per_manager.is_some(),
+            ),
+            ("credits", credits.is_some()),
+            (
+                "max_instances_by_manager_url",
+                max_instances_by_manager_url.is_some(),
+            ),
+            ("auto_route", auto_route.is_some()),
+            ("instance_defaults", instance_defaults.is_some()),
+            ("agent_hosting", agent_hosting.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(key, present)| present.then_some(key))
+        .collect()
+    }
+}
+
 impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
     type Error = String;
 
@@ -1307,5 +1344,27 @@ pub fn format_nano_dollars(nano_dollars: i64) -> String {
         format!("-{}", formatted)
     } else {
         formatted
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upsert_system_configs_provided_keys_lists_present_fields_only() {
+        let request: UpsertSystemConfigsRequest = serde_json::from_value(serde_json::json!({
+            "default_model": "some-model",
+            "max_instances_per_manager": 3
+        }))
+        .unwrap();
+        assert_eq!(
+            request.provided_keys(),
+            vec!["default_model", "max_instances_per_manager"]
+        );
+
+        let empty: UpsertSystemConfigsRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.provided_keys().is_empty());
     }
 }
