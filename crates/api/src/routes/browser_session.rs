@@ -112,6 +112,34 @@ pub async fn establish(
     let Some(context) = context else {
         return Ok(None);
     };
+
+    let result = establish_for_context(state, context, session).await;
+    if result.is_err() {
+        // No login credential is returned on setup failure. Revoke both the
+        // original bearer and any browser family committed before an error.
+        session.token = None;
+
+        if let Err(error) = state
+            .session_repository
+            .delete_session(session.session_id)
+            .await
+        {
+            tracing::error!(
+                session_id = %session.session_id,
+                error = %error,
+                "Failed to revoke session after browser setup failure"
+            );
+        }
+    }
+
+    result
+}
+
+async fn establish_for_context(
+    state: &AppState,
+    context: &BrowserContext,
+    session: &mut UserSession,
+) -> Result<Option<HeaderValue>, ApiError> {
     if context.client == "admin" {
         let profile = state
             .user_service
@@ -121,11 +149,6 @@ pub async fn establish(
         if !crate::middleware::auth::is_admin_domain(&profile.user.email, &state.admin_domains)
             || !crate::middleware::auth::is_admin_email(&profile.user.email, &state.admin_emails)
         {
-            state
-                .session_repository
-                .delete_session(session.session_id)
-                .await
-                .map_err(internal)?;
             return Err(ApiError::forbidden("Admin access required"));
         }
     }

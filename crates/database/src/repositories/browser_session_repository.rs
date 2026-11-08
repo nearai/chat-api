@@ -193,6 +193,39 @@ impl BrowserSessionRepository {
         }))
     }
 
+    /// Delete only expired browser roots, retaining all replay evidence for live
+    /// families. SKIP LOCKED lets multiple API replicas run bounded cleanup safely
+    /// without waiting for a concurrent refresh/logout transaction.
+    pub async fn cleanup_expired(&self, batch_size: i64) -> anyhow::Result<u64> {
+        anyhow::ensure!(
+            (1..=500).contains(&batch_size),
+            "Invalid cleanup batch size"
+        );
+        let client = self.0.get().await?;
+        let deleted = client
+            .execute(
+                "WITH candidates AS (
+                    SELECT s.id FROM sessions s
+                    JOIN browser_sessions b ON b.session_id = s.id
+                    WHERE s.expires_at <= NOW()
+                    UNION
+                    SELECT b.session_id FROM browser_sessions b
+                    WHERE b.idle_expires_at <= NOW()
+                 ), expired AS (
+                    SELECT s.id FROM sessions s
+                    JOIN candidates c ON c.id = s.id
+                    ORDER BY s.id
+                    LIMIT $1
+                    FOR UPDATE OF s SKIP LOCKED
+                 )
+                 DELETE FROM sessions s USING expired e WHERE s.id = e.id",
+                &[&batch_size],
+            )
+            .await?;
+
+        Ok(deleted)
+    }
+
     /// Accept consumed refresh credentials too: logout must win against a refresh
     /// that committed while the browser was sending its logout request.
     pub async fn logout(

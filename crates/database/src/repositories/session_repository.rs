@@ -172,14 +172,18 @@ impl SessionRepository for PostgresSessionRepository {
         session_id: SessionId,
     ) -> anyhow::Result<Option<String>> {
         let client = self.pool.get().await?;
+        // A missing root is an authentication failure, not a legacy session.
+        // query_one fails closed if logout/replay deleted it after token lookup.
         let row = client
-            .query_opt(
-                "SELECT client FROM browser_sessions WHERE session_id = $1",
+            .query_one(
+                "SELECT b.client FROM sessions s
+                 LEFT JOIN browser_sessions b ON b.session_id = s.id
+                 WHERE s.id = $1",
                 &[&session_id],
             )
             .await?;
 
-        Ok(row.map(|row| row.get(0)))
+        Ok(row.get(0))
     }
 
     async fn delete_session(&self, session_id: SessionId) -> anyhow::Result<()> {

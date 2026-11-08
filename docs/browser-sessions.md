@@ -56,14 +56,20 @@ tokens to resolve refresh/logout races. Bearer-authenticated `/v1/auth/logout`
 also deletes the family through the existing session root. Revocation affects new
 requests; it does not terminate a stream or operation already authorized in flight.
 
-Expired access tokens are removed on family refresh. Schedule routine deletion of
-expired browser family roots (cascading token cleanup); keep replay tombstones for
-all still-live families. For example, delete sessions joined to browser_sessions
-where `sessions.expires_at <= NOW()` or `browser_sessions.idle_expires_at <= NOW()`.
+Expired access tokens are removed on family refresh. Every API replica also runs
+browser-family cleanup at startup and every five minutes, deleting expired roots
+in batches of at most 500 (at most ten batches per pass). Row locks with SKIP LOCKED
+avoid contention with refresh/logout and other replicas. Cascading deletion removes
+access tokens and replay tombstones only when the family has expired. Cleanup errors
+are logged and retried on the next tick. V44 indexes idle-expiry selection.
+
+Browser setup failures attempt to revoke the original session, including admin
+lookup failures and failures after family creation. If the database is unavailable,
+revocation is best effort and the failure is logged; no credential is returned.
 
 ## Coordinated rollout and cutoff
 
-1. Apply V43 and deploy the backend with the exact origin lists. Keep
+1. Apply V43/V44 and deploy the backend with the exact origin lists. Keep
    `SESSION_ENFORCE_SHORT_TOKENS` unset initially for old clients.
 2. Deploy both UI PRs. They purge old persisted credentials, require a fresh login,
    store access tokens only in memory, and restore through the refresh cookie.

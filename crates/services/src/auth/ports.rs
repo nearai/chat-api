@@ -171,8 +171,13 @@ pub trait SessionRepository: Send + Sync {
     /// Browser sessions carry a server-side client binding. Legacy sessions do not.
     async fn browser_session_client(
         &self,
-        _session_id: SessionId,
+        session_id: SessionId,
     ) -> anyhow::Result<Option<String>> {
+        anyhow::ensure!(
+            self.get_session_by_id(session_id).await?.is_some(),
+            "Session no longer exists"
+        );
+
         Ok(None)
     }
 

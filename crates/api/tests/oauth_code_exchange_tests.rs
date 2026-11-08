@@ -1242,3 +1242,104 @@ async fn browser_exchange_returns_both_cookies_and_a_short_lived_access_token() 
     assert!(!replay.headers().contains_key(SET_COOKIE));
     assert_eq!(*calls.lock().unwrap(), vec![user.id]);
 }
+
+#[tokio::test]
+async fn admin_browser_exchange_enforces_both_allowlists_and_revokes_rejected_logins() {
+    std::env::set_var("BROWSER_SESSION_ADMIN_ORIGINS", "https://admin.near.ai");
+
+    for (name, domain, email_allowed, allowed) in [
+        ("authorized", "admin.org", true, true),
+        ("wrong-domain", "other.org", true, false),
+        ("unlisted-email", "admin.org", false, false),
+    ] {
+        let email = format!("admin-exchange-{name}-{}@{domain}", Uuid::new_v4());
+        let (gateway, calls) = gateway_config(usize::from(allowed), Ok(Some(GATEWAY_COOKIE)));
+        let (server, db) = create_test_server_and_db(TestServerConfig {
+            admin_domains: Some(vec!["admin.org".into()]),
+            admin_emails: Some(vec![if email_allowed {
+                email.clone()
+            } else {
+                "someone-else@admin.org".into()
+            }]),
+            ..gateway
+        })
+        .await;
+        let user = db
+            .user_repository()
+            .create_user(email, None, None)
+            .await
+            .unwrap();
+        let session = db
+            .session_repository()
+            .create_session(user.id)
+            .await
+            .unwrap();
+        let code = URL_SAFE_NO_PAD.encode(Sha256::digest(Uuid::new_v4().as_bytes()));
+        let verifier = "a".repeat(43);
+        db.oauth_repository()
+            .store_callback_code(
+                &sha256_hex(&code),
+                &OAuthCallbackCode {
+                    session_id: session.session_id,
+                    code_challenge: pkce_challenge(&verifier),
+                    is_new_user: false,
+                    expires_at: Utc::now() + Duration::minutes(2),
+                },
+            )
+            .await
+            .unwrap();
+
+        let response = server
+            .post("/v1/auth/exchange")
+            .add_header(http::header::ORIGIN, "https://admin.near.ai")
+            .add_header("x-session-client", "admin")
+            .json(&json!({
+                "code": code,
+                "code_verifier": verifier,
+            }))
+            .await;
+
+        if allowed {
+            response.assert_status_ok();
+            assert_eq!(calls.lock().unwrap().len(), 1);
+            assert!(response
+                .headers()
+                .get_all(SET_COOKIE)
+                .iter()
+                .any(|cookie| cookie
+                    .to_str()
+                    .unwrap()
+                    .starts_with("__Host-nearai_admin_refresh=")));
+            assert_eq!(
+                db.session_repository()
+                    .browser_session_client(session.session_id)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("admin")
+            );
+
+            let root = db
+                .session_repository()
+                .get_session_by_id(session.session_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(root.expires_at <= Utc::now() + Duration::hours(8));
+        } else {
+            response.assert_status_forbidden();
+            assert!(calls.lock().unwrap().is_empty());
+            assert!(!response.headers().contains_key(SET_COOKIE));
+
+            let body: serde_json::Value = response.json();
+            assert!(body.get("token").is_none());
+            assert!(body.get("refresh_token").is_none());
+            assert!(db
+                .session_repository()
+                .get_session_by_id(session.session_id)
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
+}
