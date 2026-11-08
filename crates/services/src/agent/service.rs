@@ -1293,14 +1293,11 @@ impl AgentServiceImpl {
     }
 }
 
-/// Validate that a URL from the Agent API response uses an allowed scheme (http or https).
-/// Rejects URLs with unexpected schemes (e.g., javascript:, file:, data:) that could be
-/// injected by a compromised or malicious Agent Manager.
+/// Validate a URL from the Agent API response before it is stored.
+/// Rejects unexpected schemes (e.g., javascript:, file:, data:), embedded credentials and
+/// disallowed destinations. See [`super::url_guard::validate_agent_url`].
 fn validate_agent_api_url(url: &str, field_name: &str) -> anyhow::Result<()> {
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        anyhow::bail!("Invalid {field_name}: must use http or https scheme");
-    }
-    Ok(())
+    super::url_guard::validate_agent_url(url, field_name).map(|_| ())
 }
 
 /// Save instance data from a lifecycle event to database.
@@ -1416,10 +1413,10 @@ async fn save_passkey_instance_from_event(
     let final_service_type = service_type_from_response.or(params.service_type.clone());
 
     tracing::info!(
-        "URL extraction for passkey instance: instance_name={}, instance_url={:?}, dashboard_url={:?}, all_keys_in_instance_data={:?}",
+        "URL extraction for passkey instance: instance_name={}, has_instance_url={}, has_dashboard_url={}, all_keys_in_instance_data={:?}",
         instance_name,
-        instance_url,
-        dashboard_url,
+        instance_url.is_some(),
+        dashboard_url.is_some(),
         instance_data.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()
     );
 
@@ -1946,7 +1943,7 @@ impl AgentService for AgentServiceImpl {
                     .await
                     {
                         Ok(instance) => {
-                            tracing::info!("Passkey instance saved successfully: user_id={}, dashboard_url={:?}", user_id, instance.dashboard_url);
+                            tracing::info!("Passkey instance saved successfully: user_id={}, has_dashboard_url={}", user_id, instance.dashboard_url.is_some());
 
                             // Send final event with dashboard_url and instance_url to frontend
                             // (the create stream itself doesn't return these fields)
