@@ -171,6 +171,15 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
         );
     }
 
+    // Unbound keys are not covered by instance cleanup and restrict user deletion.
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .execute("DELETE FROM agent_api_keys WHERE id = $1", &[&key.id])
+        .await
+        .unwrap();
+
     common::cleanup_user_agent_instances(&db, &user_email).await;
     common::cleanup_user_subscriptions(&db, &user_email).await;
     common::cleanup_user(&db, &user_email).await;
