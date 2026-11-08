@@ -8,9 +8,8 @@
 //! * [`guarded_client_builder`] returns an HTTP client builder whose DNS resolver and
 //!   redirect policy apply the same destination rules at connection time.
 //!
-//! Private network ranges stay allowed because agent infrastructure may be reached
-//! over private networks. The blocked set is limited to destinations that are never
-//! valid agent endpoints.
+//! Agent instances are reached on public hosts, so private, shared, reserved,
+//! loopback and link-local address ranges are all blocked.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -36,10 +35,18 @@ fn is_forbidden_ipv4(ip: Ipv4Addr) -> bool {
         || ip.is_link_local()
         || ip.is_broadcast()
         || ip.is_multicast()
+        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+        || ip.is_private()
         // 0.0.0.0/8 ("this network")
         || a == 0
-        // 10.0.2.0/24: hypervisor user-mode networking subnet
-        || (a == 10 && b == 0 && c == 2)
+        // 100.64.0.0/10: shared address space
+        || (a == 100 && (64..=127).contains(&b))
+        // 192.0.0.0/24: IETF protocol assignments
+        || (a == 192 && b == 0 && c == 0)
+        // 198.18.0.0/15: benchmarking
+        || (a == 198 && (18..=19).contains(&b))
+        // 240.0.0.0/4: reserved
+        || a >= 240
 }
 
 fn is_forbidden_ipv6(ip: Ipv6Addr) -> bool {
@@ -47,8 +54,9 @@ fn is_forbidden_ipv6(ip: Ipv6Addr) -> bool {
         return true;
     }
 
-    // Cloud instance metadata service (IPv6 endpoint inside fd00::/8)
-    if ip == Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254) {
+    // fc00::/7: unique local addresses
+    let segments = ip.segments();
+    if segments[0] & 0xfe00 == 0xfc00 {
         return true;
     }
 
@@ -58,7 +66,6 @@ fn is_forbidden_ipv6(ip: Ipv6Addr) -> bool {
     }
 
     // NAT64 well-known prefix 64:ff9b::/96
-    let segments = ip.segments();
     if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
         let [hi, lo] = [segments[6], segments[7]];
         let v4 = Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
@@ -218,10 +225,36 @@ mod tests {
             "0.0.0.0",
             "0.1.2.3",
             "169.254.169.254",
-            "10.0.2.2",
-            "10.0.2.3",
             "255.255.255.255",
             "224.0.0.1",
+            // 10.0.0.0/8
+            "10.0.0.1",
+            "10.0.1.2",
+            "10.0.2.2",
+            "10.0.3.1",
+            "10.1.2.3",
+            "10.255.255.255",
+            // 172.16.0.0/12
+            "172.16.0.1",
+            "172.20.1.1",
+            "172.31.255.255",
+            // 192.168.0.0/16
+            "192.168.0.1",
+            "192.168.1.1",
+            "192.168.255.255",
+            // 100.64.0.0/10
+            "100.64.0.1",
+            "100.96.1.2",
+            "100.127.255.255",
+            // 192.0.0.0/24
+            "192.0.0.1",
+            "192.0.0.255",
+            // 198.18.0.0/15
+            "198.18.0.1",
+            "198.19.255.255",
+            // 240.0.0.0/4
+            "240.0.0.1",
+            "254.255.255.255",
         ] {
             assert!(
                 is_forbidden_ip(ip.parse().unwrap()),
@@ -234,12 +267,19 @@ mod tests {
     fn allowed_ipv4_addresses() {
         for ip in [
             "8.8.8.8",
-            "10.0.1.2",
-            "10.0.3.1",
-            "10.1.2.3",
-            "172.16.0.1",
-            "192.168.1.1",
-            "100.64.0.1",
+            "1.1.1.1",
+            "9.255.255.255",
+            "11.0.0.1",
+            "172.15.255.255",
+            "172.32.0.1",
+            "192.167.255.255",
+            "192.169.0.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "192.0.1.1",
+            "198.17.255.255",
+            "198.20.0.1",
+            "223.255.255.255",
         ] {
             assert!(
                 !is_forbidden_ip(ip.parse().unwrap()),
@@ -254,14 +294,31 @@ mod tests {
             "::1",
             "::",
             "fe80::1",
+            "febf::1",
             "ff02::1",
-            "::ffff:127.0.0.1",
-            "::ffff:10.0.2.2",
-            "::ffff:169.254.169.254",
-            "::127.0.0.1",
-            "64:ff9b::7f00:1",
-            "64:ff9b::a00:202",
+            // fc00::/7
+            "fc00::1",
+            "fd00::1",
             "fd00:ec2::254",
+            "fdff:ffff::1",
+            // IPv4-mapped and IPv4-compatible forms
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:10.0.0.1",
+            "::ffff:172.16.0.1",
+            "::ffff:192.168.1.1",
+            "::ffff:100.64.0.1",
+            "::ffff:198.18.0.1",
+            "::ffff:240.0.0.1",
+            "::127.0.0.1",
+            "::10.0.0.1",
+            // NAT64 64:ff9b::/96
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "64:ff9b::ac10:1",
+            "64:ff9b::c0a8:101",
+            "64:ff9b::6440:1",
+            "64:ff9b::c612:1",
         ] {
             assert!(
                 is_forbidden_ip(ip.parse().unwrap()),
@@ -275,7 +332,7 @@ mod tests {
         for ip in [
             "2001:db8::1",
             "2606:4700::1111",
-            "fd00::1",
+            "::ffff:8.8.8.8",
             "64:ff9b::808:808",
         ] {
             assert!(
@@ -292,7 +349,7 @@ mod tests {
             "https://agent.example.com/path",
             "http://agent.example.com:8080/path",
             "https://name.agents.example.com/?token=abc",
-            "https://10.1.2.3:8443/api",
+            "https://8.8.8.8:8443/api",
             "https://[2001:db8::1]/",
         ] {
             assert!(
@@ -320,6 +377,17 @@ mod tests {
             "http://[::ffff:127.0.0.1]/",
             "http://[fe80::1]/",
             "http://[fd00:ec2::254]/latest/meta-data/",
+            "https://10.1.2.3:8443/api",
+            "http://167772161/",
+            "http://172.20.1.1/",
+            "http://192.168.1.1/",
+            "http://100.64.0.1/",
+            "http://198.18.0.1/",
+            "http://192.0.0.1/",
+            "http://240.0.0.1/",
+            "http://[fd00::1]/",
+            "http://[::ffff:10.0.0.1]/",
+            "http://[64:ff9b::a00:1]/",
         ] {
             let err = validate_agent_url(raw, "instance_url").unwrap_err();
             assert!(
