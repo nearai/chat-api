@@ -93,36 +93,43 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
         .unwrap();
 
     // Confirm this session can still use the retained admin read operations.
-    for path in [
-        "/v1/admin/agents/instances".to_string(),
-        format!("/v1/admin/subscriptions?user_id={user_id}"),
+    for (operation, path) in [
+        ("list instances", "/v1/admin/agents/instances".to_string()),
+        (
+            "list subscriptions",
+            format!("/v1/admin/subscriptions?user_id={user_id}"),
+        ),
     ] {
         let response = server
             .get(&path)
             .add_header(AUTHORIZATION, authorization.clone())
             .await;
 
-        assert_eq!(response.status_code(), StatusCode::OK, "GET {path}");
+        assert_eq!(response.status_code(), StatusCode::OK, "{operation}");
     }
 
     let original_state = tenant_state(&db, user_id).await;
     let requests = [
         (
+            "create API key",
             Method::POST,
             "/v1/admin/agents/keys".to_string(),
             json!({ "user_id": user_id, "name": "removed-admin-key" }),
         ),
         (
+            "bind API key",
             Method::POST,
             format!("/v1/admin/agents/keys/{}/bind-instance", key.id),
             json!({ "instance_id": instance.id }),
         ),
         (
+            "create instance",
             Method::POST,
             "/v1/admin/agents/instances".to_string(),
             json!({ "user_id": user_id, "name": "removed-admin-instance" }),
         ),
         (
+            "create subscription",
             Method::POST,
             format!("/v1/admin/users/{user_id}/subscription"),
             json!({
@@ -132,11 +139,13 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
             }),
         ),
         (
+            "delete subscription",
             Method::DELETE,
             format!("/v1/admin/users/{user_id}/subscription"),
             Value::Null,
         ),
         (
+            "replace subscription",
             Method::PUT,
             format!("/v1/admin/subscriptions/{subscription_id}"),
             json!({
@@ -152,7 +161,7 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
         ),
     ];
 
-    for (method, path, body) in requests {
+    for (operation, method, path, body) in requests {
         let response = server
             .method(method.clone(), &path)
             .add_header(AUTHORIZATION, authorization.clone())
@@ -162,12 +171,14 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
         assert_eq!(
             response.status_code(),
             StatusCode::METHOD_NOT_ALLOWED,
-            "Retired endpoint must not be routed: {method} {path}"
+            "Retired endpoint must not be routed: {operation}"
         );
-        assert_eq!(
-            tenant_state(&db, user_id).await,
-            original_state,
-            "Retired endpoint must not mutate tenant state: {method} {path}"
+
+        // Compare every field without printing tenant records on assertion failure.
+        let current_state = tenant_state(&db, user_id).await;
+        assert!(
+            current_state == original_state,
+            "Retired endpoint must not mutate tenant state: {operation}"
         );
     }
 
