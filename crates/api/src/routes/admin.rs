@@ -3503,6 +3503,29 @@ pub async fn admin_patch_instance(
         return Err(ApiError::bad_request("instance_token must not be empty"));
     }
 
+    // The manager URL must be one of the configured agent managers.
+    let agent_api_base_url = match request.agent_api_base_url {
+        Some(url) => {
+            let configured = app_state.agent_service.manager_urls();
+            let manager = services::agent::url_guard::match_configured_manager(&configured, &url)
+                .ok_or_else(|| {
+                ApiError::bad_request("agent_api_base_url must match a configured agent manager")
+            })?;
+            Some(manager.to_string())
+        }
+        None => None,
+    };
+
+    for (field_name, value) in [
+        ("instance_url", request.instance_url.as_deref()),
+        ("dashboard_url", request.dashboard_url.as_deref()),
+    ] {
+        if let Some(url) = value {
+            services::agent::url_guard::validate_agent_url(url, field_name)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        }
+    }
+
     // Verify instance exists first
     let _existing = app_state
         .agent_repository
@@ -3518,7 +3541,7 @@ pub async fn admin_patch_instance(
         .agent_repository
         .admin_update_instance(
             id,
-            request.agent_api_base_url,
+            agent_api_base_url,
             request.instance_url,
             request.instance_token,
             request.dashboard_url,

@@ -6,6 +6,7 @@ use reqwest::Client;
 use std::pin::Pin;
 
 use super::ports::AgentInstance;
+use super::url_guard;
 
 /// Proxy service for forwarding requests to agent instances
 #[async_trait]
@@ -42,11 +43,12 @@ pub struct AgentProxy {
 
 impl AgentProxy {
     pub fn new() -> Self {
-        // Create HTTP client with timeout to prevent indefinite hanging on unresponsive instances
-        let http_client = Client::builder()
+        // Create HTTP client with timeout to prevent indefinite hanging on unresponsive instances.
+        // The guarded builder validates resolved addresses and redirect targets.
+        let http_client = url_guard::guarded_client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .expect("failed to build agent proxy HTTP client");
 
         Self { http_client }
     }
@@ -82,14 +84,14 @@ impl AgentProxyService for AgentProxy {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Instance missing instance_token"))?;
 
-        // Build the full URL
-        let url = format!("{}{}", instance_url, path);
+        // Validate the stored URL and append the request path to it
+        let base_url = url_guard::validate_agent_url(instance_url, "instance_url")?;
+        let url = url_guard::join_url_path(&base_url, path)?;
 
         tracing::debug!(
-            "Forwarding {} request to agent instance: instance_id={}, url={}",
+            "Forwarding {} request to agent instance: instance_id={}",
             method,
-            instance.id,
-            url
+            instance.id
         );
 
         // Replace Authorization header with instance token
@@ -106,16 +108,17 @@ impl AgentProxyService for AgentProxy {
 
         // Build the request
         let mut request_builder = match method.to_uppercase().as_str() {
-            "GET" => self.http_client.get(&url),
-            "POST" => self.http_client.post(&url),
-            "PUT" => self.http_client.put(&url),
-            "PATCH" => self.http_client.patch(&url),
-            "DELETE" => self.http_client.delete(&url),
-            "HEAD" => self.http_client.head(&url),
+            "GET" => self.http_client.get(url),
+            "POST" => self.http_client.post(url),
+            "PUT" => self.http_client.put(url),
+            "PATCH" => self.http_client.patch(url),
+            "DELETE" => self.http_client.delete(url),
+            "HEAD" => self.http_client.head(url),
             _ => return Err(anyhow::anyhow!("Unsupported HTTP method: {}", method)),
         };
 
-        // Whitelist of safe headers to forward to avoid header injection attacks
+        // Whitelist of safe headers to forward to avoid header injection attacks.
+        // Client-supplied forwarding headers are not trusted and are not forwarded.
         const SAFE_HEADERS: &[&str] = &[
             "content-type",
             "accept",
@@ -125,9 +128,6 @@ impl AgentProxyService for AgentProxy {
             "content-length",
             "x-request-id",
             "x-correlation-id",
-            "x-forwarded-for",
-            "x-forwarded-proto",
-            "x-real-ip",
         ];
 
         // Add headers (only forwarding whitelisted headers)
@@ -192,5 +192,76 @@ impl AgentProxyService for AgentProxy {
         );
 
         Ok((status, response_headers, stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::UserId;
+    use chrono::Utc;
+    use uuid::Uuid;
+    use wiremock::{matchers::any, Mock, MockServer, ResponseTemplate};
+
+    fn instance_with_url(instance_url: &str) -> AgentInstance {
+        AgentInstance {
+            id: Uuid::new_v4(),
+            user_id: UserId(Uuid::new_v4()),
+            instance_id: "agent-test".to_string(),
+            name: "test".to_string(),
+            public_ssh_key: None,
+            instance_url: Some(instance_url.to_string()),
+            instance_token: Some("instance-token".to_string()),
+            dashboard_url: None,
+            agent_api_base_url: None,
+            service_type: None,
+            status: "active".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_forbidden_instance_url() {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let proxy = AgentProxy::new();
+        for instance_url in [
+            server.uri(),
+            format!("{}/api?id=1&x=", server.uri()),
+            server.uri().replace("127.0.0.1", "localhost"),
+        ] {
+            let result = proxy
+                .forward_request(
+                    &instance_with_url(&instance_url),
+                    "/v1/instances/agent-test/backups",
+                    "GET",
+                    HeaderMap::new(),
+                    Bytes::new(),
+                )
+                .await;
+            assert!(result.is_err(), "{instance_url} should be rejected");
+        }
+        // MockServer verifies on drop that no request reached it.
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_non_http_instance_url() {
+        let proxy = AgentProxy::new();
+        let result = proxy
+            .forward_request(
+                &instance_with_url("file:///etc/passwd"),
+                "/v1/models",
+                "GET",
+                HeaderMap::new(),
+                Bytes::new(),
+            )
+            .await;
+        assert!(result.is_err());
     }
 }

@@ -1,6 +1,7 @@
 pub mod ports;
 pub mod proxy;
 pub mod service;
+pub mod url_guard;
 
 pub use ports::{
     is_valid_service_type, AgentRepository, AgentService, DEFAULT_AGENT_SERVICE_TYPE,
