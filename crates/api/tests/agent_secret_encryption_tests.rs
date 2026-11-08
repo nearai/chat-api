@@ -210,20 +210,20 @@ async fn agent_credentials_roll_out_and_backfill_without_the_old_app_key() {
     assert_eq!(fixture.job("verify").await["progress"]["pass"], false);
 
     fixture.enable_new_writes();
-    // Exercise the admin route: it passes plaintext to the repository, not ciphertext.
-    let updated = fixture
-        .server
-        .patch(&format!(
-            "/v1/admin/agents/instances/{}",
-            fixture.instance_id
-        ))
-        .add_header(
-            HeaderName::from_static("authorization"),
-            fixture.auth.clone(),
+    // Updates pass plaintext to the repository, which encrypts it on write.
+    fixture
+        .state
+        .agent_repository
+        .admin_update_instance(
+            fixture.instance_id,
+            None,
+            None,
+            Some("updated-instance-secret".into()),
+            None,
+            None,
         )
-        .json(&json!({"instance_token":"updated-instance-secret"}))
-        .await;
-    assert_eq!(updated.status_code(), 200);
+        .await
+        .unwrap();
     assert_eq!(
         repository
             .get_instance(fixture.instance_id)

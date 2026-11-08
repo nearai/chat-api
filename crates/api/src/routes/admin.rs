@@ -3471,91 +3471,6 @@ pub async fn admin_retry_account_deletion(
     }))
 }
 
-// ========== Migration Admin Endpoints ==========
-
-/// Request body for PATCH /v1/admin/agents/instances/{id}
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct PatchInstanceRequest {
-    pub agent_api_base_url: Option<String>,
-    pub instance_url: Option<String>,
-    /// Instance token — will be encrypted before storage
-    pub instance_token: Option<String>,
-    pub dashboard_url: Option<String>,
-}
-
-/// Admin endpoint: Patch an agent instance (migration fields)
-pub async fn admin_patch_instance(
-    State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
-    Path(instance_id): Path<String>,
-    Json(request): Json<PatchInstanceRequest>,
-) -> Result<Json<InstanceResponse>, ApiError> {
-    let id = Uuid::parse_str(&instance_id)
-        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
-
-    tracing::info!("Admin: Patching instance id={}", id);
-
-    if request
-        .instance_token
-        .as_ref()
-        .is_some_and(|token| token.is_empty())
-    {
-        return Err(ApiError::bad_request("instance_token must not be empty"));
-    }
-
-    // The manager URL must be one of the configured agent managers.
-    let agent_api_base_url = match request.agent_api_base_url {
-        Some(url) => {
-            let configured = app_state.agent_service.manager_urls();
-            let manager = services::agent::url_guard::match_configured_manager(&configured, &url)
-                .ok_or_else(|| {
-                ApiError::bad_request("agent_api_base_url must match a configured agent manager")
-            })?;
-            Some(manager.to_string())
-        }
-        None => None,
-    };
-
-    for (field_name, value) in [
-        ("instance_url", request.instance_url.as_deref()),
-        ("dashboard_url", request.dashboard_url.as_deref()),
-    ] {
-        if let Some(url) = value {
-            services::agent::url_guard::validate_agent_url(url, field_name)
-                .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        }
-    }
-
-    // Verify instance exists first
-    let _existing = app_state
-        .agent_repository
-        .get_instance(id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get instance: instance_id={}, error={}", id, e);
-            ApiError::internal_server_error("Failed to get instance")
-        })?
-        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
-
-    let instance = app_state
-        .agent_repository
-        .admin_update_instance(
-            id,
-            agent_api_base_url,
-            request.instance_url,
-            request.instance_token,
-            request.dashboard_url,
-            None, // renaming is a migration concern, not something this patch endpoint exposes
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to patch instance: instance_id={}, error={}", id, e);
-            ApiError::internal_server_error("Failed to update instance")
-        })?;
-
-    Ok(Json(crate::models::instance_response_for_admin(instance)))
-}
-
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -3634,10 +3549,7 @@ pub fn create_admin_router() -> Router<AppState> {
                     get(admin_list_all_instances).post(admin_create_instance),
                 )
                 .route("/instances/sync-status", post(admin_sync_agent_status))
-                .route(
-                    "/instances/{id}",
-                    patch(admin_patch_instance).delete(admin_delete_instance),
-                )
+                .route("/instances/{id}", delete(admin_delete_instance))
                 .route("/instances/{id}/start", post(admin_start_instance))
                 .route("/instances/{id}/stop", post(admin_stop_instance))
                 .route("/instances/{id}/restart", post(admin_restart_instance))
