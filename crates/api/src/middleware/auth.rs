@@ -268,15 +268,15 @@ fn is_admin_domain(email: &str, admin_domains: &[String]) -> bool {
 }
 
 /// Check whether email is in the explicit admin email allowlist.
+///
+/// An empty allowlist grants no admin access.
 fn is_admin_email(email: &str, admin_emails: &[String]) -> bool {
     if admin_emails.is_empty() {
         static WARNED_EMPTY_ADMIN_EMAILS: OnceLock<()> = OnceLock::new();
         WARNED_EMPTY_ADMIN_EMAILS.get_or_init(|| {
-            tracing::warn!(
-                "Admin emails allowlist is empty; falling back to domain-only admin authorization"
-            );
+            tracing::warn!("Admin emails allowlist is empty; admin access is disabled");
         });
-        return true;
+        return false;
     }
     admin_emails.contains(&email.trim().to_lowercase())
 }
@@ -373,9 +373,9 @@ pub async fn optional_auth_middleware(
     Ok(response)
 }
 
-/// Admin authentication middleware that validates session tokens and checks admin domain
-/// This middleware first authenticates the user, then checks if their email domain
-/// is in the allowed admin domains list.
+/// Admin authentication middleware that validates session tokens and checks admin access
+/// This middleware first authenticates the user, then checks that their email domain
+/// is in the allowed admin domains list and their email is in the admin email allowlist.
 pub async fn admin_auth_middleware(
     State(state): State<AuthState>,
     mut request: Request,
@@ -544,4 +544,51 @@ pub async fn dual_auth_middleware(
     }
 
     Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn admin_domain_requires_listed_domain() {
+        let domains = list(&["admin.org"]);
+        assert!(is_admin_domain("alice@admin.org", &domains));
+        assert!(is_admin_domain("alice@ADMIN.org", &domains));
+        assert!(!is_admin_domain("alice@other.org", &domains));
+        assert!(!is_admin_domain("not-an-email", &domains));
+    }
+
+    #[test]
+    fn admin_domain_empty_list_denies() {
+        assert!(!is_admin_domain("alice@admin.org", &[]));
+    }
+
+    #[test]
+    fn admin_email_requires_listed_email() {
+        let emails = list(&["alice@admin.org"]);
+        assert!(is_admin_email("alice@admin.org", &emails));
+        assert!(is_admin_email(" Alice@Admin.org ", &emails));
+        assert!(!is_admin_email("bob@admin.org", &emails));
+    }
+
+    #[test]
+    fn admin_email_empty_allowlist_denies() {
+        assert!(!is_admin_email("alice@admin.org", &[]));
+    }
+
+    #[test]
+    fn admin_requires_both_domain_and_email() {
+        let domains = list(&["admin.org"]);
+        let emails = list(&["alice@admin.org", "carol@other.org"]);
+        let is_admin =
+            |email: &str| is_admin_domain(email, &domains) && is_admin_email(email, &emails);
+        assert!(is_admin("alice@admin.org"));
+        assert!(!is_admin("bob@admin.org"));
+        assert!(!is_admin("carol@other.org"));
+    }
 }
