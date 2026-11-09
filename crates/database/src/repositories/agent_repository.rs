@@ -1302,93 +1302,29 @@ impl AgentRepository for PostgresAgentRepository {
         Ok((instances, usage_map, total))
     }
 
-    async fn admin_update_instance(
+    async fn update_instance_token(
         &self,
         instance_id: Uuid,
-        agent_api_base_url: Option<String>,
-        instance_url: Option<String>,
-        instance_token: Option<String>,
-        dashboard_url: Option<String>,
-        name: Option<String>,
-    ) -> anyhow::Result<AgentInstance> {
+        instance_token: &str,
+    ) -> anyhow::Result<bool> {
+        let encrypted_token = agent_secrets::encrypt(
+            self.pool.field_encryption().as_ref(),
+            "agent_instances",
+            "instance_token",
+            instance_id,
+            instance_token,
+        )?;
         let client = self.pool.get().await?;
-        let instance_url = self.encode_optional_field("instance_url", instance_id, instance_url)?;
-        let instance_token =
-            self.encode_optional_field("instance_token", instance_id, instance_token)?;
-        let dashboard_url =
-            self.encode_optional_field("dashboard_url", instance_id, dashboard_url)?;
 
-        // Build dynamic SET clause for provided fields
-        let mut set_clauses = Vec::new();
-        let mut param_values: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
-        let mut param_idx = 1u32;
+        let updated = client
+            .execute(
+                "UPDATE agent_instances
+                 SET instance_token = $1, updated_at = NOW()
+                 WHERE id = $2 AND status != 'deleted'",
+                &[&encrypted_token, &instance_id],
+            )
+            .await?;
 
-        if let Some(ref val) = agent_api_base_url {
-            set_clauses.push(format!("agent_api_base_url = ${}", param_idx));
-            param_values.push(Box::new(val.clone()));
-            param_idx += 1;
-        }
-        if let Some(ref val) = instance_url {
-            set_clauses.push(format!("instance_url = ${}", param_idx));
-            param_values.push(Box::new(val.clone()));
-            param_idx += 1;
-        }
-        if let Some(ref val) = instance_token {
-            set_clauses.push(format!("instance_token = ${}", param_idx));
-            param_values.push(Box::new(val.clone()));
-            param_idx += 1;
-        }
-        if let Some(ref val) = dashboard_url {
-            set_clauses.push(format!("dashboard_url = ${}", param_idx));
-            param_values.push(Box::new(val.clone()));
-            param_idx += 1;
-        }
-        if let Some(ref val) = name {
-            set_clauses.push(format!("name = ${}", param_idx));
-            param_values.push(Box::new(val.clone()));
-            param_idx += 1;
-        }
-
-        if set_clauses.is_empty() {
-            // No changes, just return current instance
-            return self
-                .get_instance(instance_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Instance not found: instance_id={}", instance_id));
-        }
-
-        set_clauses.push("updated_at = NOW()".to_string());
-
-        let query = format!(
-            "UPDATE agent_instances SET {} WHERE id = ${} \
-             RETURNING id, user_id, instance_id, name, type, public_ssh_key, instance_url, \
-             instance_token, dashboard_url, agent_api_base_url, status, created_at, updated_at",
-            set_clauses.join(", "),
-            param_idx
-        );
-        param_values.push(Box::new(instance_id));
-
-        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_values
-            .iter()
-            .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-            .collect();
-
-        let row = client.query_one(&query, &params).await?;
-
-        Ok(AgentInstance {
-            id: row.get(0),
-            user_id: row.get(1),
-            instance_id: row.get(2),
-            name: row.get(3),
-            public_ssh_key: row.get(5),
-            instance_url: self.decode_optional_field("instance_url", row.get(0), row.get(6))?,
-            instance_token: self.decode_optional_field("instance_token", row.get(0), row.get(7))?,
-            dashboard_url: self.decode_optional_field("dashboard_url", row.get(0), row.get(8))?,
-            agent_api_base_url: row.get(9),
-            service_type: row.get(4),
-            status: row.get(10),
-            created_at: row.get(11),
-            updated_at: row.get(12),
-        })
+        Ok(updated == 1)
     }
 }

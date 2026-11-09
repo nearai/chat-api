@@ -214,14 +214,7 @@ async fn agent_credentials_roll_out_and_backfill_without_the_old_app_key() {
     fixture
         .state
         .agent_repository
-        .admin_update_instance(
-            fixture.instance_id,
-            None,
-            None,
-            Some("updated-instance-secret".into()),
-            None,
-            None,
-        )
+        .update_instance_token(fixture.instance_id, "updated-instance-secret")
         .await
         .unwrap();
     assert_eq!(
