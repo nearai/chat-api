@@ -112,24 +112,28 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
     let requests = [
         (
             "create API key",
+            StatusCode::NOT_FOUND,
             Method::POST,
             "/v1/admin/agents/keys".to_string(),
             json!({ "user_id": user_id, "name": "removed-admin-key" }),
         ),
         (
             "bind API key",
+            StatusCode::NOT_FOUND,
             Method::POST,
             format!("/v1/admin/agents/keys/{}/bind-instance", key.id),
             json!({ "instance_id": instance.id }),
         ),
         (
             "create instance",
+            StatusCode::METHOD_NOT_ALLOWED,
             Method::POST,
             "/v1/admin/agents/instances".to_string(),
             json!({ "user_id": user_id, "name": "removed-admin-instance" }),
         ),
         (
             "create subscription",
+            StatusCode::NOT_FOUND,
             Method::POST,
             format!("/v1/admin/users/{user_id}/subscription"),
             json!({
@@ -140,12 +144,14 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
         ),
         (
             "delete subscription",
+            StatusCode::NOT_FOUND,
             Method::DELETE,
             format!("/v1/admin/users/{user_id}/subscription"),
             Value::Null,
         ),
         (
             "replace subscription",
+            StatusCode::NOT_FOUND,
             Method::PUT,
             format!("/v1/admin/subscriptions/{subscription_id}"),
             json!({
@@ -161,7 +167,9 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
         ),
     ];
 
-    for (operation, method, path, body) in requests {
+    // Removed paths return 404. The retained GET instances route rejects POST
+    // with 405, so each assertion distinguishes route removal from method removal.
+    for (operation, expected_status, method, path, body) in requests {
         let response = server
             .method(method.clone(), &path)
             .add_header(AUTHORIZATION, authorization.clone())
@@ -170,7 +178,7 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
 
         assert_eq!(
             response.status_code(),
-            StatusCode::METHOD_NOT_ALLOWED,
+            expected_status,
             "Retired endpoint must not be routed: {operation}"
         );
 
