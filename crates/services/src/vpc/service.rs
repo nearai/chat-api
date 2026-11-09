@@ -1,6 +1,7 @@
 use super::ports::{
     VpcAuthConfig, VpcCredentials, VpcCredentialsRepository, VpcCredentialsService, VpcInfo,
 };
+use crate::logging::error_type;
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -127,7 +128,10 @@ impl VpcCredentialsServiceImpl {
                 .delete(LEGACY_VPC_REFRESH_TOKEN_CONFIG_KEY)
                 .await
             {
-                tracing::warn!("Failed to delete legacy VPC refresh token: {}", e);
+                tracing::warn!(
+                    "Failed to delete legacy VPC refresh token: {}",
+                    error_type(&e)
+                );
             }
         }
 
@@ -151,7 +155,7 @@ impl VpcCredentialsServiceImpl {
                 .set(VPC_API_KEY_CONFIG_KEY, &creds.api_key)
                 .await
             {
-                tracing::warn!("Failed to cache VPC API key: {}", e);
+                tracing::warn!("Failed to cache VPC API key: {}", error_type(&e));
             }
         }
 
@@ -160,7 +164,7 @@ impl VpcCredentialsServiceImpl {
             .set(VPC_ORGANIZATION_ID_CONFIG_KEY, &creds.organization_id)
             .await
         {
-            tracing::warn!("Failed to cache VPC organization ID: {}", e);
+            tracing::warn!("Failed to cache VPC organization ID: {}", error_type(&e));
         }
     }
 
@@ -358,7 +362,12 @@ pub fn load_vpc_info() -> Option<VpcInfo> {
     // Read VPC hostname from file
     let vpc_hostname = if let Ok(path) = std::env::var("VPC_HOSTNAME_FILE") {
         std::fs::read_to_string(path)
-            .map_err(|e| tracing::warn!("Failed to read VPC hostname file: {e}"))
+            .map_err(|e| {
+                tracing::warn!(
+                    "Failed to read VPC hostname file: {e_type}",
+                    e_type = error_type(&e)
+                )
+            })
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())

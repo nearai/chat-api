@@ -10,6 +10,16 @@ pub(super) fn logging_macro_bodies(source: &str) -> Vec<(usize, String)> {
         "warn!(",
         "error!(",
         "trace!(",
+        "println!(",
+        "eprintln!(",
+        "dbg!(",
+        "event!(",
+        "info_span!(",
+        "debug_span!(",
+        "error_span!(",
+        "warn_span!(",
+        "trace_span!(",
+        "span!(",
     ];
     let mut bodies = Vec::new();
     let mut search_start = 0;
@@ -152,14 +162,14 @@ fn read_parenthesized_body(source: &str, body_start: usize) -> Option<(String, u
     None
 }
 
-fn logs_raw_identifier(code: &str, identifier: &str) -> bool {
+pub(super) fn logs_raw_identifier(code: &str, identifier: &str) -> bool {
     has_positional_argument_named(code, identifier)
         || code.match_indices(identifier).any(|(start, _)| {
             let end = start + identifier.len();
             let previous = previous_non_whitespace_byte(code, start);
             let next = next_non_whitespace_byte(code, end);
 
-            matches!(previous, Some(b'=' | b'?' | b'%'))
+            matches!(previous, Some(b'=' | b'?' | b'%' | b'.'))
                 && !matches!(next, Some(b'.'))
                 && !is_identifier_byte(next)
         })

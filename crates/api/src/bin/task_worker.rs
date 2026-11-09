@@ -4,6 +4,7 @@ use axum::{routing::get, Json, Router};
 use chrono::{Duration, Utc};
 use serde::Serialize;
 use services::conversation::ports::ConversationService;
+use services::logging::error_type;
 use services::response::service::OpenAIProxy;
 use services::tasks::{
     AccountDeletionTaskPayload, CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor,
@@ -144,7 +145,7 @@ impl TaskExecutor for DefaultTaskExecutor {
                         tracing::error!(
                             "cleanup task: failed to list instances user_id={} err={}",
                             user_id,
-                            err
+                            error_type(&err)
                         );
                         continue;
                     }
@@ -184,7 +185,7 @@ impl TaskExecutor for DefaultTaskExecutor {
                             instance.id,
                             user_id,
                             instance.status,
-                            err
+                            error_type(&err)
                         );
                     } else {
                         tracing::info!(
@@ -294,10 +295,10 @@ impl TaskExecutor for DefaultTaskExecutor {
                 .await
                 .context("failed to mark account deletion as failed_needs_review")?;
             tracing::warn!(
-                "account deletion moved to failed_needs_review deletion_id={} user_id={} reason={}",
-                request.id,
-                request.user_id,
-                last_error
+                deletion_id = %request.id,
+                user_id = %request.user_id,
+                attempt_count = request.attempt_count,
+                "Account deletion exceeded retry limit; moved to failed_needs_review"
             );
             return Ok(());
         }
@@ -460,9 +461,20 @@ impl TaskExecutor for DefaultTaskExecutor {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    if let Err(e) = dotenvy::dotenv() {
-        eprintln!("Warning: Could not load .env file: {e}");
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // Returning an error from main would print its full Debug representation.
+            eprintln!("Task worker failed: {}", error_type(&error));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
+    if dotenvy::dotenv().is_err() {
+        eprintln!("Warning: Could not load .env file");
         eprintln!("Continuing with environment variables...");
     }
 

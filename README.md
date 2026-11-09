@@ -214,6 +214,19 @@ This service prioritizes privacy and data security. See `CLAUDE.md` for detailed
 - Only log IDs and system metrics, never user data
 - All customer data must be encrypted at rest and in transit
 
+These rules apply at every log level, including debug and trace. Errors can contain
+credentials in URLs, OAuth responses, SQL row values, or nested source chains. Use
+`services::logging::error_type(&error)` and separate IDs, status codes, and counts
+instead of formatting errors. Never log token prefixes, full URLs, payloads, or
+arbitrary response keys. HTTP request logs use route templates rather than raw paths.
+
+The API and task worker only emit tracing events and spans from workspace crates.
+Dependency logs are excluded independently of the configured log level, because
+HTTP and database libraries can log headers, URLs, and query parameters. This also
+means dependency diagnostics cannot be enabled with module-level log overrides.
+The source privacy guard scans all workspace `src` directories; captured-log tests
+exercise error payloads, proxy URLs, route paths, and dependency filtering.
+
 ## License
 
 PolyForm Strict License 1.0.0 - see [LICENSE](LICENSE) file for details.

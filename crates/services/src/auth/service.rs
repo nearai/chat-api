@@ -1,3 +1,4 @@
+use crate::logging::error_type;
 use anyhow::Context;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -407,7 +408,11 @@ impl OAuthServiceImpl {
             .request_async(&async_http_client)
             .await
             .map_err(|e| {
-                tracing::error!("Token exchange failed for provider {:?}: {:?}", provider, e);
+                tracing::error!(
+                    "Token exchange failed for provider {:?}: {:?}",
+                    provider,
+                    error_type(&e)
+                );
                 anyhow::anyhow!("Token exchange failed: {:?}", e)
             })?;
 
@@ -664,10 +669,9 @@ impl EmailAuthServiceImpl {
 
         if !body.success {
             tracing::warn!(
-                email_hash = %email_hash,
                 client_ip_present = !client_ip.is_empty(),
-                client_ip_len = client_ip.len(),
-                error_codes = ?body.error_codes,
+                error_code_count = body.error_codes.as_ref().map_or(0, Vec::len),
+                email_hash = %email_hash,
                 "Turnstile verification rejected request"
             );
             return Err(RequestEmailCodeError::HumanVerificationFailed);
@@ -1021,7 +1025,7 @@ impl OAuthService for OAuthServiceImpl {
             if let Err(cleanup_error) = self.session_repository.delete_session(session_id).await {
                 tracing::error!(
                     %session_id,
-                    error = %cleanup_error,
+                    error_type = error_type(&cleanup_error),
                     "Failed to remove session after OAuth callback-code storage failure"
                 );
             }

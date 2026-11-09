@@ -20,6 +20,7 @@ use services::bi_metrics::{
     StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
     UsageFilter, UsageGroupBy, UsageRankBy as BiUsageRankBy, UserSummary,
 };
+use services::logging::error_type;
 use services::tasks::{AccountDeletionTaskPayload, TaskId, TaskMessage, TaskPayload};
 
 /// Maximum rows for BI usage aggregation queries.
@@ -262,7 +263,7 @@ pub async fn list_users(
         .list_users(params.limit, params.offset)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to list users: {}", e);
+            tracing::error!("Failed to list users: {}", error_type(&e));
             ApiError::internal_server_error("Failed to list users")
         })?;
 
@@ -322,10 +323,9 @@ pub async fn admin_grant_credits(
 
     let user_id = UserId(request.user_id);
     tracing::info!(
-        "Admin: Granting credits to user_id={}, amount_nano_usd={}, reason={:?}",
-        user_id,
-        request.amount_nano_usd,
-        request.reason
+        %user_id,
+        amount_nano_usd = request.amount_nano_usd,
+        "Admin: granting credits"
     );
 
     let new_balance = app_state
@@ -337,7 +337,10 @@ pub async fn admin_grant_credits(
                 ApiError::bad_request(msg)
             }
             other => {
-                tracing::error!(error = ?other, "Unexpected error granting credits");
+                tracing::error!(
+                    error_type = error_type(&other),
+                    "Unexpected error granting credits"
+                );
                 ApiError::internal_server_error("Failed to grant credits")
             }
         })?;
@@ -398,11 +401,17 @@ pub async fn admin_credit_history(
         .await
         .map_err(|e| match e {
             services::subscription::ports::SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error fetching credit history");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Database error fetching credit history"
+                );
                 ApiError::internal_server_error("Failed to fetch credit history")
             }
             other => {
-                tracing::error!(error = ?other, "Unexpected error fetching credit history");
+                tracing::error!(
+                    error_type = error_type(&other),
+                    "Unexpected error fetching credit history"
+                );
                 ApiError::internal_server_error("Failed to fetch credit history")
             }
         })?;
@@ -527,7 +536,7 @@ async fn list_users_bi_impl(
         .list_users_with_stats(params.limit, params.offset, &filter, &sort)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to list users: {}", e);
+            tracing::error!("Failed to list users: {}", error_type(&e));
             ApiError::internal_server_error("Failed to list users")
         })?;
 
@@ -566,7 +575,10 @@ async fn build_price_id_to_plan_name(
         .get_configs()
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to get system configs for plan resolution");
+            tracing::error!(
+                error_type = error_type(&e),
+                "Failed to get system configs for plan resolution"
+            );
             ApiError::internal_server_error("Failed to resolve subscription plans")
         })?;
 
@@ -633,7 +645,7 @@ pub async fn get_analytics(
         .get_analytics_summary(params.start, params.end)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get analytics: {}", e);
+            tracing::error!("Failed to get analytics: {}", error_type(&e));
             ApiError::internal_server_error("Failed to retrieve analytics")
         })?;
 
@@ -706,7 +718,7 @@ pub async fn get_user_activity(
         .get_user_activity(user_id, Some(params.limit), Some(params.offset))
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get user activity: {}", e);
+            tracing::error!("Failed to get user activity: {}", error_type(&e));
             ApiError::internal_server_error("Failed to retrieve user activity")
         })?;
 
@@ -754,7 +766,7 @@ pub async fn admin_list_subscriptions(
         )
         .await
         .map_err(|e| {
-            tracing::error!("Failed to list subscriptions: {}", e);
+            tracing::error!("Failed to list subscriptions: {}", error_type(&e));
             ApiError::internal_server_error("Failed to list subscriptions")
         })?;
 
@@ -815,7 +827,7 @@ pub async fn get_top_users(
         .get_top_active_users(params.start, params.end, params.limit)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get top users: {}", e);
+            tracing::error!("Failed to get top users: {}", error_type(&e));
             ApiError::internal_server_error("Failed to retrieve top users")
         })?;
 
@@ -908,7 +920,11 @@ pub async fn get_usage_by_user_id(
         .get_usage_by_user_id(user_id, start, end)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get usage for user_id={}: {}", user_id, e);
+            tracing::error!(
+                "Failed to get usage for user_id={}: {}",
+                user_id,
+                error_type(&e)
+            );
             ApiError::internal_server_error("Failed to retrieve usage")
         })?;
 
@@ -978,7 +994,7 @@ pub async fn get_top_usage(
         .get_top_users_usage(params.limit, rank_by, params.start, params.end)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get top usage: {}", e);
+            tracing::error!("Failed to get top usage: {}", error_type(&e));
             ApiError::internal_server_error("Failed to retrieve top usage")
         })?;
 
@@ -1040,7 +1056,7 @@ pub async fn list_models(
         .list_models(pagination.limit, pagination.offset)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to list models: {}", e);
+            tracing::error!("Failed to list models: {}", error_type(&e));
             ApiError::internal_server_error("Failed to list models")
         })?;
 
@@ -1131,7 +1147,7 @@ pub async fn batch_upsert_models(
             .get_model(&model_id)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to check if model exists: {}", e);
+                tracing::error!("Failed to check if model exists: {}", error_type(&e));
                 ApiError::internal_server_error("Failed to check if model exists")
             })?;
 
@@ -1148,7 +1164,7 @@ pub async fn batch_upsert_models(
                 .update_model(params)
                 .await
                 .map_err(|e| {
-                    tracing::error!("Failed to update model {}: {}", model_id, e);
+                    tracing::error!("Failed to update model {}: {}", model_id, error_type(&e));
                     ApiError::internal_server_error(format!("Failed to update model {}", model_id))
                 })?
         } else {
@@ -1167,7 +1183,7 @@ pub async fn batch_upsert_models(
                 .upsert_model(params)
                 .await
                 .map_err(|e| {
-                    tracing::error!("Failed to create model {}: {}", model_id, e);
+                    tracing::error!("Failed to create model {}: {}", model_id, error_type(&e));
                     ApiError::internal_server_error(format!("Failed to create model {}", model_id))
                 })?
         };
@@ -1203,7 +1219,11 @@ async fn ensure_proxy_model_exists(
         )
         .await
         .map_err(|e| {
-            tracing::error!("Failed to verify model '{}' via proxy: {}", model_id, e);
+            tracing::error!(
+                "Failed to verify model '{}' via proxy: {}",
+                model_id,
+                error_type(&e)
+            );
             ApiError::internal_server_error(format!(
                 "Failed to verify existence of model '{}' with proxy",
                 model_id
@@ -1272,7 +1292,7 @@ pub async fn delete_model(
         .delete_model(&model_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to delete model: {}", e);
+            tracing::error!("Failed to delete model: {}", error_type(&e));
             ApiError::internal_server_error("Failed to delete model")
         })?;
 
@@ -1317,7 +1337,7 @@ pub async fn revoke_vpc_credentials(
         .revoke_credentials()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to revoke VPC credentials: {}", e);
+            tracing::error!("Failed to revoke VPC credentials: {}", error_type(&e));
             ApiError::internal_server_error("Failed to revoke VPC credentials")
         })?;
 
@@ -1401,7 +1421,10 @@ pub async fn upsert_system_configs(
 
     let partial: services::system_configs::ports::PartialSystemConfigs =
         request.try_into().map_err(|e: String| {
-            tracing::error!(error = %e, "Failed to convert rate limit config");
+            tracing::error!(
+                error_type = error_type(&e),
+                "Failed to convert rate limit config"
+            );
             ApiError::bad_request(format!("Invalid rate limit configuration: {}", e))
         })?;
 
@@ -1411,7 +1434,10 @@ pub async fn upsert_system_configs(
         .get_configs()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to check if system configs exist: {}", e);
+            tracing::error!(
+                "Failed to check if system configs exist: {}",
+                error_type(&e)
+            );
             ApiError::internal_server_error("Failed to check if system configs exist")
         })?;
 
@@ -1422,7 +1448,10 @@ pub async fn upsert_system_configs(
             .update_configs(partial)
             .await
             .map_err(|e| {
-                tracing::error!(error = ?e, "Failed to update system configs");
+                tracing::error!(
+                    error_type = error_type(&e),
+                    "Failed to update system configs"
+                );
                 ApiError::internal_server_error("Failed to update system configs")
             })?
     } else {
@@ -1436,7 +1465,10 @@ pub async fn upsert_system_configs(
             .upsert_configs(full_configs)
             .await
             .map_err(|e| {
-                tracing::error!(error = ?e, "Failed to create system configs");
+                tracing::error!(
+                    error_type = error_type(&e),
+                    "Failed to create system configs"
+                );
                 ApiError::internal_server_error("Failed to create system configs")
             })?
     };
@@ -1481,7 +1513,7 @@ pub async fn get_system_configs_admin(
         .get_configs()
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to get system configs");
+            tracing::error!(error_type = error_type(&e), "Failed to get system configs");
             ApiError::internal_server_error("Failed to get system configs")
         })?;
 
@@ -1527,7 +1559,7 @@ pub async fn admin_list_all_instances(
         .list_all_instances_with_usage(params.limit, params.offset)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to list all instances: error={}", e);
+            tracing::error!("Failed to list all instances: error={}", error_type(&e));
             ApiError::internal_server_error("Failed to list instances")
         })?;
 
@@ -1597,7 +1629,7 @@ pub async fn admin_delete_instance(
                 tracing::error!(
                     "Failed to delete instance: instance_id={}, error={}",
                     instance_uuid,
-                    e
+                    error_type(&e)
                 );
                 ApiError::internal_server_error("Failed to delete instance")
             }
@@ -1618,7 +1650,7 @@ async fn admin_get_instance_for_lifecycle(
             tracing::error!(
                 "Failed to fetch instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to fetch instance")
         })?
@@ -1734,7 +1766,7 @@ async fn do_lifecycle_action(
             "Admin: Failed to {} instance: instance_id={}, error={}",
             action,
             instance_uuid,
-            e
+            error_type(&e)
         );
         ApiError::internal_server_error(format!("Failed to {} instance", action))
     })
@@ -1876,7 +1908,7 @@ pub async fn admin_sync_agent_status(
         .sync_all_instance_statuses()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to sync agent instance status: {}", e);
+            tracing::error!("Failed to sync agent instance status: {}", error_type(&e));
             ApiError::internal_server_error("Failed to sync instance status")
         })?;
 
@@ -2012,7 +2044,7 @@ pub async fn admin_list_aml_reports(
         .admin_list_aml_reports(limit, offset)
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to list AML reports");
+            tracing::error!(error_type = error_type(&e), "Failed to list AML reports");
             ApiError::internal_server_error("Failed to list AML reports")
         })?;
 
@@ -2044,7 +2076,7 @@ pub async fn admin_list_aml_allowlist(
         .admin_list_aml_allowlist()
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to list AML allowlist");
+            tracing::error!(error_type = error_type(&e), "Failed to list AML allowlist");
             ApiError::internal_server_error("Failed to list AML allowlist")
         })?;
 
@@ -2085,7 +2117,10 @@ pub async fn admin_add_aml_allowlist_entry(
         )
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to add AML allowlist entry");
+            tracing::error!(
+                error_type = error_type(&e),
+                "Failed to add AML allowlist entry"
+            );
             ApiError::internal_server_error("Failed to add AML allowlist entry")
         })?;
 
@@ -2124,7 +2159,10 @@ pub async fn admin_remove_aml_allowlist_entry(
         .admin_remove_aml_allowlist_entry(account_id.clone())
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to remove AML allowlist entry");
+            tracing::error!(
+                error_type = error_type(&e),
+                "Failed to remove AML allowlist entry"
+            );
             ApiError::internal_server_error("Failed to remove AML allowlist entry")
         })?;
     if removed {
@@ -2171,7 +2209,10 @@ pub async fn admin_set_aml_report_active(
                 ApiError::not_found("AML report not found")
             }
             other => {
-                tracing::error!(error = ?other, "Failed to update AML report status");
+                tracing::error!(
+                    error_type = error_type(&other),
+                    "Failed to update AML report status"
+                );
                 ApiError::internal_server_error("Failed to update AML report status")
             }
         })?;
@@ -2225,7 +2266,7 @@ pub async fn admin_create_backup(
             tracing::error!(
                 "Failed to fetch instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to fetch instance")
         })?
@@ -2246,7 +2287,7 @@ pub async fn admin_create_backup(
             tracing::error!(
                 "Failed to forward request: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to create backup")
         })?;
@@ -2293,7 +2334,7 @@ pub async fn admin_list_backups(
             tracing::error!(
                 "Failed to fetch instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to fetch instance")
         })?
@@ -2314,7 +2355,7 @@ pub async fn admin_list_backups(
             tracing::error!(
                 "Failed to forward request: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to list backups")
         })?;
@@ -2370,7 +2411,7 @@ pub async fn admin_get_backup(
             tracing::error!(
                 "Failed to fetch instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to fetch instance")
         })?
@@ -2396,7 +2437,7 @@ pub async fn admin_get_backup(
                 "Failed to forward request: instance_id={}, backup_id={}, error={}",
                 instance_uuid,
                 backup_id,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to get backup")
         })?;
@@ -2631,7 +2672,7 @@ pub async fn bi_users_summary(
         .get_user_summary()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get user summary: {}", e);
+            tracing::error!("Failed to get user summary: {}", error_type(&e));
             ApiError::internal_server_error("Failed to get user distribution summary")
         })?;
     Ok(Json(summary))
@@ -2697,7 +2738,7 @@ pub async fn bi_list_deployments(
         .list_deployments(&filter)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to list deployments for BI: {}", e);
+            tracing::error!("Failed to list deployments for BI: {}", error_type(&e));
             ApiError::internal_server_error("Failed to list deployments")
         })?;
 
@@ -2737,7 +2778,7 @@ pub async fn bi_deployment_summary(
         .get_deployment_summary(params.start_date, params.end_date)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get deployment summary: {}", e);
+            tracing::error!("Failed to get deployment summary: {}", error_type(&e));
             ApiError::internal_server_error("Failed to get deployment summary")
         })?;
 
@@ -2793,7 +2834,7 @@ pub async fn bi_status_history(
             tracing::error!(
                 "Failed to get status history: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to get status history")
         })?;
@@ -2843,7 +2884,7 @@ pub async fn bi_usage(
         .get_usage_aggregation(&filter)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get usage aggregation: {}", e);
+            tracing::error!("Failed to get usage aggregation: {}", error_type(&e));
             ApiError::internal_server_error("Failed to get usage data")
         })?;
 
@@ -2891,7 +2932,7 @@ pub async fn bi_top_consumers(
         .get_top_consumers(&filter)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get top consumers: {}", e);
+            tracing::error!("Failed to get top consumers: {}", error_type(&e));
             ApiError::internal_server_error("Failed to get top consumers")
         })?;
 
@@ -2956,7 +2997,7 @@ pub async fn admin_list_account_deletions(
         .list_account_deletions(status, limit, offset)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to list account deletions: {:#}", e);
+            tracing::error!("Failed to list account deletions: {:#}", error_type(&e));
             ApiError::internal_server_error("Failed to list account deletions")
         })?;
 
@@ -3014,7 +3055,7 @@ pub async fn admin_retry_account_deletion(
             tracing::error!(
                 "Failed to load account deletion before retry: deletion_id={}, error={:#}",
                 deletion_id,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to retry account deletion")
         })?
@@ -3035,7 +3076,7 @@ pub async fn admin_retry_account_deletion(
             tracing::error!(
                 "Failed to reset account deletion for retry: deletion_id={}, error={:#}",
                 deletion_id,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to retry account deletion")
         })?
@@ -3045,7 +3086,7 @@ pub async fn admin_retry_account_deletion(
         tracing::error!(
             "Failed to create account deletion retry task id: deletion_id={}, error={}",
             deletion.id,
-            e
+            error_type(&e)
         );
         ApiError::internal_server_error("Failed to enqueue account deletion retry")
     })?;
@@ -3066,14 +3107,14 @@ pub async fn admin_retry_account_deletion(
             tracing::error!(
                 "Failed to restore account deletion after retry enqueue failure: deletion_id={}, enqueue_error={:#}, restore_error={:#}",
                 deletion.id,
-                e,
-                restore_err
+                error_type(&e),
+                error_type(&restore_err)
             );
         } else {
             tracing::error!(
                 "Failed to enqueue account deletion retry, restored failed_needs_review: deletion_id={}, error={:#}",
                 deletion.id,
-                e
+                error_type(&e)
             );
         }
         return Err(ApiError::internal_server_error(

@@ -1,5 +1,6 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
+use services::logging::error_type;
 use services::subscription::ports::{DowngradeIntentStatus, Subscription, SubscriptionRepository};
 use services::UserId;
 
@@ -170,12 +171,12 @@ impl PostgresSubscriptionRepository {
             .map_err(|e| {
                 if let Some(db_err) = e.as_db_error() {
                     tracing::debug!(
-                        "upsert_subscription DB error: severity={}, code={}, message={}, detail={:?}, hint={:?}",
-                        db_err.severity(), db_err.code().code(), db_err.message(),
-                        db_err.detail(), db_err.hint()
+                        severity = db_err.severity(),
+                        sqlstate = db_err.code().code(),
+                        "upsert_subscription database error"
                     );
                 } else {
-                    tracing::debug!("upsert_subscription non-DB error: {:?}", e);
+                    tracing::debug!("upsert_subscription non-DB error: {:?}", error_type(&e));
                 }
                 e
             })?;

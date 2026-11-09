@@ -2,6 +2,7 @@ use crate::patroni_discovery::{ClusterMember, PatroniDiscovery};
 use crate::pool::{create_pool_with_native_tls, DbPool};
 use anyhow::{anyhow, Result};
 use deadpool_postgres::{Config, Object as PooledConnection, Pool, QueueMode, Runtime};
+use services::logging::error_type;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -374,7 +375,8 @@ impl ClusterManager {
                     );
                     if let Err(e) = self.create_write_pool(&leader).await {
                         error!(
-                            "Failed to rebuild write pool for leader {target} (will retry): {e:#}"
+                            "Failed to rebuild write pool for leader {target} (will retry): {e_type:#}",
+                            e_type = error_type(&e)
                         );
                     }
                 }
@@ -385,7 +387,10 @@ impl ClusterManager {
         }
 
         if let Err(e) = self.update_read_pools().await {
-            error!("Failed to update read pools: {e:#}");
+            error!(
+                "Failed to update read pools: {e_type:#}",
+                e_type = error_type(&e)
+            );
         }
     }
 

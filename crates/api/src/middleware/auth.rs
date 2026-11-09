@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
+use services::logging::error_type;
 use services::{SessionId, UserId};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -117,18 +118,11 @@ async fn authenticate_token_string(
     token: String,
     auth_state: &AuthState,
 ) -> Result<AuthenticatedUser, ApiError> {
-    tracing::debug!(
-        "Authenticating token, length: {}, prefix: {}...",
-        token.len(),
-        &token.chars().take(8).collect::<String>()
-    );
+    tracing::debug!("Authenticating session token");
 
     // Hash the token and look it up
     let token_hash = hash_session_token(&token);
-    tracing::debug!(
-        "Token hashed, hash prefix: {}...",
-        &token_hash.chars().take(16).collect::<String>()
-    );
+    tracing::debug!("Session token hashed");
 
     authenticate_session_by_token(auth_state, token_hash).await
 }
@@ -138,10 +132,7 @@ async fn authenticate_session_by_token(
     state: &AuthState,
     token_hash: String,
 ) -> Result<AuthenticatedUser, ApiError> {
-    tracing::debug!(
-        "Authenticating session by token hash: {}...",
-        &token_hash.chars().take(16).collect::<String>()
-    );
+    tracing::debug!("Looking up session");
 
     // Look up the session by token hash
     let session = state
@@ -150,17 +141,13 @@ async fn authenticate_session_by_token(
         .await
         .map_err(|e| {
             tracing::error!(
-                "Failed to get session from repository for token_hash {}...: {}",
-                &token_hash.chars().take(16).collect::<String>(),
-                e
+                error_type = error_type(&e),
+                "Failed to get session from repository"
             );
             ApiError::internal_server_error("Failed to authenticate session")
         })?
         .ok_or_else(|| {
-            tracing::warn!(
-                "Session not found for token_hash: {}...",
-                &token_hash.chars().take(16).collect::<String>()
-            );
+            tracing::warn!("Session not found");
             ApiError::session_not_found()
         })?;
 
@@ -219,7 +206,7 @@ async fn ensure_account_not_deleting(
             tracing::error!(
                 "Failed to check account deletion status for user_id={}: {}",
                 user_id,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to authenticate session")
         })?;
@@ -287,7 +274,7 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let path = request.uri().path().to_string();
+    let path = super::request_id::log_route(&request).to_string();
     let method = request.method().clone();
 
     tracing::info!("Auth middleware invoked for {} {}", method, path);
@@ -325,7 +312,7 @@ pub async fn optional_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let path = request.uri().path().to_string();
+    let path = super::request_id::log_route(&request).to_string();
     let method = request.method().clone();
 
     tracing::debug!("Optional auth middleware invoked for {} {}", method, path);
@@ -338,7 +325,7 @@ pub async fn optional_auth_middleware(
                         "Optional auth: account deletion check failed on {} {}: {:?}",
                         method,
                         path,
-                        err
+                        error_type(&err)
                     );
                     None
                 } else {
@@ -356,7 +343,7 @@ pub async fn optional_auth_middleware(
                     "Optional auth: token validation failed on {} {}: {:?}",
                     method,
                     path,
-                    e
+                    error_type(&e)
                 );
                 None
             }
@@ -381,7 +368,7 @@ pub async fn admin_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let path = request.uri().path().to_string();
+    let path = super::request_id::log_route(&request).to_string();
     let method = request.method().clone();
 
     tracing::info!("Admin auth middleware invoked for {} {}", method, path);
@@ -390,7 +377,10 @@ pub async fn admin_auth_middleware(
     let authenticated_user = authenticate_token_string(token, &state)
         .await
         .map_err(|err| {
-            tracing::error!("Authentication failed in admin middleware: {:?}", err);
+            tracing::error!(
+                "Authentication failed in admin middleware: {:?}",
+                error_type(&err)
+            );
             err.into_response()
         })?;
     ensure_account_not_deleting(&state, authenticated_user.user_id, false)
@@ -408,7 +398,10 @@ pub async fn admin_auth_middleware(
         .get_user_profile(authenticated_user.user_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get user profile for admin check: {}", e);
+            tracing::error!(
+                "Failed to get user profile for admin check: {}",
+                error_type(&e)
+            );
             ApiError::internal_server_error("Failed to verify admin access").into_response()
         })?;
 

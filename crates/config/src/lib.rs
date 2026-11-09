@@ -573,18 +573,12 @@ impl Default for AdminConfig {
 
         admin_emails.retain(|email| {
             let Some((_, domain)) = email.split_once('@') else {
-                eprintln!(
-                    "Ignoring invalid AUTH_ADMIN_EMAILS entry without '@': {}",
-                    email
-                );
+                eprintln!("Ignoring invalid AUTH_ADMIN_EMAILS entry without '@'");
                 return false;
             };
             let allowed = admin_domains.iter().any(|d| d == domain);
             if !allowed {
-                eprintln!(
-                    "Ignoring AUTH_ADMIN_EMAILS entry outside AUTH_ADMIN_DOMAINS: {}",
-                    email
-                );
+                eprintln!("Ignoring AUTH_ADMIN_EMAILS entry outside AUTH_ADMIN_DOMAINS");
             }
             allowed
         });
