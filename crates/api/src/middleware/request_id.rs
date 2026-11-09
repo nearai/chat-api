@@ -1,4 +1,9 @@
-use axum::{body::Body, extract::Request, middleware::Next, response::Response};
+use axum::{
+    body::Body,
+    extract::{MatchedPath, Request},
+    middleware::Next,
+    response::Response,
+};
 use http::{HeaderMap, HeaderName, HeaderValue};
 use uuid::Uuid;
 
@@ -25,7 +30,7 @@ pub async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Respon
     let request_id = selected_request_id(req.headers());
     let request_id_value = request_id.to_string();
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    let path = log_route(&req).to_string();
     if let Ok(header_value) = HeaderValue::from_str(&request_id_value) {
         req.headers_mut()
             .insert(request_id_header_name(), header_value);
@@ -47,6 +52,13 @@ pub async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Respon
         "request completed"
     );
     response
+}
+
+/// Route templates exclude user-controlled path segments and query parameters.
+pub(super) fn log_route(req: &Request<Body>) -> &str {
+    req.extensions()
+        .get::<MatchedPath>()
+        .map_or("<unmatched>", MatchedPath::as_str)
 }
 
 fn selected_request_id(headers: &HeaderMap) -> Uuid {
@@ -178,5 +190,41 @@ mod tests {
                 "captured logs must not contain {forbidden}; logs: {captured}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn tracing_logs_use_route_templates_and_omit_unmatched_paths() {
+        use axum::routing::get;
+        use tracing::instrument::WithSubscriber;
+
+        let logs = CapturedLogs::default();
+        let writer_logs = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(move || writer_logs.writer())
+            .finish();
+        let app = Router::new()
+            .route("/items/{id}", get(|| async { "ok" }))
+            .layer(from_fn(request_id_middleware));
+
+        async {
+            for uri in [
+                "/items/PATH_TOKEN_SENTINEL?token=QUERY_TOKEN_SENTINEL",
+                "/UNKNOWN_PATH_TOKEN_SENTINEL",
+            ] {
+                app.clone()
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+            }
+        }
+        .with_subscriber(subscriber)
+        .await;
+
+        let captured = logs.contents();
+        assert!(captured.contains("/items/{id}"));
+        assert!(captured.contains("<unmatched>"));
+        assert!(!captured.contains("SENTINEL"), "{captured}");
     }
 }

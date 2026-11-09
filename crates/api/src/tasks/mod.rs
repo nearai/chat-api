@@ -9,6 +9,7 @@ use aws_smithy_http_client::{
     tls::{self, rustls_provider::CryptoMode},
     Builder as AwsHttpClientBuilder,
 };
+use services::logging::error_type;
 use services::tasks::{
     daily_cleanup_canceled_instances_request, dispatch_task, ScheduleSpec, ScheduledTaskRequest,
     TaskExecutor, TaskId, TaskMessage, TaskPayload, TaskScheduler,
@@ -327,8 +328,7 @@ impl<E: TaskExecutor + 'static> AwsSqsTaskWorker<E> {
         let mut consecutive_empty_polls = 0u64;
 
         tracing::info!(
-            "starting SQS polling queue_url={} wait_seconds={} max_messages={} visibility_timeout={} max_concurrency={}",
-            self.queue_url,
+            "starting SQS polling wait_seconds={} max_messages={} visibility_timeout={} max_concurrency={}",
             wait_seconds,
             max_number_of_messages,
             visibility_timeout,
@@ -350,10 +350,9 @@ impl<E: TaskExecutor + 'static> AwsSqsTaskWorker<E> {
                 Err(err) => {
                     consecutive_empty_polls = 0;
                     tracing::warn!(
-                        "failed to receive SQS messages queue_url={} retrying_in={}s err={}",
-                        self.queue_url,
-                        SQS_RECEIVE_RETRY_DELAY.as_secs(),
-                        format_aws_sdk_error(&err)
+                        retry_seconds = SQS_RECEIVE_RETRY_DELAY.as_secs(),
+                        error_type = error_type(&err),
+                        "Failed to receive SQS messages"
                     );
                     sleep(SQS_RECEIVE_RETRY_DELAY).await;
                     continue;
@@ -368,19 +367,14 @@ impl<E: TaskExecutor + 'static> AwsSqsTaskWorker<E> {
                     || consecutive_empty_polls.is_multiple_of(SQS_IDLE_HEARTBEAT_INTERVAL_POLLS)
                 {
                     tracing::debug!(
-                        "SQS poll returned no messages queue_url={} empty_polls={} wait_seconds={}",
-                        self.queue_url,
+                        "SQS poll returned no messages empty_polls={} wait_seconds={}",
                         consecutive_empty_polls,
                         wait_seconds
                     );
                 }
             } else {
                 consecutive_empty_polls = 0;
-                tracing::info!(
-                    "received {} SQS message(s) queue_url={}",
-                    messages.len(),
-                    self.queue_url
-                );
+                tracing::info!("received {} SQS message(s)", messages.len());
             }
 
             for message in messages {
@@ -393,7 +387,7 @@ impl<E: TaskExecutor + 'static> AwsSqsTaskWorker<E> {
                 tokio::spawn(async move {
                     let _permit = permit;
                     if let Err(err) = process_message(client, queue_url, executor, message).await {
-                        tracing::error!("task processing failed: {}", err);
+                        tracing::error!("task processing failed: {}", error_type(&err));
                     }
                 });
             }
@@ -456,7 +450,10 @@ async fn process_message<E: TaskExecutor + 'static>(
     let task_message = match parse_sqs_message(&message) {
         ParsedSqsMessage::Task(task_message) => task_message,
         ParsedSqsMessage::Drop { reason } => {
-            tracing::warn!("dropping invalid SQS task message: {}", reason);
+            tracing::warn!(
+                error_type = error_type(&reason),
+                "Dropping invalid SQS task message"
+            );
             if let Some(receipt_handle) = receipt_handle.as_deref() {
                 delete_message(&client, &queue_url, receipt_handle).await?;
             }
@@ -465,9 +462,8 @@ async fn process_message<E: TaskExecutor + 'static>(
     };
 
     tracing::debug!(
-        "task message received task_id={} payload={:?}",
-        task_message.task_id,
-        task_message.payload
+        task_id = %task_message.task_id,
+        "Task message received"
     );
 
     // Extend visibility timeout for delete tasks — the external agent-manager delete call

@@ -1,3 +1,4 @@
+use crate::logging::error_type;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream::Stream, StreamExt};
@@ -155,7 +156,7 @@ impl AgentProxyService for AgentProxy {
             tracing::error!(
                 "Failed to forward request to agent instance: instance_id={}, error={}",
                 instance.id,
-                e
+                error_type(&e)
             );
             anyhow::anyhow!("Failed to forward request to agent instance: {}", e)
         })?;

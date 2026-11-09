@@ -249,7 +249,7 @@ impl StripeClient {
             .get(format!("{STRIPE_API_BASE}{path}"))
             .header(AUTHORIZATION, format!("Bearer {}", self.secret_key))
             .query(query);
-        let response = request.send().await?;
+        let response = request.send().await.inspect_err(log_transport_error)?;
         decode_response(response).await
     }
 
@@ -268,9 +268,18 @@ impl StripeClient {
         if let Some(idempotency_key) = idempotency_key {
             request = request.header("Idempotency-Key", idempotency_key);
         }
-        let response = request.send().await?;
+        let response = request.send().await.inspect_err(log_transport_error)?;
         decode_response(response).await
     }
+}
+
+fn log_transport_error(error: &reqwest::Error) {
+    tracing::error!(
+        is_timeout = error.is_timeout(),
+        is_connect = error.is_connect(),
+        status = error.status().map(|status| status.as_u16()),
+        "Stripe API request failed"
+    );
 }
 
 fn encode_form(form: &[(&str, String)]) -> String {
@@ -313,17 +322,14 @@ fn log_response_shape(body: &str) {
         return;
     };
 
-    let top_level_keys = value
-        .as_object()
-        .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let item_keys = value
+    let top_level_key_count = value.as_object().map(|obj| obj.len()).unwrap_or_default();
+    let item_key_count = value
         .get("items")
         .and_then(|items| items.get("data"))
         .and_then(|data| data.as_array())
         .and_then(|data| data.first())
         .and_then(|item| item.as_object())
-        .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
+        .map(|obj| obj.len())
         .unwrap_or_default();
     let has_current_period_end = value.get("current_period_end").is_some();
     let item_has_current_period_end = value
@@ -335,8 +341,8 @@ fn log_response_shape(body: &str) {
         .is_some();
 
     tracing::error!(
-        top_level_keys = ?top_level_keys,
-        item_keys = ?item_keys,
+        top_level_key_count,
+        item_key_count,
         has_current_period_end,
         item_has_current_period_end,
         "Stripe response shape did not match expected schema"

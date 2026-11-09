@@ -25,7 +25,7 @@ pub async fn run(pool: database::DbPool) {
                 }
                 Err(error) => {
                     tracing::warn!(
-                        error = %error,
+                        error_type = services::logging::error_type(&error),
                         "Browser session cleanup failed; retrying next tick"
                     );
                     break;

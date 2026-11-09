@@ -100,7 +100,10 @@ fn set_cookie(context: &BrowserContext, secret: &str, max_age: i64) -> HeaderVal
 }
 
 fn internal(error: anyhow::Error) -> ApiError {
-    tracing::error!(error = %error, "Browser session operation failed");
+    tracing::error!(
+        error_type = services::logging::error_type(&error),
+        "Browser session operation failed"
+    );
     ApiError::internal_server_error("Browser session unavailable")
 }
 
@@ -126,7 +129,7 @@ pub async fn establish(
         {
             tracing::error!(
                 session_id = %session.session_id,
-                error = %error,
+                error_type = services::logging::error_type(&error),
                 "Failed to revoke session after browser setup failure"
             );
         }

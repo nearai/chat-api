@@ -14,6 +14,7 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use services::logging::error_type;
 use services::{
     analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest},
     system_configs::ports::{RateLimitConfig, WindowLimit},
@@ -122,7 +123,7 @@ impl RateLimitState {
         let window_duration = config.window_duration.to_std().map_err(|e| {
             tracing::error!(
                 "Invalid window_duration in rate limit config: {}. Duration: {:?}",
-                e,
+                error_type(&e),
                 config.window_duration
             );
             RateLimitError::InternalServerError
@@ -220,7 +221,7 @@ impl RateLimitState {
         for window_limit in &config.window_limits {
             let limit_value = window_limit.limit.try_into().map_err(|e| {
                 tracing::error!(
-                    error = ?e,
+                    error_type = error_type(&e),
                     limit = window_limit.limit,
                     "Failed to convert window limit to i64"
                 );
@@ -243,7 +244,7 @@ impl RateLimitState {
                         user_id = %user_id.0,
                         window_seconds = window_limit.window_duration.num_seconds(),
                         "Failed to check usage limit: {}",
-                        e
+                        error_type(&e)
                     );
                     // Rollback: remove timestamp and release permit
                     self.rollback_acquire(user_id, added_timestamp).await;
@@ -362,7 +363,7 @@ impl RateLimitState {
                     tracing::warn!(
                         user_id = %user_id.0,
                         "Failed to record activity after window checks passed: {}",
-                        e
+                        error_type(&e)
                     );
                     // Rollback: remove timestamp and release permit
                     self.rollback_acquire(user_id, added_timestamp).await;
@@ -408,7 +409,7 @@ impl RateLimitState {
                         UsageLimitType::Token => "Failed to check token usage sum",
                         UsageLimitType::Cost => "Failed to check cost usage sum",
                     };
-                    tracing::warn!(user_id = %user_id.0, "{}: {}", error_msg, e);
+                    tracing::warn!(user_id = %user_id.0, "{}: {}", error_msg, error_type(&e));
                     self.rollback_acquire(user_id, added_timestamp).await;
                     return Err(RateLimitError::InternalServerError);
                 }

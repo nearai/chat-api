@@ -7,6 +7,7 @@ use opentelemetry_sdk::{
     metrics::{PeriodicReader, SdkMeterProvider},
     Resource,
 };
+use services::logging::error_type;
 use services::{
     agent::proxy::AgentProxy,
     analytics::AnalyticsServiceImpl,
@@ -64,7 +65,7 @@ fn log_lukka_aml_policy_config(config: &config::LukkaAmlConfig) -> anyhow::Resul
         Ok(()) => Ok(()),
         Err(error) => {
             tracing::error!(
-                error = %error,
+                error_type = error_type(&error),
                 "Refusing to start with an invalid enabled Lukka AML high-risk policy"
             );
             Err(anyhow::Error::msg(error))
@@ -73,10 +74,21 @@ fn log_lukka_aml_policy_config(config: &config::LukkaAmlConfig) -> anyhow::Resul
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // Returning an error from main would print its full Debug representation.
+            eprintln!("API failed: {}", error_type(&error));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     // Load .env file if it exists
-    if let Err(e) = dotenvy::dotenv() {
-        eprintln!("Warning: Could not load .env file: {e}");
+    if dotenvy::dotenv().is_err() {
+        eprintln!("Warning: Could not load .env file");
         eprintln!("Continuing with environment variables...");
     }
 
@@ -90,7 +102,10 @@ async fn main() -> anyhow::Result<()> {
     if config.tasks.enabled {
         if config.tasks.is_scheduler_configured() {
             if let Err(err) = api::tasks::ensure_daily_cleanup_task(&config.tasks).await {
-                tracing::warn!("failed to ensure daily cleanup schedule: {}", err);
+                tracing::warn!(
+                    "failed to ensure daily cleanup schedule: {}",
+                    error_type(&err)
+                );
             }
         } else {
             tracing::info!("tasks scheduler not configured; skipping daily cleanup schedule setup");
@@ -268,7 +283,6 @@ async fn main() -> anyhow::Result<()> {
     if let Some(rpc_network_hint) = near_rpc_network_hint(config.near.rpc_url.host_str()) {
         if rpc_network_hint != near_network_id_hint {
             tracing::warn!(
-                near_rpc_url = %config.near.rpc_url,
                 near_network_id = %config.near.network_id,
                 expected_network_id = rpc_network_hint,
                 "NEAR network id appears inconsistent with NEAR RPC URL"
@@ -313,10 +327,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Initializing metrics service...");
     let metrics_service: Arc<dyn services::metrics::MetricsServiceTrait> =
         if let Some(otlp_endpoint) = &config.telemetry.otlp_endpoint {
-            tracing::info!(
-                "Initializing OpenTelemetry OTLP metrics export to {}",
-                otlp_endpoint
-            );
+            tracing::info!("Initializing OpenTelemetry OTLP metrics export");
 
             // Build OTLP metrics exporter
             let exporter = opentelemetry_otlp::MetricExporter::builder()
