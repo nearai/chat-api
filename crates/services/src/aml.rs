@@ -1,3 +1,4 @@
+use crate::logging::error_type;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -189,7 +190,7 @@ fn send_high_risk_aml_slack_alert(
                 tracing::error!(
                     user_id = %user_id,
                     flow = %flow,
-                    error = %err,
+                    error_type = error_type(&err),
                     "Failed to send high-risk AML Slack alert"
                 );
             }
@@ -255,7 +256,7 @@ fn send_aml_provider_failure_slack_alert(
                 tracing::error!(
                     user_id = %user_id,
                     flow = %flow,
-                    error = %err,
+                    error_type = error_type(&err),
                     "Failed to send AML provider failure Slack alert"
                 );
             }
@@ -555,7 +556,7 @@ impl LukkaAmlService {
             .build()
             .unwrap_or_else(|err| {
                 tracing::warn!(
-                    error = %err,
+                    error_type = error_type(&err),
                     "Failed to build Lukka AML HTTP client with configured timeout; using default client"
                 );
                 reqwest::Client::new()
@@ -567,7 +568,7 @@ impl LukkaAmlService {
             .build()
             .unwrap_or_else(|err| {
                 tracing::warn!(
-                    error = %err,
+                    error_type = error_type(&err),
                     "Failed to build AML Slack HTTP client with configured timeout; using default client"
                 );
                 reqwest::Client::new()
@@ -741,7 +742,7 @@ impl LukkaAmlService {
                         }
                         Err(err) => {
                             tracing::warn!(
-                                error = %err,
+                                error_type = error_type(&err),
                                 "Failed to decode Lukka AML response"
                             );
                             AmlCheckResult::unknown(account_id, "provider_decode_error")
@@ -768,7 +769,7 @@ impl LukkaAmlService {
                         "provider_error".to_string()
                     };
                     tracing::warn!(
-                        error = %err,
+                        error_type = error_type(&err),
                         attempt = attempt + 1,
                         attempts,
                         "Lukka AML provider request failed"

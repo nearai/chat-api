@@ -1,3 +1,4 @@
+use crate::logging::error_type;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::TryStreamExt;
@@ -276,7 +277,7 @@ impl ConversationServiceImpl {
                     all_missing_ids.extend(missing_ids);
                 }
                 Err(e) => {
-                    tracing::error!("Batch request {} failed: {}", idx + 1, e);
+                    tracing::error!("Batch request {} failed: {}", idx + 1, error_type(&e));
                     return Err(e);
                 }
             }

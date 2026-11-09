@@ -18,6 +18,7 @@ use super::ports::{
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
 use crate::aml::{AmlCheckResult, AmlReportEvent, AmlReportRepository, AmlRiskService};
+use crate::logging::error_type;
 use crate::system_configs::ports::{
     CreditsProviderConfig, SubscriptionPlanConfig, SystemConfigs, SystemConfigsService,
 };
@@ -450,7 +451,7 @@ impl SubscriptionServiceImpl {
                 tracing::error!(
                     user_id = %user_id,
                     flow = %flow,
-                    error = ?err,
+                    error_type = error_type(&err),
                     "Failed to read AML report candidates; continuing with provider check"
                 );
                 Vec::new()
@@ -499,7 +500,7 @@ impl SubscriptionServiceImpl {
             tracing::error!(
                 user_id = %user_id,
                 flow = %flow,
-                error = ?err,
+                error_type = error_type(&err),
                 "Failed to record AML report; continuing with provider result"
             );
         }
@@ -626,7 +627,7 @@ impl SubscriptionServiceImpl {
                 tracing::error!(
                     "Failed to list instances for cancel cleanup: user_id={}, err={}",
                     user_id,
-                    e
+                    error_type(&e)
                 );
                 return;
             }
@@ -668,7 +669,7 @@ impl SubscriptionServiceImpl {
                             "Failed to stop instance (attempt {}): instance_id={}, err={}",
                             attempt + 1,
                             instance.id,
-                            e
+                            error_type(&e)
                         );
                         last_err = Some(e);
                     }
@@ -679,7 +680,7 @@ impl SubscriptionServiceImpl {
                     "All retries exhausted for instance stop: instance_id={}, user_id={}, err={}",
                     instance.id,
                     user_id,
-                    e
+                    error_type(&e)
                 );
             }
         }
@@ -725,7 +726,7 @@ impl SubscriptionServiceImpl {
             .get_configs()
             .await
             .map_err(|e| {
-                tracing::error!(error = ?e, "Failed to get system configs");
+                tracing::error!(error_type = error_type(&e), "Failed to get system configs");
                 SubscriptionError::InternalError(e.to_string())
             })?;
 
@@ -1152,7 +1153,7 @@ impl SubscriptionServiceImpl {
                         Ok(None) => {}
                         Err(err) => tracing::error!(
                             user_id = %user_id,
-                            error = %err,
+                            error_type = error_type(&err),
                             "failed to apply pending subscription downgrade"
                         ),
                     }
@@ -2138,7 +2139,7 @@ impl SubscriptionServiceImpl {
                 tracing::warn!(
                     user_id = %user_id.0,
                     context,
-                    error = %err,
+                    error_type = error_type(&err),
                     "could not load subscriptions for HoS reconcile gate; skipping NEAR reconcile"
                 );
                 return;
@@ -2157,7 +2158,7 @@ impl SubscriptionServiceImpl {
             tracing::warn!(
                 user_id = %user_id.0,
                 context,
-                error = %err,
+                error_type = error_type(&err),
                 "NEAR staking reconcile from RPC failed; continuing with stored subscription state"
             );
         }
@@ -2174,7 +2175,7 @@ impl SubscriptionServiceImpl {
             tracing::warn!(
                 user_id = %user_id.0,
                 context,
-                error = %err,
+                error_type = error_type(&err),
                 "NEAR staking reconcile from RPC failed; continuing with stored subscription state"
             );
         }
@@ -2972,10 +2973,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .ok_or_else(|| SubscriptionError::StripeError("No checkout URL returned".into()))?;
 
         tracing::info!(
-            "Checkout session created: user_id={}, session_id={}, idempotency_key={}...",
-            user_id,
-            session.id,
-            &idempotency_key.chars().take(16).collect::<String>()
+            %user_id,
+            "Checkout session created"
         );
 
         Ok(CreateSubscriptionOutcome::StripeCheckout { checkout_url })
@@ -3983,9 +3982,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await?;
 
         tracing::info!(
-            "Portal session created: user_id={}, session_id={}",
-            user_id,
-            session.id
+            %user_id,
+            "Portal session created"
         );
 
         Ok(session.url)
@@ -4372,11 +4370,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 })?;
 
                 tracing::info!(
-                    "Stripe credit checkout session created: user_id={}, credits={}, session_id={}, idempotency_key={}...",
-                    user_id,
+                    %user_id,
                     credits,
-                    session.id,
-                    &idempotency_key.chars().take(16).collect::<String>()
+                    "Stripe credit checkout session created"
                 );
 
                 Ok(CreateCreditPurchaseOutcome::Stripe { checkout_url })
@@ -4566,7 +4562,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
             {
-                tracing::warn!(error = ?e, "Failed to reconcile purchased credits before get_credits");
+                tracing::warn!(
+                    error_type = error_type(&e),
+                    "Failed to reconcile purchased credits before get_credits"
+                );
             }
         }
 

@@ -3,6 +3,7 @@ use axum::{
     http::{header, Request, StatusCode},
     response::{IntoResponse, Response},
 };
+use services::logging::error_type;
 use std::{env, path::PathBuf};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
@@ -65,7 +66,10 @@ pub async fn static_handler(req: Request<Body>) -> Response {
             res.into_response()
         }
         Err(err) => {
-            tracing::error!(error = ?err, "Failed to serve static asset");
+            tracing::error!(
+                error_type = error_type(&err),
+                "Failed to serve static asset"
+            );
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

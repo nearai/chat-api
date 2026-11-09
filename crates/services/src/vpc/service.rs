@@ -1,4 +1,5 @@
 use super::ports::{VpcCredentials, VpcCredentialsRepository, VpcCredentialsService, VpcInfo};
+use crate::logging::error_type;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -68,7 +69,10 @@ impl VpcCredentialsServiceImpl {
                 .delete(LEGACY_VPC_REFRESH_TOKEN_CONFIG_KEY)
                 .await
             {
-                tracing::warn!("Failed to delete legacy VPC refresh token: {}", e);
+                tracing::warn!(
+                    error_type = error_type(&e),
+                    "Failed to delete legacy VPC refresh token"
+                );
             }
         }
 
@@ -250,7 +254,12 @@ pub fn load_vpc_info() -> Option<VpcInfo> {
     // Read VPC hostname from file
     let vpc_hostname = if let Ok(path) = std::env::var("VPC_HOSTNAME_FILE") {
         std::fs::read_to_string(path)
-            .map_err(|e| tracing::warn!("Failed to read VPC hostname file: {e}"))
+            .map_err(|e| {
+                tracing::warn!(
+                    error_type = error_type(&e),
+                    "Failed to read VPC hostname file"
+                )
+            })
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())

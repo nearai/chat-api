@@ -1,5 +1,6 @@
 use crate::{error::ApiError, models::*, state::AppState};
 use axum::{extract::State, routing::get, Json, Router};
+use services::logging::error_type;
 
 /// Get public system configs (requires user authentication, returns limited fields)
 #[utoipa::path(
@@ -25,7 +26,7 @@ pub async fn get_system_configs(
         .get_configs()
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to get system configs");
+            tracing::error!(error_type = error_type(&e), "Failed to get system configs");
             ApiError::internal_server_error("Failed to get system configs")
         })?;
 

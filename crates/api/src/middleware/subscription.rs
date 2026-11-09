@@ -12,6 +12,7 @@ use axum::{
 };
 use http::StatusCode;
 use serde::Serialize;
+use services::logging::error_type;
 use std::sync::Arc;
 
 use crate::middleware::AuthenticatedUser;
@@ -105,7 +106,7 @@ pub async fn subscription_middleware(
             tracing::error!(
                 "Failed to check subscription status for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,

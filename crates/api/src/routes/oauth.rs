@@ -20,6 +20,7 @@ use services::auth::near::SignedMessage;
 use services::auth::ports::{
     OAuthCodeExchangeError, OAuthProvider, RequestEmailCodeError, VerifyEmailCodeError,
 };
+use services::logging::error_type;
 use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
 };
@@ -135,9 +136,7 @@ fn frontend_callback_allowed_origins_from(configured_origins: Option<&str>) -> O
     {
         match validate_frontend_origin(origin) {
             Ok(url) => insert_origin(&mut origins, &mut seen, &url),
-            Err(err) => tracing::warn!(
-                "Ignoring invalid {FRONTEND_CALLBACK_ALLOWED_ORIGINS_ENV} entry '{origin}': {err}"
-            ),
+            Err(_) => tracing::warn!("Ignoring invalid frontend callback allowed origin"),
         }
     }
 
@@ -498,7 +497,7 @@ fn email_verify_error_to_api_error(error: VerifyEmailCodeError) -> ApiError {
             ApiError::too_many_requests("Too many verification attempts. Please try again later")
         }
         VerifyEmailCodeError::Internal(err) => {
-            tracing::error!("Email verification failed: {}", err);
+            tracing::error!("Email verification failed: {}", error_type(&err));
             ApiError::internal_server_error("Failed to verify email code")
         }
     }
@@ -519,7 +518,7 @@ fn request_email_code_error_to_api_error(error: RequestEmailCodeError) -> ApiErr
             "Too many verification code requests. Please try again later",
         ),
         RequestEmailCodeError::Internal(err) => {
-            tracing::error!("Email code request failed: {}", err);
+            tracing::error!("Email code request failed: {}", error_type(&err));
             ApiError::internal_server_error("Failed to request verification code")
         }
     }
@@ -606,7 +605,7 @@ fn validate_oauth_frontend_callback(
             .map(|origins| origins.as_slice()),
     )
     .map_err(|err| {
-        tracing::warn!("Rejected OAuth frontend_callback: {}", err);
+        tracing::warn!("Rejected OAuth frontend_callback: {}", error_type(&err));
         ApiError::bad_request("Invalid frontend_callback")
     })
 }
@@ -876,7 +875,10 @@ pub async fn verify_email_code(
         })
         .await
     {
-        tracing::warn!("Failed to record analytics for email auth: {}", err);
+        tracing::warn!(
+            "Failed to record analytics for email auth: {}",
+            error_type(&err)
+        );
     }
 
     let refresh_cookie = super::browser_session::establish(
@@ -899,7 +901,7 @@ pub async fn verify_email_code(
             tracing::warn!(
                 "Failed to set up gateway session for user in verify_email_code: user_id={}, error={}",
                 result.session.user_id,
-                e
+                error_type(&e)
             );
             None
         });
@@ -976,7 +978,10 @@ pub async fn google_login(
         )
         .await
         .map_err(|e| {
-            tracing::error!("Failed to generate Google authorization URL: {}", e);
+            tracing::error!(
+                "Failed to generate Google authorization URL: {}",
+                error_type(&e)
+            );
             ApiError::oauth_provider_error("Google")
         })?;
 
@@ -1025,7 +1030,12 @@ pub async fn oauth_callback(
         .handle_callback_unified(params.code.clone(), params.state.clone())
         .await
         .map_err(|e| {
-            tracing::error!(state_present, state_len, error = %e, "OAuth callback failed");
+            tracing::error!(
+                state_present,
+                state_len,
+                error_type = error_type(&e),
+                "OAuth callback failed"
+            );
             ApiError::oauth_failed()
         })?;
 
@@ -1075,7 +1085,10 @@ pub async fn oauth_callback(
         })
         .await
     {
-        tracing::warn!("Failed to record analytics for OAuth callback: {}", e);
+        tracing::warn!(
+            "Failed to record analytics for OAuth callback: {}",
+            error_type(&e)
+        );
     }
 
     let mut headers = HeaderMap::new();
@@ -1094,7 +1107,10 @@ pub async fn oauth_callback(
             ) {
                 Ok(validated) => validated,
                 Err(err) => {
-                    tracing::warn!("Stored OAuth frontend_callback is invalid: {}", err);
+                    tracing::warn!(
+                        "Stored OAuth frontend_callback is invalid: {}",
+                        error_type(&err)
+                    );
                     return Err(ApiError::bad_request("Invalid frontend_callback"));
                 }
             }
@@ -1114,12 +1130,18 @@ pub async fn oauth_callback(
         .create_frontend_callback_code(callback.session.session_id, challenge, callback.is_new_user)
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, "Failed to create OAuth frontend callback code");
+            tracing::error!(
+                error_type = error_type(&err),
+                "Failed to create OAuth frontend callback code"
+            );
             ApiError::internal_server_error("Failed to create OAuth callback code")
         })?;
     let callback_url =
         build_oauth_frontend_code_redirect(&frontend_url, &code, state).map_err(|err| {
-            tracing::error!("Failed to build OAuth frontend callback URL: {}", err);
+            tracing::error!(
+                "Failed to build OAuth frontend callback URL: {}",
+                error_type(&err)
+            );
             ApiError::internal_server_error("Invalid callback URL")
         })?;
 
@@ -1170,7 +1192,10 @@ pub async fn exchange_oauth_callback_code(
                 ApiError::unauthorized("Invalid or expired OAuth callback code")
             }
             OAuthCodeExchangeError::Internal(error) => {
-                tracing::error!(error = %error, "OAuth callback code exchange failed");
+                tracing::error!(
+                    error_type = error_type(&error),
+                    "OAuth callback code exchange failed"
+                );
                 ApiError::internal_server_error("Failed to exchange OAuth callback code")
             }
         })?;
@@ -1222,7 +1247,7 @@ pub async fn exchange_oauth_callback_code(
             {
                 tracing::error!(
                     session_id = %exchanged.session.session_id,
-                    error = %error,
+                    error_type = error_type(&error),
                     "Failed to revoke session after OAuth gateway setup failure"
                 );
             }
@@ -1304,7 +1329,10 @@ pub async fn github_login(
         )
         .await
         .map_err(|e| {
-            tracing::error!("Failed to generate Github authorization URL: {}", e);
+            tracing::error!(
+                "Failed to generate Github authorization URL: {}",
+                error_type(&e)
+            );
             ApiError::oauth_provider_error("Github")
         })?;
 
@@ -1354,7 +1382,11 @@ pub async fn logout(
         .revoke_session(session_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to revoke session {}: {}", session_id, e);
+            tracing::error!(
+                "Failed to revoke session {}: {}",
+                session_id,
+                error_type(&e)
+            );
             ApiError::logout_failed()
         })?;
 
@@ -1387,7 +1419,7 @@ pub async fn mock_login(
         .get_user_by_email(&request.email)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to check existing user: {}", e);
+            tracing::error!("Failed to check existing user: {}", error_type(&e));
             ApiError::internal_server_error("Failed to check user")
         })? {
         Some(existing_user) => {
@@ -1437,11 +1469,10 @@ pub async fn mock_login(
             "google" => Some(OAuthProvider::Google),
             "github" => Some(OAuthProvider::Github),
             "near" => Some(OAuthProvider::Near),
-            other => {
+            _ => {
                 tracing::warn!(
-                    "Unknown oauth_provider '{}' in mock login for user_id={}; skipping link",
-                    other,
-                    user.id
+                    user_id = %user.id,
+                    "Unknown oauth_provider in mock login; skipping link"
                 );
                 None
             }
@@ -1474,7 +1505,7 @@ pub async fn mock_login(
                     "Failed to link mock OAuth account for user_id={} provider={:?}: {}",
                     user.id,
                     provider,
-                    e
+                    error_type(&e)
                 );
             } else {
                 tracing::info!(
@@ -1492,7 +1523,7 @@ pub async fn mock_login(
         .create_session(user.id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to create session: {}", e);
+            tracing::error!("Failed to create session: {}", error_type(&e));
             ApiError::internal_server_error("Failed to create session")
         })?;
 
@@ -1517,7 +1548,7 @@ pub async fn mock_login(
             tracing::warn!(
                 "Failed to set up gateway session for user in mock_login: user_id={}, error={}",
                 user.id,
-                e
+                error_type(&e)
             );
             None
         });
@@ -1573,7 +1604,7 @@ pub async fn near_auth(
         .authenticate_near(signed_message, payload)
         .await
         .map_err(|e| {
-            tracing::error!("NEAR authentication failed: {}", e);
+            tracing::error!("NEAR authentication failed: {}", error_type(&e));
             ApiError::unauthorized(e.to_string())
         })?;
 
@@ -1612,7 +1643,10 @@ pub async fn near_auth(
         })
         .await
     {
-        tracing::warn!("Failed to record analytics for NEAR auth: {}", e);
+        tracing::warn!(
+            "Failed to record analytics for NEAR auth: {}",
+            error_type(&e)
+        );
     }
 
     let refresh_cookie =
@@ -1644,7 +1678,7 @@ pub async fn near_auth(
             tracing::warn!(
                 "Failed to set up gateway session for user in near_auth: user_id={}, error={}",
                 session.user_id,
-                e
+                error_type(&e)
             );
             None
         });
