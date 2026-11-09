@@ -1072,6 +1072,7 @@ mod tests {
             .unwrap(),
             write_enabled: true,
             agent_secrets_write_enabled: false,
+            app_config_write_enabled: false,
         });
         let repository = PostgresConversationShareRepository::new(pool);
         let domain = "conversation_shares.recipient_value";

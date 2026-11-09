@@ -44,6 +44,7 @@ pub fn ring_config() -> FieldEncryptionConfig {
         .unwrap(),
         write_enabled: true,
         agent_secrets_write_enabled: true,
+        app_config_write_enabled: false,
     }
 }
 

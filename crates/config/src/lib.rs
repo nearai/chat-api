@@ -991,6 +991,9 @@ pub struct DatabaseEncryptionConfig {
     /// Migrate agent provisioning secrets only after every reader supports field envelopes.
     #[serde(default)]
     pub agent_secrets_write_enabled: bool,
+    /// Separate rollout gate for persisted VPC configuration credentials.
+    #[serde(default)]
+    pub app_config_write_enabled: bool,
 }
 
 impl fmt::Debug for DatabaseEncryptionConfig {
@@ -1001,6 +1004,7 @@ impl fmt::Debug for DatabaseEncryptionConfig {
             .field("keys", &self.keys.as_ref().map(|_| "[REDACTED]"))
             .field("key_id", &self.key_id)
             .field("write_enabled", &self.write_enabled)
+            .field("app_config_write_enabled", &self.app_config_write_enabled)
             .field(
                 "agent_secrets_write_enabled",
                 &self.agent_secrets_write_enabled,
@@ -1069,6 +1073,10 @@ impl Default for DatabaseEncryptionConfig {
             keys: keys.take(),
             key_id: std::env::var("DB_ENCRYPTION_KEY_ID").unwrap_or_else(|_| "db-v1".to_string()),
             write_enabled: std::env::var("DB_ENCRYPTION_WRITE_ENABLED")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(false),
+            app_config_write_enabled: std::env::var("DB_ENCRYPTION_APP_CONFIG_WRITE_ENABLED")
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(false),

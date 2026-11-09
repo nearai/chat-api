@@ -23,12 +23,13 @@ versions. Invalidate pending states containing plaintext verifiers at cutover
 and require those logins to restart, so old plaintext verifiers do not remain in
 the live table.
 
-`app_config.value` (including the VPC API key) also always uses field encryption.
-Legacy plaintext values are encrypted on read; use an `app_config`-scoped
-backfill to cover unused rows. Deploy encryption-capable readers together:
-older binaries cannot read values after the first write or read-repair. Rollback
-must retain encryption-capable readers. The stable
-AAD row ID is the first 128 bits of SHA-256 of the immutable config key.
+`app_config.value` (including the VPC API key) uses a separate rollout gate,
+`DB_ENCRYPTION_APP_CONFIG_WRITE_ENABLED`, which defaults to `false`. First deploy
+all readers with this gate off. Then enable it together with the global write
+gate, and backfill/verify the `app_config` scope. Legacy plaintext is encrypted
+on read only after both gates are enabled. Rollback after that point must retain
+encryption-capable readers. The stable AAD row ID is the first 128 bits of
+SHA-256 of the immutable config key.
 
 Agent provisioning secrets have a separate rollout gate,
 `DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED`, also defaulting to `false`. While

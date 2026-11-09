@@ -6,6 +6,8 @@ mod scheduler;
 pub(super) fn execute_writes_enabled(state: &AppState, fields: &[&Field]) -> bool {
     state.db_pool.field_encryption().is_some_and(|config| {
         config.write_enabled
+            && (config.app_config_write_enabled
+                || !fields.iter().any(|field| field.table == "app_config"))
             && (config.agent_secrets_write_enabled
                 || !fields
                     .iter()

@@ -24,8 +24,13 @@ impl PostgresAppConfigRepository {
         let config = self.pool.field_encryption().ok_or_else(|| {
             anyhow::anyhow!("field encryption configuration is required for app config")
         })?;
-        // Credentials must never fall back to plaintext writes, even while the
-        // general backfill write gate is disabled.
+        if !config.app_config_write_enabled {
+            return Ok(value.to_owned());
+        }
+        anyhow::ensure!(
+            config.write_enabled,
+            "app config encryption writes require DB_ENCRYPTION_WRITE_ENABLED=true"
+        );
         crate::field_encryption::encrypt(
             config.ring().write_key(),
             config.ring().write_id(),
@@ -56,15 +61,19 @@ impl PostgresAppConfigRepository {
             "value",
             app_config_encryption_id(key),
         )?;
-        if stored == plaintext {
+        if stored == plaintext && config.app_config_write_enabled && config.write_enabled {
             let encrypted = self.encode(key, &plaintext)?;
             // Do not overwrite a concurrent credential refresh or backfill.
-            client
+            if client
                 .execute(
                     "UPDATE app_config SET value=$2, updated_at=NOW() WHERE key=$1 AND value=$3",
                     &[&key, &encrypted, &stored],
                 )
-                .await?;
+                .await
+                .is_err()
+            {
+                tracing::warn!("Failed to encrypt legacy app config value on read");
+            }
         }
         Ok(Some(plaintext))
     }

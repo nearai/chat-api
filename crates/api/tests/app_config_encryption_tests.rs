@@ -17,8 +17,9 @@ async fn stored(db: &database::Database, key: &str) -> String {
 }
 
 #[tokio::test]
-async fn config_values_are_encrypted_with_write_gate_off_and_bound_to_the_key() {
+async fn config_values_are_encrypted_and_bound_to_the_key() {
     let (_, db) = create_test_server_and_db(Default::default()).await;
+    enable_config_writes(&db);
     let repo = db.app_config_repository();
     let key = format!("vpc-test-{}", Uuid::new_v4());
     repo.set(&key, "test-api-key").await.unwrap();
@@ -65,6 +66,7 @@ async fn config_values_are_encrypted_with_write_gate_off_and_bound_to_the_key() 
 #[tokio::test]
 async fn reading_a_legacy_value_encrypts_it_in_place() {
     let (_, db) = create_test_server_and_db(Default::default()).await;
+    enable_config_writes(&db);
     let key = format!("legacy-{}", Uuid::new_v4());
     db.pool()
         .get()
@@ -123,6 +125,7 @@ async fn registry_backfill_and_key_rotation_preserve_config_reads() {
         ..Default::default()
     })
     .await;
+    enable_config_writes(&db);
     let token = mock_login(&server, "db-encryption-admin@admin.org").await;
     let key = format!("backfill-{}", Uuid::new_v4());
     db.pool()
@@ -182,4 +185,56 @@ async fn registry_backfill_and_key_rotation_preserve_config_reads() {
         Some("backfill-key")
     );
     db.app_config_repository().delete(&key).await.unwrap();
+}
+
+fn enable_config_writes(db: &database::Database) {
+    let config = db.pool().field_encryption().unwrap();
+    db.pool()
+        .set_field_encryption(services::db_pool::FieldEncryptionConfig {
+            write_enabled: true,
+            app_config_write_enabled: true,
+            ..config
+        });
+}
+
+#[tokio::test]
+async fn separate_rollout_gate_preserves_plaintext_and_blocks_backfill() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        database_encryption_write_enabled: Some(true),
+        ..Default::default()
+    })
+    .await;
+    let repo = db.app_config_repository();
+    let key = format!("gate-{}", Uuid::new_v4());
+    repo.set(&key, "legacy-reader-compatible").await.unwrap();
+    assert_eq!(
+        repo.get(&key).await.unwrap().as_deref(),
+        Some("legacy-reader-compatible")
+    );
+    assert_eq!(stored(&db, &key).await, "legacy-reader-compatible");
+    let token = mock_login(&server, "db-encryption-admin@admin.org").await;
+    let response = server
+        .post("/v1/admin/database-encryption/jobs")
+        .add_header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .json(&json!({"mode":"execute","scope":{"tables":["app_config"]},"actions":["encrypt"]}))
+        .await;
+    assert_eq!(response.status_code(), 400);
+    enable_config_writes(&db);
+    assert_eq!(
+        repo.get(&key).await.unwrap().as_deref(),
+        Some("legacy-reader-compatible")
+    );
+    assert_ne!(stored(&db, &key).await, "legacy-reader-compatible");
+    // Turning off writes must not disable decryption of already-migrated rows.
+    let config = db.pool().field_encryption().unwrap();
+    db.pool()
+        .set_field_encryption(services::db_pool::FieldEncryptionConfig {
+            app_config_write_enabled: false,
+            ..config
+        });
+    assert_eq!(
+        repo.get(&key).await.unwrap().as_deref(),
+        Some("legacy-reader-compatible")
+    );
+    repo.delete(&key).await.unwrap();
 }
