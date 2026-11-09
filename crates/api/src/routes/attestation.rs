@@ -312,6 +312,18 @@ async fn handle_manager_response(
     })
 }
 
+fn manager_attestation_client() -> Result<Client, ApiError> {
+    Client::builder()
+        // A configured manager must not select a second outbound destination.
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| {
+            tracing::error!("Failed to create HTTP client: {}", e);
+            ApiError::internal_server_error("Failed to create HTTP client")
+        })
+}
+
 async fn fetch_agent_attestations(
     app_state: &AppState,
     agent_id: &str,
@@ -390,13 +402,7 @@ async fn fetch_agent_attestations(
     )?;
 
     // Fetch both attestations concurrently from the corresponding agent manager
-    let http_client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| {
-            tracing::error!("Failed to create HTTP client: {}", e);
-            ApiError::internal_server_error("Failed to create HTTP client")
-        })?;
+    let http_client = manager_attestation_client()?;
 
     let (attestation_response, instance_response) = tokio::join!(
         http_client.get(&attestation_url).send(),
@@ -456,4 +462,33 @@ async fn fetch_agent_attestations(
 /// Create the attestation router
 pub fn create_attestation_router() -> Router<AppState> {
     Router::new().route("/v1/attestation/report", get(get_attestation_report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{matchers::path, Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn manager_attestation_does_not_follow_redirects() {
+        let manager = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(path("/report"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", other.uri()))
+            .expect(1)
+            .mount(&manager)
+            .await;
+
+        let response = manager_attestation_client()
+            .unwrap()
+            .get(format!("{}/report", manager.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        assert!(handle_manager_response(response, "attestation")
+            .await
+            .is_err());
+        assert!(other.received_requests().await.unwrap().is_empty());
+    }
 }

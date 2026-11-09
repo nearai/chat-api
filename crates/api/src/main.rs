@@ -480,6 +480,8 @@ async fn main() -> anyhow::Result<()> {
         std::time::Duration::from_secs(30),
     ));
 
+    tokio::spawn(api::session_cleanup::run(app_state.db_pool.clone()));
+
     // Create router with CORS support
     let app = create_router_with_cors(app_state, config.cors.clone());
 
