@@ -9,7 +9,7 @@ use uuid::Uuid;
 use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
 /// E2E test for complete Agent workflow:
-/// 1. Admin creates instance for user
+/// 1. Seed a provisioned instance for the user
 /// 2. User retrieves instance
 /// 3. User stops/starts instance (user-endpoints)
 /// 4. User creates API key
@@ -84,7 +84,7 @@ async fn test_agent_complete_workflow() {
         .map(|s| s.to_string())
         .expect("User should have id");
 
-    // 2. Admin creates instance directly in database (simulating successful Agent API call)
+    // 2. Seed an instance directly in the database (simulating successful owner provisioning)
     let instance_uuid = Uuid::new_v4();
     let instance_id_str = format!(
         "inst_test_{}",
