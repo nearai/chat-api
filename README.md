@@ -178,7 +178,7 @@ Reports include:
 ### Deployment
 
 - **Automatic TEE detection** via `dstack-sdk`
-- **VPC authentication** for secure key management (set `VPC_SHARED_SECRET_FILE`)
+- **Cloud API authentication** uses cached credentials with `OPENAI_API_KEY` fallback; VPC login is removed ([details](docs/cloud-api-authentication.md))
 - **Reproducible builds** required for attestation verification
 - **Development mode**: `DEV=true` returns mock attestation data
 - **Production mode**: `DEV=false` requires TEE execution and generates real attestation reports
