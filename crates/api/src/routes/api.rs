@@ -4459,6 +4459,7 @@ async fn proxy_image_generations(
     };
 
     enforce_model_access(&state, &user, &image_request_model).await?;
+    get_model_settings_with_cache(&state, &image_request_model, user.user_id).await?;
 
     let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
         .expect("usize to string conversion always produces valid HeaderValue");
@@ -4740,6 +4741,7 @@ async fn proxy_image_edits(
     };
 
     enforce_model_access(&state, &user, &request_model).await?;
+    get_model_settings_with_cache(&state, &request_model, user.user_id).await?;
 
     let proxy_response = state
         .proxy_service
