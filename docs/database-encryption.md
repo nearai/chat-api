@@ -23,6 +23,20 @@ versions. Invalidate pending states containing plaintext verifiers at cutover
 and require those logins to restart, so old plaintext verifiers do not remain in
 the live table.
 
+`app_config.value` (including the cached Cloud API key) uses the existing
+`DB_ENCRYPTION_WRITE_ENABLED` setting for writes, plaintext read-repair, and
+execute-mode backfills. Encrypted values remain readable when writes are disabled.
+Backfill and verify the `app_config` scope after enabling writes. The stable AAD
+row ID is the first 128 bits of SHA-256 of the immutable config key.
+
+Deploy encryption-capable app-config readers on every API replica and worker
+before any new-version process runs with the global write setting enabled. If
+global encryption is already enabled, use a coordinated replacement that drains
+old processes before starting the new version; a mixed-version rolling deploy
+can expose encrypted credentials to old plaintext-only readers. Keep the global
+setting enabled for other confidential fields. Rollback after encrypted writes
+begin must retain encryption-capable readers and the required read keys.
+
 Agent provisioning secrets have a separate rollout gate,
 `DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED`, also defaulting to `false`. While
 this gate is disabled, these three fields continue to use legacy app-key
@@ -104,6 +118,7 @@ boundary or be destroyed under the backup-retention policy.
 
 ## Registered confidential fields
 
+- `app_config.value`
 - `files.filename`
 - `conversation_share_groups.name`
 - `conversation_share_group_members.member_value`

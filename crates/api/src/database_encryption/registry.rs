@@ -112,6 +112,14 @@ pub(super) const FIELDS: &[Field] = &[
         reason: "Agent recovery credential",
         token: None,
     },
+    Field {
+        table: "app_config",
+        column: "value",
+        id_column: "key",
+        kind: Kind::Text,
+        reason: "Application configuration including the VPC API credential",
+        token: None,
+    },
 ];
 
 pub(super) const APPROVED: &[(&str, &str, &str)] = &[
@@ -377,11 +385,6 @@ pub(super) const REVIEWED_PLAINTEXT_FIELDS: &[(&str, &str, &str)] = &[
         "Public PKCE challenge derived from a browser-held verifier",
     ),
     ("user_settings", "content", "Arbitrary user settings JSON"),
-    (
-        "app_config",
-        "value",
-        "Application configuration may contain secrets",
-    ),
     ("user_bans", "reason", "Free-form account enforcement data"),
     (
         "models",

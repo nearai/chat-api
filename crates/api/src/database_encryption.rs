@@ -160,6 +160,9 @@ fn row_id_expression(field: &Field, qualifier: Option<&str>) -> String {
         format!(
             "CASE WHEN {id} ~* '^file-[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$' THEN substring({id} from 6)::uuid END"
         )
+    } else if field.table == "app_config" {
+        // Match app_config_encryption_id: first 128 bits of SHA-256(key).
+        format!("substr(encode(sha256(convert_to({prefix}key, 'UTF8')), 'hex'), 1, 32)::uuid")
     } else {
         format!("{prefix}{}", field.id_column)
     }
