@@ -125,4 +125,37 @@ mod tests {
             assert_eq!(response.status(), if i < PER_IP_LIMIT { 200 } else { 429 });
         }
     }
+    #[tokio::test]
+    async fn appending_ingress_does_not_trust_a_forged_xff_prefix() {
+        use tower::ServiceExt;
+        // Both supported forwarding header forms use the same trusted-hop count.
+        for header in ["x-forwarded-for", "forwarded"] {
+            let app = axum::Router::new()
+                .route("/google", axum::routing::get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn_with_state(
+                    OAuthInitiationLimit::new(1),
+                    limit_oauth_initiation,
+                ));
+            for i in 0..=PER_IP_LIMIT {
+                let value = if header == "forwarded" {
+                    format!("for=198.51.100.{i}, for=203.0.113.10")
+                } else {
+                    format!("198.51.100.{i}, 203.0.113.10")
+                };
+                let response = app
+                    .clone()
+                    .oneshot(
+                        http::Request::builder()
+                            .uri("/google")
+                            .header(header, value)
+                            .extension(ConnectInfo("10.0.0.1:1234".parse::<SocketAddr>().unwrap()))
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), if i < PER_IP_LIMIT { 200 } else { 429 });
+            }
+        }
+    }
 }

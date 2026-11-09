@@ -325,6 +325,11 @@ pub(super) const APPROVED: &[(&str, &str, &str)] = &[
 // requirement.
 pub(super) const REVIEWED_PLAINTEXT_FIELDS: &[(&str, &str, &str)] = &[
     (
+        "browser_sessions",
+        "origin",
+        "Exact operator-allowlisted frontend origin used to bind refresh credentials; no user content or credential material",
+    ),
+    (
         "users",
         "email",
         "PII and equality lookup; encrypt with keyed token",
@@ -496,6 +501,9 @@ pub(super) const REVIEWED_PLAINTEXT_FIELDS: &[(&str, &str, &str)] = &[
 ];
 
 pub(super) const APPROVED_TEXT_FIELDS: &[(&str, &str)] = &[
+    ("browser_sessions", "client"),
+    ("browser_access_tokens", "token_hash"),
+    ("browser_refresh_tokens", "token_hash"),
     ("agent_api_keys", "key_hash"),
     ("agent_instances", "type"),
     ("agent_instances", "status"),
@@ -556,6 +564,9 @@ pub(super) const STRUCTURAL_TYPES: &[&str] = &[
 ];
 
 pub(super) const CLASSIFIED_TABLES: &[&str] = &[
+    "browser_sessions",
+    "browser_access_tokens",
+    "browser_refresh_tokens",
     "agent_api_keys",
     "agent_balance",
     "agent_instance_status_history",
