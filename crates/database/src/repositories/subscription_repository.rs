@@ -168,7 +168,7 @@ impl PostgresSubscriptionRepository {
                 ],
             )
             .await
-            .map_err(|e| {
+            .inspect_err(|e| {
                 if let Some(db_err) = e.as_db_error() {
                     tracing::debug!(
                         severity = db_err.severity(),
@@ -176,9 +176,8 @@ impl PostgresSubscriptionRepository {
                         "upsert_subscription database error"
                     );
                 } else {
-                    tracing::debug!("upsert_subscription non-DB error: {:?}", error_type(&e));
+                    tracing::debug!("upsert_subscription non-DB error: {:?}", error_type(e));
                 }
-                e
             })?;
 
         Ok(row_to_subscription(&row))

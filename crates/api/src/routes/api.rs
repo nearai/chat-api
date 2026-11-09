@@ -3650,12 +3650,11 @@ async fn get_system_configs_cached(
         .system_configs_service
         .get_configs()
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             tracing::warn!(
                 "Failed to load system configs, using defaults: {e_type}",
-                e_type = error_type(&e)
+                e_type = error_type(e)
             );
-            e
         })
         .ok()
         .flatten();

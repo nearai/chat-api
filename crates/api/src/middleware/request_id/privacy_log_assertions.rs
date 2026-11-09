@@ -260,6 +260,7 @@ fn assert_no_credentials_or_errors(path: &str, body: &str, code: &str) {
     ] {
         let safe_calls_removed = code
             .replace(&format!("error_type(&{identifier})"), "SAFE_ERROR_TYPE")
+            .replace(&format!("error_type({identifier})"), "SAFE_ERROR_TYPE")
             .replace(
                 &format!("std::mem::discriminant(&{identifier})"),
                 "SAFE_ERROR_CATEGORY",

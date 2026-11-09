@@ -1278,13 +1278,12 @@ async fn save_passkey_instance_from_event(
             service_type: final_service_type,
         })
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             tracing::error!(
                 "Database save failed for passkey instance: user_id={}, error_type={}",
                 user_id,
-                error_type(&e)
+                error_type(e)
             );
-            e
         })?;
 
     // Defense-in-depth: verify the created instance belongs to the requesting user
