@@ -12,7 +12,7 @@ use support::{
 use uuid::Uuid;
 
 #[tokio::test]
-async fn request_id_contract_reuses_valid_inbound_id_on_success_and_static_fallback() {
+async fn request_id_contract_reuses_valid_inbound_id_on_health_and_frontend_404s() {
     let server = create_request_id_test_server().await;
     let inbound = Uuid::new_v4().to_string();
 
@@ -31,20 +31,17 @@ async fn request_id_contract_reuses_valid_inbound_id_on_success_and_static_fallb
         inbound
     );
 
-    let fallback_response = server
-        .get("/definitely-not-a-real-static-file")
-        .add_header(
-            REQUEST_ID.clone(),
-            HeaderValue::from_str(&inbound).expect("uuid header is valid"),
-        )
-        .await;
-    let fallback_request_id = header_value(&fallback_response, &REQUEST_ID);
-    assert_eq!(fallback_request_id, inbound);
-    println!(
-        "request_id_contract static fallback status={} x-request-id={}",
-        fallback_response.status_code(),
-        fallback_request_id
-    );
+    for path in ["/", "/c/example", "/index.html", "/assets/app.js"] {
+        let fallback_response = server
+            .get(path)
+            .add_header(
+                REQUEST_ID.clone(),
+                HeaderValue::from_str(&inbound).expect("uuid header is valid"),
+            )
+            .await;
+        assert_eq!(fallback_response.status_code(), 404, "GET {path}");
+        assert_eq!(header_value(&fallback_response, &REQUEST_ID), inbound);
+    }
 }
 
 #[tokio::test]
