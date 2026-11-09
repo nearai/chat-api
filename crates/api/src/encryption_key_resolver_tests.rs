@@ -25,7 +25,6 @@ fn config(raw: Option<String>) -> DatabaseEncryptionConfig {
         keys: raw,
         write_enabled: true,
         agent_secrets_write_enabled: false,
-        app_config_write_enabled: false,
     }
 }
 
@@ -52,7 +51,6 @@ async fn resolves_ordered_sources_and_preserves_write_gates() {
     assert_eq!(*fake.calls.lock().unwrap(), ["db/old"]);
     assert!(resolved.write_enabled);
     assert!(!resolved.agent_secrets_write_enabled);
-    assert!(!resolved.app_config_write_enabled);
 }
 
 #[tokio::test]

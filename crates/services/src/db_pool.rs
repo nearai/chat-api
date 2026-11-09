@@ -26,8 +26,6 @@ pub struct FieldEncryptionConfig {
     pub write_enabled: bool,
     /// Separate rollout gate for fields previously encrypted by the dstack app key.
     pub agent_secrets_write_enabled: bool,
-    /// Enable only after all app-config readers support encrypted values.
-    pub app_config_write_enabled: bool,
 }
 
 impl FieldEncryptionConfig {
@@ -144,7 +142,6 @@ mod tests {
             .unwrap(),
             write_enabled: false,
             agent_secrets_write_enabled: true,
-            app_config_write_enabled: false,
         });
         let config = clone.field_encryption().unwrap();
         assert_eq!(config.ring().ids(), ["new", "old"]);

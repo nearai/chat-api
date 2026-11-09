@@ -245,7 +245,6 @@ pub async fn create_test_server_with_state(
             .expect("valid test encryption ring"),
             write_enabled: config.database_encryption.write_enabled,
             agent_secrets_write_enabled: config.database_encryption.agent_secrets_write_enabled,
-            app_config_write_enabled: config.database_encryption.app_config_write_enabled,
         });
     if let Some(encryption) = test_config.field_encryption {
         db.pool().set_field_encryption(encryption);
