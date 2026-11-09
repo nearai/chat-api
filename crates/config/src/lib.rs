@@ -1065,6 +1065,13 @@ impl Default for DatabaseEncryptionConfig {
     }
 }
 
+/// Enable only after browser clients and other session consumers have migrated.
+/// Also caps already-issued legacy credentials; disabling is not a safe rollback
+/// after a security cutoff because those credentials would become valid again.
+pub fn enforce_short_sessions() -> bool {
+    std::env::var("SESSION_ENFORCE_SHORT_TOKENS").as_deref() == Ok("true")
+}
+
 #[cfg(test)]
 mod encryption_config_tests;
 

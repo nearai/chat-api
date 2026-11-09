@@ -129,6 +129,7 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
             Method::POST,
             "/v1/admin/agents/instances".to_string(),
             json!({ "user_id": user_id, "name": "removed-admin-instance" }),
+            // GET remains registered at this path; only POST is retired.
             StatusCode::METHOD_NOT_ALLOWED,
         ),
         (
@@ -167,8 +168,7 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
         ),
     ];
 
-    // Removed paths use the API's 404 fallback. Only instance creation shares
-    // a retained GET route, so its unsupported POST method returns 405.
+    // Fully removed paths use the API's 404 fallback, not the former SPA fallback.
     for (operation, method, path, body, expected_status) in requests {
         let response = server
             .method(method.clone(), &path)

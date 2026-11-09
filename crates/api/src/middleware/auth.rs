@@ -161,7 +161,7 @@ async fn authenticate_session_by_token(
 
     // Check if session is expired
     let now = Utc::now();
-    if session.expires_at < now {
+    if session.expires_at <= now {
         let time_expired = now.signed_duration_since(session.expires_at);
         tracing::warn!(
             "Session expired: session_id={}, expired {} seconds ago",
@@ -240,7 +240,7 @@ fn extract_email_domain(email: &str) -> Option<String> {
 }
 
 /// Check if email domain is in the allowed admin domains list
-fn is_admin_domain(email: &str, admin_domains: &[String]) -> bool {
+pub(crate) fn is_admin_domain(email: &str, admin_domains: &[String]) -> bool {
     if admin_domains.is_empty() {
         tracing::warn!("Admin domains list is empty, denying access");
         return false;
@@ -257,7 +257,7 @@ fn is_admin_domain(email: &str, admin_domains: &[String]) -> bool {
 /// Check whether email is in the explicit admin email allowlist.
 ///
 /// An empty allowlist grants no admin access.
-fn is_admin_email(email: &str, admin_emails: &[String]) -> bool {
+pub(crate) fn is_admin_email(email: &str, admin_emails: &[String]) -> bool {
     if admin_emails.is_empty() {
         static WARNED_EMPTY_ADMIN_EMAILS: OnceLock<()> = OnceLock::new();
         WARNED_EMPTY_ADMIN_EMAILS.get_or_init(|| {
@@ -383,6 +383,22 @@ pub async fn admin_auth_middleware(
             );
             err.into_response()
         })?;
+    let session_client = state
+        .session_repository
+        .browser_session_client(authenticated_user.session_id)
+        .await
+        .map_err(|_| {
+            ApiError::internal_server_error("Failed to verify session type").into_response()
+        })?;
+
+    // New browser sessions are isolated immediately. Legacy access is removed
+    // at the coordinated cutoff, including credentials issued before deployment.
+    if (config::enforce_short_sessions() || session_client.is_some())
+        && session_client.as_deref() != Some("admin")
+    {
+        return Err(ApiError::forbidden("An admin browser session is required").into_response());
+    }
+
     ensure_account_not_deleting(&state, authenticated_user.user_id, false)
         .await
         .map_err(|e| e.into_response())?;
