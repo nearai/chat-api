@@ -36,10 +36,15 @@ impl SessionRepository for PostgresSessionRepository {
         let client = self.pool.get().await?;
 
         let created_at = Utc::now();
-        // Sessions expire after 30 days
-        let expires_at = created_at + Duration::days(30);
+        // During rollout, legacy consumers retain their existing lifetime.
+        let expires_at = created_at
+            + if config::enforce_short_sessions() {
+                Duration::minutes(15)
+            } else {
+                Duration::days(30)
+            };
 
-        tracing::debug!("Session expiry set to: {} (30 days from now)", expires_at);
+        tracing::debug!("Session expiry set to: {}", expires_at);
 
         // Generate token and hash it
         let token = generate_session_token();
@@ -87,10 +92,19 @@ impl SessionRepository for PostgresSessionRepository {
 
         let row = client
             .query_opt(
-                "SELECT id, user_id, created_at, expires_at 
-                 FROM sessions 
-                 WHERE token_hash = $1",
-                &[&token_hash],
+                "SELECT s.id, s.user_id, s.created_at,
+                        CASE WHEN $2 THEN LEAST(s.expires_at, s.created_at + INTERVAL '15 minutes')
+                             ELSE s.expires_at END AS expires_at
+                 FROM sessions s
+                 WHERE s.token_hash = $1
+                 UNION ALL
+                 SELECT s.id, s.user_id, s.created_at,
+                        LEAST(a.expires_at, s.expires_at, b.idle_expires_at)
+                 FROM browser_access_tokens a
+                 JOIN sessions s ON s.id = a.session_id
+                 JOIN browser_sessions b ON b.session_id = s.id
+                 WHERE a.token_hash = $1",
+                &[&token_hash, &config::enforce_short_sessions()],
             )
             .await?;
 
@@ -151,6 +165,25 @@ impl SessionRepository for PostgresSessionRepository {
         }
 
         Ok(result)
+    }
+
+    async fn browser_session_client(
+        &self,
+        session_id: SessionId,
+    ) -> anyhow::Result<Option<String>> {
+        let client = self.pool.get().await?;
+        // A missing root is an authentication failure, not a legacy session.
+        // query_one fails closed if logout/replay deleted it after token lookup.
+        let row = client
+            .query_one(
+                "SELECT b.client FROM sessions s
+                 LEFT JOIN browser_sessions b ON b.session_id = s.id
+                 WHERE s.id = $1",
+                &[&session_id],
+            )
+            .await?;
+
+        Ok(row.get(0))
     }
 
     async fn delete_session(&self, session_id: SessionId) -> anyhow::Result<()> {
