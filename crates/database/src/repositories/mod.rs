@@ -3,6 +3,7 @@ pub mod aml_report_repository;
 pub mod analytics_repository;
 pub mod app_config_repository;
 pub mod bi_metrics_repository;
+pub mod browser_session_repository;
 pub mod conversation_repository;
 pub mod conversation_share_repository;
 pub mod credits_repository;

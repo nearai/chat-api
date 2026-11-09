@@ -21,6 +21,7 @@ pub(super) fn create_cors_layer(cors_config: config::CorsConfig) -> CorsLayer {
             Method::OPTIONS,
         ])
         .allow_headers([
+            HeaderName::from_static("x-session-client"),
             AUTHORIZATION,
             CONTENT_TYPE,
             ACCEPT,

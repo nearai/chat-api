@@ -123,7 +123,25 @@ async fn job(server: &axum_test::TestServer, token: &str, action: &str) {
 #[tokio::test]
 #[serial_test::serial]
 async fn registry_backfill_and_key_rotation_preserve_config_reads() {
+    // This test rewraps every app_config row with a test-only key. It must
+    // never use the shared database used by other integration tests.
+    let config = config::Config::from_env().database;
+    let control = database::Database::from_config(&config).await.unwrap();
+    let database_name = format!("app_config_rotation_{}", Uuid::new_v4().simple());
+    control
+        .pool()
+        .get()
+        .await
+        .unwrap()
+        .batch_execute(&format!("CREATE DATABASE {database_name}"))
+        .await
+        .unwrap();
+    let _cleanup = DatabaseCleanup {
+        database_name: database_name.clone(),
+        config,
+    };
     let (server, db) = create_test_server_and_db(TestServerConfig {
+        database_name: Some(database_name),
         database_encryption_write_enabled: Some(true),
         ..Default::default()
     })
@@ -241,4 +259,38 @@ async fn separate_rollout_gate_preserves_plaintext_and_blocks_backfill() {
         Some("legacy-reader-compatible")
     );
     repo.delete(&key).await.unwrap();
+}
+
+struct DatabaseCleanup {
+    database_name: String,
+    config: config::DatabaseConfig,
+}
+
+impl Drop for DatabaseCleanup {
+    fn drop(&mut self) {
+        let database_name = self.database_name.clone();
+        let config = self.config.clone();
+        // A fresh runtime/connection avoids waiting on tasks owned by the test's
+        // current-thread runtime while it is unwinding or dropping the fixture.
+        let cleanup = std::thread::spawn(move || -> anyhow::Result<()> {
+            tokio::runtime::Runtime::new()?.block_on(async move {
+                let control = database::Database::from_config(&config).await?;
+                control
+                    .pool()
+                    .get()
+                    .await?
+                    .batch_execute(&format!("DROP DATABASE {database_name} WITH (FORCE)"))
+                    .await?;
+                Ok(())
+            })
+        })
+        .join();
+        if !matches!(cleanup, Ok(Ok(()))) {
+            if std::thread::panicking() {
+                eprintln!("isolated app-config database cleanup failed during unwinding");
+            } else {
+                panic!("isolated app-config database cleanup failed");
+            }
+        }
+    }
 }
