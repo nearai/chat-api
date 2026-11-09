@@ -98,18 +98,22 @@ impl OAuthRepository for PostgresOAuthRepository {
 
         let client = self.pool.get().await?;
 
-        // Bound cleanup work per login; the created_at index makes this cheap
-        // when there are no expired rows. Repeated logins drain any old backlog.
-        client
+        // Cleanup is bounded and does not wait for concurrent cleanup batches.
+        // TTL enforcement at consumption is independent of cleanup success.
+        if client
             .execute(
                 "DELETE FROM oauth_states WHERE state IN (
                 SELECT state FROM oauth_states
                 WHERE created_at <= NOW() - INTERVAL '10 minutes'
-                ORDER BY created_at LIMIT 1000
+                ORDER BY created_at LIMIT 1000 FOR UPDATE SKIP LOCKED
             )",
                 &[],
             )
-            .await?;
+            .await
+            .is_err()
+        {
+            tracing::warn!("Failed to clean up expired OAuth states");
+        }
 
         let id = Uuid::new_v4();
         let provider_code_verifier = state

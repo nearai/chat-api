@@ -20,6 +20,7 @@ fn state(age: Duration) -> OAuthState {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn oauth_state_is_one_time_and_expired_state_is_deleted_but_not_returned() {
     let (_, db) = common::create_test_server_and_db(Default::default()).await;
     let repo = db.oauth_repository();
@@ -59,6 +60,7 @@ async fn oauth_state_is_one_time_and_expired_state_is_deleted_but_not_returned()
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn starting_login_cleans_up_abandoned_expired_states() {
     let (_, db) = common::create_test_server_and_db(Default::default()).await;
     let repo = db.oauth_repository();
@@ -86,6 +88,7 @@ async fn starting_login_cleans_up_abandoned_expired_states() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn oversized_urls_are_rejected_before_state_insertion_for_both_providers() {
     let (server, db) = common::create_test_server_and_db(Default::default()).await;
     let client = db.pool().get().await.unwrap();
@@ -123,6 +126,7 @@ async fn oversized_urls_are_rejected_before_state_insertion_for_both_providers()
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn google_and_github_share_an_initiation_limit() {
     let (server, _) = common::create_test_server_and_db(Default::default()).await;
     // Invalid attempts are also limited and never insert state rows.
@@ -143,4 +147,40 @@ async fn google_and_github_share_an_initiation_limit() {
         .await;
     assert_eq!(response.status_code(), 429);
     assert_eq!(response.header(http::header::RETRY_AFTER), "60");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn cleanup_skips_rows_locked_by_another_request() {
+    let (_, db) = common::create_test_server_and_db(Default::default()).await;
+    let repo = db.oauth_repository();
+    let expired = state(Duration::days(1));
+    repo.store_oauth_state(&expired).await.unwrap();
+    let mut client = db.pool().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.query_one(
+        "SELECT state FROM oauth_states WHERE state=$1 FOR UPDATE",
+        &[&expired.state],
+    )
+    .await
+    .unwrap();
+    let recent = state(Duration::zero());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        repo.store_oauth_state(&recent),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert!(repo
+        .consume_oauth_state(&expired.state)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repo
+        .consume_oauth_state(&recent.state)
+        .await
+        .unwrap()
+        .is_some());
 }

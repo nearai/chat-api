@@ -477,7 +477,7 @@ pub(super) fn extract_client_ip(
         x_forwarded_for_len = x_forwarded_for.map(str::len).unwrap_or(0),
         x_real_ip_present = x_real_ip.is_some(),
         forwarded_present = forwarded.is_some(),
-        "Resolved client IP for email auth request"
+        "Resolved client IP for authentication request"
     );
 
     resolved_ip.to_string()
