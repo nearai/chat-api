@@ -153,6 +153,10 @@ impl OpenAIProxyService for OpenAIProxy {
             tracing::error!(
                 %method,
                 error_type = error_type(&e),
+                is_timeout = e.is_timeout(),
+                is_connect = e.is_connect(),
+                is_builder = e.is_builder(),
+                status = e.status().map(|status| status.as_u16()),
                 "OpenAI API request failed"
             );
             ProxyError::ApiError(e.to_string())

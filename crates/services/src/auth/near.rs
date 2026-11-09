@@ -283,7 +283,10 @@ async fn verify_wallet_control(
         ),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Wallet verification timed out"))?
+    .map_err(|_| {
+        tracing::warn!(is_timeout = true, "NEP-413 verifier request timed out");
+        anyhow::anyhow!("Wallet verification timed out")
+    })?
     .map_err(|error| {
         tracing::warn!(error_category = ?std::mem::discriminant(&error), "NEP-413 verifier error");
         anyhow::anyhow!("Wallet verification unavailable")

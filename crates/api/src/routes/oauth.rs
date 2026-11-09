@@ -1450,11 +1450,10 @@ pub async fn mock_login(
             "google" => Some(OAuthProvider::Google),
             "github" => Some(OAuthProvider::Github),
             "near" => Some(OAuthProvider::Near),
-            other => {
+            _ => {
                 tracing::warn!(
-                    "Unknown oauth_provider '{}' in mock login for user_id={}; skipping link",
-                    error_type(&other),
-                    user.id
+                    user_id = %user.id,
+                    "Unknown oauth_provider in mock login; skipping link"
                 );
                 None
             }

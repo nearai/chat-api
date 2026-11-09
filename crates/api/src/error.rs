@@ -183,7 +183,7 @@ impl IntoResponse for ApiError {
 /// Convert from anyhow::Error for convenience in services
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
-        tracing::error!("Internal error: {:#}", error_type(&err));
+        tracing::error!(error_type = error_type(&err), "Internal error");
         Self::internal_server_error("An internal error occurred")
     }
 }

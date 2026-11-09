@@ -150,7 +150,7 @@ pub async fn delete_current_user(
 
         if let Err(e) = task_publisher.publish(message).await {
             tracing::error!(
-                "Failed to enqueue account deletion task, cleaning up request: user_id={}, deletion_id={}, error={:#}",
+                "Failed to enqueue account deletion task, cleaning up request: user_id={}, deletion_id={}, error={}",
                 user.user_id,
                 deletion.id,
                 error_type(&e)
@@ -212,7 +212,7 @@ fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
             ApiError::conflict(format!("Account deletion is already {status}"))
         }
         AccountDeletionError::Internal(err) => {
-            tracing::error!("Failed to delete account: {:#}", error_type(&err));
+            tracing::error!(error_type = error_type(&err), "Failed to delete account");
             ApiError::internal_server_error("Failed to delete account")
         }
     }

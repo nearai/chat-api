@@ -249,7 +249,7 @@ impl StripeClient {
             .get(format!("{STRIPE_API_BASE}{path}"))
             .header(AUTHORIZATION, format!("Bearer {}", self.secret_key))
             .query(query);
-        let response = request.send().await?;
+        let response = request.send().await.inspect_err(log_transport_error)?;
         decode_response(response).await
     }
 
@@ -268,9 +268,18 @@ impl StripeClient {
         if let Some(idempotency_key) = idempotency_key {
             request = request.header("Idempotency-Key", idempotency_key);
         }
-        let response = request.send().await?;
+        let response = request.send().await.inspect_err(log_transport_error)?;
         decode_response(response).await
     }
+}
+
+fn log_transport_error(error: &reqwest::Error) {
+    tracing::error!(
+        is_timeout = error.is_timeout(),
+        is_connect = error.is_connect(),
+        status = error.status().map(|status| status.as_u16()),
+        "Stripe API request failed"
+    );
 }
 
 fn encode_form(form: &[(&str, String)]) -> String {

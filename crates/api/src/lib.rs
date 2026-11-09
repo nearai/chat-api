@@ -218,6 +218,9 @@ mod logging_privacy_tests {
         assert!(captured.contains("Internal error"));
         assert!(captured.contains("OpenAI API request failed"));
         assert!(captured.contains("reqwest::error::Error"));
+        assert!(captured.contains("is_timeout=false"));
+        assert!(captured.contains("is_connect=false"));
+        assert!(captured.contains("is_builder=true"));
         assert!(!captured.contains("SENTINEL"), "{captured}");
         assert!(!captured.contains("invalid-host"), "{captured}");
     }

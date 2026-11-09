@@ -89,7 +89,14 @@ impl SessionRepository for PostgresSessionRepository {
                  WHERE token_hash = $1",
                 &[&token_hash],
             )
-            .await?;
+            .await
+            .inspect_err(|e| {
+                tracing::error!(
+                    sqlstate = e.code().map(|code| code.code()),
+                    is_closed = e.is_closed(),
+                    "Session lookup query failed"
+                );
+            })?;
 
         let result = row.map(|r| UserSession {
             session_id: r.get(0),
