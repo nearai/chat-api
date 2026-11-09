@@ -322,7 +322,7 @@ impl AgentServiceImpl {
         }
 
         // Create HTTP client with timeout to prevent connection pool exhaustion from hung upstream services.
-        // Default 30s for most calls; instance create uses per-request timeout (see call_agent_api_create).
+        // Default 30s for most calls; instance create uses per-request timeout (see call_agent_api_create_streaming).
         // Direct connections only: agent manager URLs are explicit endpoints; skipping system proxy avoids
         // misrouted loopback in tests and broken CONNECT for internal crabshack/compose hosts.
         let http_client = Client::builder()
@@ -810,147 +810,6 @@ impl AgentServiceImpl {
                 );
                 AgentApiKeyAuthError::Internal
             })
-    }
-
-    /// Call Agent API to create an instance on a specific manager
-    ///
-    /// # Security Note
-    /// This function receives a nearai_api_key credential that is passed to the Agent API
-    /// in the request body. This is a sensitive credential and MUST NOT be logged, stored,
-    /// or exposed in any error messages. Only the HTTP request/response status codes and headers
-    /// should be logged for debugging purposes, never the request/response body.
-    async fn call_agent_api_create(
-        &self,
-        manager: &AgentManager,
-        nearai_api_key: &str,
-        nearai_api_url: &str,
-        params: AgentApiCreateParams,
-        user_id: UserId,
-    ) -> anyhow::Result<serde_json::Value> {
-        // Get instance defaults from system configs
-        let configs = self.get_system_configs().await;
-        let instance_defaults = configs.instance_defaults.as_ref();
-        let default_cpus = instance_defaults
-            .and_then(|d| d.cpus.as_deref())
-            .unwrap_or("1");
-        let default_mem_limit = instance_defaults
-            .and_then(|d| d.mem_limit.as_deref())
-            .unwrap_or("4g");
-        let default_storage_size = instance_defaults
-            .and_then(|d| d.storage_size.as_deref())
-            .unwrap_or("10G");
-
-        let url = format!("{}/instances", manager.url);
-
-        let service_type = params
-            .service_type
-            .as_deref()
-            .unwrap_or(DEFAULT_AGENT_SERVICE_TYPE);
-        // Canonical type for DB and `get_image_for_*` match keys (`ironclaw`, `openclaw`).
-        let canonical_service_type = service_type.to_string();
-        let compose_api_service_type =
-            service_type_for_crabshack(&canonical_service_type, configs.agent_hosting.as_ref());
-
-        // Compose-api requires an image; optional latest versioned ref from manager allowlist.
-        let image_to_use = if let Some(img) = params.image {
-            Some(img)
-        } else {
-            Some(
-                self.resolve_worker_image_ref(
-                    manager,
-                    &canonical_service_type,
-                    configs.agent_hosting.as_ref(),
-                )
-                .await?,
-            )
-        };
-
-        let mut request_body = serde_json::json!({
-            "image": image_to_use,
-            "name": params.name,
-            "nearai_api_key": nearai_api_key,
-            "nearai_api_url": nearai_api_url,
-            "ssh_pubkey": params.ssh_pubkey,
-            "service_type": compose_api_service_type,
-            "user_id": user_id,
-        });
-
-        // Only include resource fields if they're explicitly set or available
-        // Use configured instance defaults when the caller did not specify them
-        let cpus = params.cpus.as_deref().or(Some(default_cpus));
-        if let Some(cpu) = cpus {
-            request_body["cpus"] = serde_json::json!(cpu);
-        }
-
-        let mem_limit = params.mem_limit.as_deref().or(Some(default_mem_limit));
-        if let Some(mem) = mem_limit {
-            request_body["mem_limit"] = serde_json::json!(mem);
-        }
-
-        let storage_size = params
-            .storage_size
-            .as_deref()
-            .or(Some(default_storage_size));
-        if let Some(storage) = storage_size {
-            request_body["storage_size"] = serde_json::json!(storage);
-        }
-
-        // Inject channel-relay config for IronClaw instances.
-        // CHANNEL_RELAY_SIGNING_SECRET is no longer passed: each IronClaw
-        // instance uses its own OPENCLAW_GATEWAY_TOKEN as the signing secret.
-        if service_type == "ironclaw" {
-            if let Some(ref relay_url) = self.channel_relay_url {
-                request_body["extra_env"] = serde_json::json!({
-                    "CHANNEL_RELAY_URL": relay_url,
-                    "CHANNEL_RELAY_API_KEY": nearai_api_key,
-                });
-            }
-        }
-
-        let response = self
-            .http_client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .bearer_auth(&manager.token)
-            .json(&request_body)
-            .timeout(std::time::Duration::from_secs(180)) // Instance creation can take 2-3 minutes
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to call Agent API: {}", e))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "(unable to read response)".to_string());
-            let error_body_len = error_body.len();
-            tracing::warn!(
-                "Agent API create instance failed: status={}, body_len={}",
-                status,
-                error_body_len
-            );
-            return Err(anyhow!("Agent API error: {}", status));
-        }
-
-        let body_text = response
-            .text()
-            .await
-            .map_err(|e| anyhow!("Failed to read Agent API response: {}", e))?;
-
-        // Parse Server-Sent Events (SSE) response format
-        // The response contains multiple "data: {...}" lines
-        // We extract the first event which contains the instance creation result
-        let first_event = body_text
-            .lines()
-            .find(|line| line.starts_with("data: "))
-            .and_then(|line| line.strip_prefix("data: "))
-            .ok_or_else(|| anyhow!("No data event found in Agent API response"))?;
-
-        let body = serde_json::from_str::<serde_json::Value>(first_event)
-            .map_err(|e| anyhow!("Failed to parse Agent API response: {}", e))?;
-
-        Ok(body)
     }
 
     /// Call Agent API to list instances on a specific manager
@@ -1514,155 +1373,6 @@ impl AgentService for AgentServiceImpl {
         offset: i64,
     ) -> anyhow::Result<(Vec<AgentInstance>, i64)> {
         self.repository.list_all_instances(limit, offset).await
-    }
-
-    async fn create_instance_from_agent_api(
-        &self,
-        user_id: UserId,
-        params: super::ports::InstanceCreationParams,
-    ) -> anyhow::Result<AgentInstance> {
-        tracing::info!("Creating instance from Agent API: user_id={}", user_id);
-
-        // Pick next manager with available capacity (round-robin, skipping full managers)
-        let manager = self.next_available_manager().await?;
-
-        // Create an unbound API key on behalf of the user; the agent will use it to authenticate to the chat-api.
-        let key_name = params
-            .name
-            .as_deref()
-            .map(|n| format!("instance-{}", n))
-            .unwrap_or_else(|| "instance".to_string());
-        let default_expiry = Some(Utc::now() + Duration::days(90));
-        let (api_key, plaintext_key) = self
-            .create_unbound_api_key(user_id, key_name, None, default_expiry)
-            .await?;
-
-        // Apply default service type if not provided
-        // Defense-in-depth: validate service type early to prevent invalid values reaching Agent API
-        if let Some(ref st) = &params.service_type {
-            if !is_valid_service_type(st) {
-                return Err(anyhow!(
-                    "Invalid service type '{}'. Valid types are: {}",
-                    st,
-                    VALID_SERVICE_TYPES.join(", ")
-                ));
-            }
-        }
-
-        let service_type_for_api = params
-            .service_type
-            .clone()
-            .or_else(|| Some(DEFAULT_AGENT_SERVICE_TYPE.to_string()));
-
-        // Call Agent API with our API key and the chat-api URL (agents reach us at nearai_api_url)
-        let response = self
-            .call_agent_api_create(
-                &manager,
-                &plaintext_key,
-                &self.nearai_api_url,
-                AgentApiCreateParams {
-                    image: params.image.clone(),
-                    name: params.name.clone(),
-                    ssh_pubkey: params.ssh_pubkey.clone(),
-                    service_type: service_type_for_api.clone(),
-                    cpus: params.cpus.clone(),
-                    mem_limit: params.mem_limit.clone(),
-                    storage_size: params.storage_size.clone(),
-                },
-                user_id,
-            )
-            .await?;
-
-        // Extract instance data from response
-        let instance_data = response
-            .get("instance")
-            .ok_or_else(|| anyhow!("Missing 'instance' in Agent API response"))?;
-
-        let instance_name = instance_data
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("Missing 'name' in Agent API instance data"))?
-            .to_string();
-
-        // Extract connection information from Agent API response
-        let instance_url = instance_data
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        // Validate instance_url scheme to prevent injection from a compromised Agent Manager
-        if let Some(ref url) = instance_url {
-            validate_agent_api_url(url, "instance_url")?;
-        }
-
-        let instance_token = instance_data
-            .get("token")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        // Reject empty instance_token if present (defense-in-depth)
-        if let Some(ref token) = instance_token {
-            if token.is_empty() {
-                anyhow::bail!("Invalid instance_token: must be non-empty");
-            }
-        }
-
-        let dashboard_url = instance_data
-            .get("dashboard_url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        // Validate dashboard_url scheme to prevent injection from a compromised Agent Manager
-        if let Some(ref url) = dashboard_url {
-            validate_agent_api_url(url, "dashboard_url")?;
-        }
-
-        // Generate a unique instance_id based on the Agent API name
-        let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
-
-        // Extract service_type from instance_data only if it's a valid value, fall back to default
-        let service_type_from_response = instance_data
-            .get("service_type")
-            .and_then(|v| v.as_str())
-            .filter(|s| is_valid_service_type(s))
-            .map(|s| s.to_string());
-        let final_service_type = service_type_from_response.or(service_type_for_api);
-
-        // Store in database with connection info and the manager URL that owns it
-        let instance = self
-            .repository
-            .create_instance(CreateInstanceParams {
-                user_id,
-                instance_id: instance_id.clone(),
-                name: instance_name,
-                public_ssh_key: params.ssh_pubkey,
-                instance_url,
-                instance_token,
-                dashboard_url,
-                agent_api_base_url: Some(manager.url.clone()),
-                service_type: final_service_type,
-            })
-            .await?;
-
-        // Bind the unbound API key to the new instance.
-        // If binding fails, the instance and key are already created — log for manual cleanup.
-        if let Err(e) = self
-            .bind_api_key_to_instance(api_key.id, instance.id, user_id)
-            .await
-        {
-            tracing::error!(
-                "Failed to bind API key to instance (manual cleanup may be needed): instance_id={}, api_key_id={}, error={}",
-                instance.id,
-                api_key.id,
-                e
-            );
-            return Err(e);
-        }
-
-        tracing::info!(
-            "Instance created from Agent API: instance_id={}, user_id={}",
-            instance.id,
-            user_id
-        );
-
-        Ok(instance)
     }
 
     async fn create_passkey_instance_streaming(
@@ -3200,57 +2910,6 @@ impl AgentService for AgentServiceImpl {
 
         tracing::info!(
             "API key bound successfully: api_key_id={}, instance_id={}",
-            api_key_id,
-            instance_id
-        );
-
-        Ok(updated_key)
-    }
-
-    async fn admin_bind_api_key_to_instance(
-        &self,
-        api_key_id: Uuid,
-        instance_id: Uuid,
-    ) -> anyhow::Result<AgentApiKey> {
-        tracing::info!(
-            "Admin: Binding API key to instance (no ownership check): api_key_id={}, instance_id={}",
-            api_key_id,
-            instance_id
-        );
-
-        // Verify key exists (no ownership check)
-        let api_key = self
-            .repository
-            .get_api_key_by_id(api_key_id)
-            .await?
-            .ok_or_else(|| anyhow!("API key not found"))?;
-
-        // Verify instance exists (no ownership check)
-        let _instance = self
-            .repository
-            .get_instance(instance_id)
-            .await?
-            .ok_or_else(|| anyhow!("Instance not found"))?;
-
-        // Verify key is unbound
-        if api_key.instance_id.is_some() {
-            return Err(anyhow!("API key is already bound to an instance"));
-        }
-
-        // Bind the key
-        self.repository
-            .bind_api_key_to_instance(api_key_id, instance_id)
-            .await?;
-
-        // Fetch and return updated key
-        let updated_key = self
-            .repository
-            .get_api_key_by_id(api_key_id)
-            .await?
-            .ok_or_else(|| anyhow!("Failed to fetch updated API key"))?;
-
-        tracing::info!(
-            "Admin: API key bound successfully: api_key_id={}, instance_id={}",
             api_key_id,
             instance_id
         );
@@ -5015,7 +4674,7 @@ mod tests {
 
             // Verify the API calls route correctly
             let result1 = svc
-                .call_agent_api_create(
+                .call_agent_api_create_streaming(
                     &mgr1,
                     "key1",
                     "https://nearai/v1",
@@ -5028,11 +4687,12 @@ mod tests {
                         mem_limit: None,
                         storage_size: None,
                     },
+                    AuthMethod::BearerToken(&mgr1.token),
                     UserId(Uuid::new_v4()),
                 )
                 .await;
             let result2 = svc
-                .call_agent_api_create(
+                .call_agent_api_create_streaming(
                     &mgr2,
                     "key2",
                     "https://nearai/v1",
@@ -5045,12 +4705,27 @@ mod tests {
                         mem_limit: None,
                         storage_size: None,
                     },
+                    AuthMethod::BearerToken(&mgr2.token),
                     UserId(Uuid::new_v4()),
                 )
                 .await;
 
-            assert!(result1.is_ok());
-            assert!(result2.is_ok());
+            let mut events1 = result1.expect("First manager should accept creation");
+            let mut events2 = result2.expect("Second manager should accept creation");
+
+            let event1 = events1
+                .recv()
+                .await
+                .expect("First manager should send an event")
+                .expect("First manager event should succeed");
+            let event2 = events2
+                .recv()
+                .await
+                .expect("Second manager should send an event")
+                .expect("Second manager event should succeed");
+
+            assert_eq!(event1, create_response);
+            assert_eq!(event2, create_response);
             // wiremock will verify expect(1) on each mock when servers drop
         }
 

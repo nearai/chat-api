@@ -12,8 +12,8 @@ use super::ports::{
     ResumeSubscriptionOutcome, StripeClientPort, StripeCreateCreditsCheckoutParams,
     StripeCreateSubscriptionCheckoutParams, StripeCustomerRepository, StripeSubscriptionSnapshot,
     StripeUpdateSubscriptionParams, Subscription, SubscriptionError, SubscriptionPlan,
-    SubscriptionReplacement, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
-    DEFAULT_MONTHLY_TOKEN_LIMIT, NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
+    SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
+    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
@@ -4228,140 +4228,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
     }
 
-    /// Admin only: Set subscription for a user directly (for testing/manual management).
-    async fn admin_set_subscription(
-        &self,
-        user_id: UserId,
-        provider: String,
-        plan: String,
-        current_period_end: chrono::DateTime<chrono::Utc>,
-    ) -> Result<SubscriptionWithPlan, SubscriptionError> {
-        tracing::info!(
-            "Admin: Setting subscription for user_id={}, provider={}, plan={}",
-            user_id,
-            provider,
-            plan
-        );
-
-        // Get available plans
-        let plans = self.get_plans_for_provider(&provider).await?;
-
-        let price_id = plans.get(&plan).ok_or_else(|| {
-            SubscriptionError::InvalidPlan(format!(
-                "Plan '{}' not found for provider '{}'",
-                plan, provider
-            ))
-        })?;
-
-        // Reuse existing admin_sub_ subscription if present, otherwise create new one
-        let existing = self
-            .subscription_repo
-            .get_user_subscriptions(user_id)
-            .await?;
-        let subscription_id = existing
-            .iter()
-            .find(|s| s.subscription_id.starts_with("admin_sub_"))
-            .map(|s| s.subscription_id.clone())
-            .unwrap_or_else(|| format!("admin_sub_{}", uuid::Uuid::new_v4()));
-
-        let provider_lc = provider.to_lowercase();
-        let customer_id = if provider_lc == "house-of-stake" {
-            let near = self.get_near_account_id(user_id).await?;
-            format!("near:{near}")
-        } else {
-            format!("admin_{}", user_id)
-        };
-
-        let subscription = Subscription {
-            subscription_id: subscription_id.clone(),
-            user_id,
-            provider: provider.clone(),
-            customer_id,
-            price_id: price_id.clone(),
-            status: "active".to_string(),
-            current_period_start: None,
-            current_period_end,
-            cancel_at_period_end: false,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            pending_downgrade_target_price_id: None,
-            pending_downgrade_from_price_id: None,
-            pending_downgrade_expected_period_end: None,
-            pending_downgrade_status: None,
-            pending_downgrade_updated_at: None,
-        };
-
-        // Upsert subscription in transaction
-        let mut client = self
-            .db_pool
-            .get()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-        let txn = client
-            .transaction()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        // Deactivate any existing active subscriptions so the user has only one active plan
-        self.subscription_repo
-            .deactivate_user_subscriptions(&txn, user_id)
-            .await?;
-
-        let result = self
-            .subscription_repo
-            .upsert_subscription(&txn, subscription)
-            .await?;
-
-        txn.commit()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        // Invalidate token limit cache
-        self.invalidate_credit_limit_cache(user_id).await;
-
-        // Plan name is just the plan key from the config
-        let plan_name = plan.clone();
-
-        Ok(SubscriptionWithPlan {
-            subscription_id: result.subscription_id,
-            user_id: user_id.to_string(),
-            provider: result.provider,
-            price_id: result.price_id,
-            plan: plan_name,
-            status: result.status,
-            current_period_end: result.current_period_end,
-            cancel_at_period_end: result.cancel_at_period_end,
-            created_at: result.created_at,
-            updated_at: result.updated_at,
-            pending_downgrade_plan: None,
-            pending_downgrade_status: None,
-            pending_downgrade_period_end: None,
-        })
-    }
-
-    /// Admin only: Cancel all subscriptions for a user.
-    async fn admin_cancel_user_subscriptions(
-        &self,
-        user_id: UserId,
-    ) -> Result<(), SubscriptionError> {
-        tracing::info!("Admin: Canceling all subscriptions for user_id={}", user_id);
-
-        let subscriptions = self
-            .subscription_repo
-            .get_user_subscriptions(user_id)
-            .await?;
-
-        for subscription in subscriptions {
-            self.subscription_repo
-                .delete_subscription(&subscription.subscription_id)
-                .await?;
-        }
-
-        self.invalidate_credit_limit_cache(user_id).await;
-
-        Ok(())
-    }
-
     async fn admin_list_subscriptions(
         &self,
         user_id: Option<UserId>,
@@ -4372,70 +4238,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .list_subscriptions(user_id, limit, offset)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
-    }
-
-    /// Admin-only raw subscription row override. This endpoint intentionally bypasses business
-    /// validation and relies on admin auth plus full before/after audit logging.
-    async fn admin_replace_subscription(
-        &self,
-        admin_user_id: UserId,
-        subscription_id: String,
-        replacement: SubscriptionReplacement,
-    ) -> Result<Subscription, SubscriptionError> {
-        tracing::info!(
-            "Admin replacing subscription row: admin_user_id={}, subscription_id={}",
-            admin_user_id,
-            subscription_id
-        );
-
-        let mut client = self
-            .db_pool
-            .get()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-        let txn = client
-            .transaction()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        let before = self
-            .subscription_repo
-            .get_subscription_for_update(&txn, &subscription_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
-            .ok_or(SubscriptionError::SubscriptionNotFound)?;
-
-        let after = self
-            .subscription_repo
-            .replace_subscription(&txn, &subscription_id, replacement)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
-            .ok_or(SubscriptionError::SubscriptionNotFound)?;
-
-        txn.commit()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        let before_json = serde_json::to_string(&before)
-            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
-        let after_json = serde_json::to_string(&after)
-            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
-
-        self.invalidate_credit_limit_cache(before.user_id).await;
-        if after.user_id != before.user_id {
-            self.invalidate_credit_limit_cache(after.user_id).await;
-        }
-
-        // Intentionally log full before/after row snapshots for this privileged repair endpoint.
-        tracing::warn!(
-            admin_user_id = %admin_user_id,
-            subscription_id = %subscription_id,
-            before = %before_json,
-            after = %after_json,
-            "Admin overrode subscription row"
-        );
-
-        Ok(after)
     }
 
     async fn create_credit_purchase_checkout(

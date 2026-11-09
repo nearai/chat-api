@@ -810,6 +810,7 @@ pub async fn verify_email_code(
     OptionalConnectInfo(peer_addr): OptionalConnectInfo<SocketAddr>,
     Json(request): Json<EmailVerifyCodeRequest>,
 ) -> Result<(HeaderMap, Json<crate::models::EmailAuthResponse>), ApiError> {
+    let browser_context = super::browser_session::login_context(&headers)?;
     let email = normalize_email_input(&request.email);
     validate_email(&email).map_err(ApiError::bad_request)?;
 
@@ -819,7 +820,7 @@ pub async fn verify_email_code(
         ));
     }
 
-    let result = app_state
+    let mut result = app_state
         .email_auth_service
         .verify_code(
             email,
@@ -866,6 +867,13 @@ pub async fn verify_email_code(
         tracing::warn!("Failed to record analytics for email auth: {}", err);
     }
 
+    let refresh_cookie = super::browser_session::establish(
+        &app_state,
+        browser_context.as_ref(),
+        &mut result.session,
+    )
+    .await?;
+
     let token = result
         .session
         .token
@@ -886,6 +894,7 @@ pub async fn verify_email_code(
 
     let mut response_headers = HeaderMap::new();
     try_add_gateway_cookie(&mut response_headers, gateway_cookie, "verify_email_code");
+    super::browser_session::append_cookie(&mut response_headers, refresh_cookie);
 
     Ok((
         response_headers,
@@ -1129,8 +1138,10 @@ pub async fn oauth_callback(
 )]
 pub async fn exchange_oauth_callback_code(
     State(app_state): State<AppState>,
+    request_headers: HeaderMap,
     Json(request): Json<OAuthCodeExchangeRequest>,
 ) -> Result<(HeaderMap, Json<NearAuthResponse>), ApiError> {
+    let browser_context = super::browser_session::login_context(&request_headers)?;
     if request.code.len() != 43 || !is_base64url(&request.code) {
         return Err(ApiError::bad_request("Invalid OAuth callback code"));
     }
@@ -1138,7 +1149,7 @@ pub async fn exchange_oauth_callback_code(
         return Err(ApiError::bad_request("Invalid PKCE code_verifier"));
     }
 
-    let exchanged = app_state
+    let mut exchanged = app_state
         .oauth_service
         .exchange_frontend_callback_code(request.code, request.code_verifier)
         .await
@@ -1151,6 +1162,13 @@ pub async fn exchange_oauth_callback_code(
                 ApiError::internal_server_error("Failed to exchange OAuth callback code")
             }
         })?;
+
+    let refresh_cookie = super::browser_session::establish(
+        &app_state,
+        browser_context.as_ref(),
+        &mut exchanged.session,
+    )
+    .await?;
 
     let token = exchanged.session.token.ok_or_else(|| {
         tracing::error!(
@@ -1204,6 +1222,7 @@ pub async fn exchange_oauth_callback_code(
 
     let mut headers = HeaderMap::new();
     headers.insert(axum::http::header::SET_COOKIE, gateway_cookie);
+    super::browser_session::append_cookie(&mut headers, refresh_cookie);
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok((
         headers,
@@ -1517,8 +1536,10 @@ pub async fn mock_login(
 )]
 pub async fn near_auth(
     State(app_state): State<AppState>,
+    request_headers: HeaderMap,
     Json(request): Json<NearAuthRequest>,
 ) -> Result<(HeaderMap, Json<NearAuthResponse>), ApiError> {
+    let browser_context = super::browser_session::login_context(&request_headers)?;
     tracing::info!(
         "NEAR authentication request for account: {}",
         request.signed_message.account_id
@@ -1535,7 +1556,7 @@ pub async fn near_auth(
         .try_into()
         .map_err(|e| ApiError::bad_request(format!("{}", e)))?;
 
-    let (session, is_new_user) = app_state
+    let (mut session, is_new_user) = app_state
         .oauth_service
         .authenticate_near(signed_message, payload)
         .await
@@ -1582,6 +1603,10 @@ pub async fn near_auth(
         tracing::warn!("Failed to record analytics for NEAR auth: {}", e);
     }
 
+    let refresh_cookie =
+        super::browser_session::establish(&app_state, browser_context.as_ref(), &mut session)
+            .await?;
+
     let token = session.token.ok_or_else(|| {
         tracing::error!(
             "Session token not returned from service for session_id: {}",
@@ -1614,6 +1639,7 @@ pub async fn near_auth(
 
     let mut response_headers = HeaderMap::new();
     try_add_gateway_cookie(&mut response_headers, gateway_cookie, "near_auth");
+    super::browser_session::append_cookie(&mut response_headers, refresh_cookie);
 
     Ok((
         response_headers,

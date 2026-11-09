@@ -12,7 +12,7 @@ use axum::{
     extract::{Extension, Path, Request, State},
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{any, delete, get, patch, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use bytes::Bytes;
@@ -95,123 +95,24 @@ mod openapi_errors {
 use openapi_errors::*;
 use openapi_tags::*;
 
-/// Create read routes that preserve the existing optional-auth sharing contract.
-///
-/// Authenticated callers retain their owner/share/public access checks, while
-/// unauthenticated callers may read only publicly shared Conversations.
-pub fn create_optional_auth_router() -> Router<crate::state::AppState> {
-    Router::new()
-        .route("/v1/conversations/{conversation_id}", get(get_conversation))
-        .route(
-            "/v1/conversations/{conversation_id}/items",
-            get(list_conversation_items),
-        )
-}
+/// Reserve retired namespaces so old clients receive 410 instead of SPA HTML.
+/// No authentication or upstream access is needed to return this public notice.
+fn create_retired_stateful_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
+    let mut router = Router::new();
 
-/// Create the Stage I stateful API surface.
-///
-/// Existing Conversation, File, and sharing read views remain available
-/// temporarily for private-chat export, along with four established DELETE
-/// operations. Other stateful mutations return the migration response. This
-/// router keeps that response scoped to the legacy stateful namespaces, so
-/// unsupported methods and descendants cannot fall through to unrelated app
-/// routes.
-fn create_stage_one_stateful_router() -> Router<crate::state::AppState> {
-    let conversations_router = Router::new()
-        .route(
-            "/",
-            get(list_conversations)
-                .post(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        // `batch` is internal to the Chat API list implementation. Never
-        // expose it as a public conversation ID or endpoint.
-        .route("/batch", any(retired_stateful_api))
-        .route(
-            "/{conversation_id}",
-            post(retired_stateful_api)
-                .delete(delete_conversation)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/{conversation_id}/shares",
-            get(list_conversation_shares)
-                .post(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/{conversation_id}/shares/{share_id}",
-            delete(delete_conversation_share).fallback(retired_stateful_api),
-        )
-        .route(
-            "/{conversation_id}/items",
-            post(retired_stateful_api).fallback(retired_stateful_api),
-        )
-        .route(
-            "/{conversation_id}/pin",
-            post(retired_stateful_api)
-                .delete(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/{conversation_id}/archive",
-            post(retired_stateful_api)
-                .delete(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/{conversation_id}/clone",
-            post(retired_stateful_api).fallback(retired_stateful_api),
-        )
-        .fallback(retired_stateful_api);
+    for namespace in [
+        "/v1/conversations",
+        "/v1/files",
+        "/v1/share-groups",
+        "/v1/shared-with-me",
+    ] {
+        router = router
+            .route(namespace, any(retired_stateful_api))
+            .route(&format!("{namespace}/"), any(retired_stateful_api))
+            .route(&format!("{namespace}/{{*path}}"), any(retired_stateful_api));
+    }
 
-    let share_groups_router = Router::new()
-        .route(
-            "/",
-            get(list_share_groups)
-                .post(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/{group_id}",
-            patch(retired_stateful_api)
-                .delete(delete_share_group)
-                .fallback(retired_stateful_api),
-        )
-        .fallback(retired_stateful_api);
-
-    let files_router = Router::new()
-        .route(
-            "/",
-            get(list_files)
-                .post(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/{file_id}",
-            get(get_file)
-                .delete(delete_file)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/{file_id}/content",
-            get(get_file_content).fallback(retired_stateful_api),
-        )
-        .fallback(retired_stateful_api);
-
-    let shared_with_me_router = Router::new()
-        .route("/", get(list_shared_with_me).fallback(retired_stateful_api))
-        .fallback(retired_stateful_api);
-
-    Router::new()
-        .nest("/v1/conversations", conversations_router)
-        .route("/v1/conversations/", any(retired_stateful_api))
-        .nest("/v1/share-groups", share_groups_router)
-        .route("/v1/share-groups/", any(retired_stateful_api))
-        .nest("/v1/shared-with-me", shared_with_me_router)
-        .route("/v1/shared-with-me/", any(retired_stateful_api))
-        .nest("/v1/files", files_router)
-        .route("/v1/files/", any(retired_stateful_api))
+    router
 }
 
 /// Create the unified API router with all v1 proxy and API routes.
@@ -220,13 +121,10 @@ fn create_stage_one_stateful_router() -> Router<crate::state::AppState> {
 /// - Chat completions and images: dual auth + subscription + rate limited
 /// - Responses: dual auth + subscription + rate limited, always no-store
 /// - Model list, models, signature: dual auth only (not rate limited)
-/// - Temporary Conversation, File, and sharing read views plus established
-///   DELETE operations: their historical auth/ACL boundaries remain; all other
-///   mutations and unsupported legacy paths return 410
+/// - Retired Conversation, File, and sharing namespaces: 410 for every resource request
 pub fn create_api_router(
     rate_limit_state: crate::middleware::RateLimitState,
     dual_auth_state: crate::middleware::DualAuthState,
-    auth_state: crate::middleware::AuthState,
     subscription_state: crate::middleware::SubscriptionState,
 ) -> Router<crate::state::AppState> {
     // Dual auth + subscription + rate limited: chat completions and images
@@ -284,22 +182,12 @@ pub fn create_api_router(
                 crate::middleware::dual_auth_middleware,
             ));
 
-    // Temporary stateful views and established DELETE operations retain their
-    // existing session-auth boundary. Wrap the whole layer so reads, retained
-    // deletes, migration responses, and auth errors are never cached.
-    let session_auth_routes = create_stage_one_stateful_router()
-        .layer(axum::middleware::from_fn_with_state(
-            auth_state,
-            crate::middleware::auth_middleware,
-        ))
-        .layer(axum::middleware::map_response(force_no_store_response));
-
     Router::new()
         .merge(llm_proxy_router)
         .merge(responses_proxy_router)
         .merge(models_proxy_router)
         .merge(mcp_router)
-        .merge(session_auth_routes)
+        .merge(create_retired_stateful_router())
 }
 
 /// Type of resource to track in the response
@@ -317,13 +205,9 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-/// Message returned by every disabled Stage I stateful endpoint.
-///
-/// Temporary stateful read views remain available for the Stage I export
-/// window. Retired mutations and unsupported legacy paths return this clear
-/// migration signal rather than a proxy error from Cloud API.
+/// Message returned by retired Conversation, File, and sharing endpoints.
 pub const STATEFUL_API_RETIRED_MESSAGE: &str =
-    "This stateful API has been retired. For inference, use /v1/responses with store: false and include all context in each request. Documented migration/export read views remain temporarily available.";
+    "Conversation, file, and sharing APIs have been retired.";
 
 fn with_no_store_cache_control(mut response: Response) -> Response {
     response.headers_mut().insert(
@@ -352,10 +236,7 @@ pub(crate) async fn force_no_store_response(response: Response) -> Response {
     with_no_store_cache_control(response)
 }
 
-/// Return the stable migration response for a disabled Stage I stateful
-/// surface. This covers mutations, retired sharing reads, and unsupported
-/// paths within the scoped legacy namespaces; the route remains behind its
-/// existing authentication layer.
+/// Return a non-cacheable retirement notice without accessing user data.
 async fn retired_stateful_api() -> Response {
     with_no_store_cache_control(
         (
@@ -613,6 +494,7 @@ pub struct ValidatedListFilesParams {
     pub purpose: Option<String>,
 }
 
+#[allow(dead_code)] // Validation for retired endpoints.
 impl ListFilesParams {
     /// Validate query parameters and return normalized values (with defaults applied)
     fn validate(self) -> Result<ValidatedListFilesParams, (StatusCode, Json<ErrorResponse>)> {
@@ -664,6 +546,7 @@ pub struct ListConversationItemsParams {
     pub order: Option<String>,
 }
 
+#[allow(dead_code)] // Validation for retired endpoints.
 impl ListConversationItemsParams {
     fn validate(&self) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
         if let Some(limit) = self.limit {
@@ -951,6 +834,7 @@ async fn update_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn list_conversations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1010,6 +894,7 @@ async fn list_conversations(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn get_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<Option<AuthenticatedUser>>,
@@ -1057,6 +942,7 @@ async fn get_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn delete_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1234,6 +1120,7 @@ async fn create_conversation_share(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn list_conversation_shares(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1317,6 +1204,7 @@ async fn list_conversation_shares(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn delete_conversation_share(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1426,6 +1314,7 @@ async fn create_share_group(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn list_share_groups(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1583,6 +1472,7 @@ async fn update_share_group(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn delete_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1610,6 +1500,7 @@ pub struct SharedConversationInfo {
 }
 
 /// Maximum concurrent requests when fetching conversation details
+#[allow(dead_code)]
 const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
 
 /// List conversations shared with the authenticated user
@@ -1628,6 +1519,7 @@ const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn list_shared_with_me(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1846,6 +1738,7 @@ async fn create_conversation_items(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn list_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<Option<AuthenticatedUser>>,
@@ -2359,6 +2252,7 @@ async fn upload_file(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn list_files(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2429,6 +2323,7 @@ async fn list_files(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn get_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2485,6 +2380,7 @@ async fn get_file(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn delete_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2548,6 +2444,7 @@ async fn delete_file(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn get_file_content(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -5088,6 +4985,7 @@ async fn validate_user_conversation(
 ///
 /// Authenticated callers use their existing owner/share/public access checks;
 /// anonymous callers may access only a public share.
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn validate_conversation_access_optional_auth(
     state: &crate::state::AppState,
     user: Option<&AuthenticatedUser>,
@@ -5139,6 +5037,7 @@ async fn validate_user_or_public_conversation(
         .map_err(map_share_error)
 }
 
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn validate_owner_conversation(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -5183,6 +5082,7 @@ fn map_share_error(error: ConversationError) -> Response {
     (status, Json(ErrorResponse { error: message })).into_response()
 }
 
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn fetch_conversation_from_proxy(
     state: &crate::state::AppState,
     conversation_id: &str,
@@ -5245,6 +5145,7 @@ async fn fetch_conversation_from_proxy(
     Ok(conversation)
 }
 
+#[allow(dead_code)] // Legacy implementation; no public route.
 async fn validate_user_file(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -5689,7 +5590,7 @@ async fn collect_stream_to_bytes(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_stage_one_stateful_router, decompress_if_encoded, ensure_stream_usage_options,
+        create_retired_stateful_router, decompress_if_encoded, ensure_stream_usage_options,
         has_only_identity_content_encoding, normalize_stateless_response_body,
         validate_proxy_path_segment, validate_stateless_response_body, with_upstream_query,
         ListConversationItemsParams,
@@ -5785,10 +5686,10 @@ mod tests {
     }
 
     #[test]
-    fn stage_one_stateful_router_has_non_overlapping_scoped_fallbacks() {
+    fn retired_stateful_router_has_non_overlapping_scoped_fallbacks() {
         // Router construction catches overlapping nested and exact routes,
         // including the explicit trailing-slash namespace reservations.
-        let _router = create_stage_one_stateful_router();
+        let _router: axum::Router = create_retired_stateful_router();
     }
 
     fn gzip_encode(input: &[u8]) -> Vec<u8> {

@@ -73,24 +73,6 @@ pub struct Subscription {
     pub pending_downgrade_updated_at: Option<DateTime<Utc>>,
 }
 
-/// Admin repair payload for replacing one existing subscription row.
-#[derive(Debug, Clone)]
-pub struct SubscriptionReplacement {
-    pub user_id: UserId,
-    pub provider: String,
-    pub customer_id: String,
-    pub price_id: String,
-    pub status: String,
-    pub current_period_end: DateTime<Utc>,
-    pub cancel_at_period_end: bool,
-    pub created_at: DateTime<Utc>,
-    pub pending_downgrade_target_price_id: Option<String>,
-    pub pending_downgrade_from_price_id: Option<String>,
-    pub pending_downgrade_expected_period_end: Option<DateTime<Utc>>,
-    pub pending_downgrade_status: Option<DowngradeIntentStatus>,
-    pub pending_downgrade_updated_at: Option<DateTime<Utc>>,
-}
-
 /// API response model with plan name resolved from `price_id` (HoS clients use `price_id` + `provider` for wallet flows).
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -748,22 +730,11 @@ pub trait SubscriptionRepository: Send + Sync {
         offset: i64,
     ) -> anyhow::Result<(Vec<Subscription>, i64)>;
 
-    /// Delete a subscription record
-    async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()>;
-
     /// Delete a subscription row inside an existing transaction.
     async fn delete_subscription_txn(
         &self,
         txn: &tokio_postgres::Transaction<'_>,
         subscription_id: &str,
-    ) -> anyhow::Result<()>;
-
-    /// Deactivate all subscriptions for a user (set status = 'canceled').
-    /// Used when admin sets a new subscription to ensure only one active plan.
-    async fn deactivate_user_subscriptions(
-        &self,
-        txn: &tokio_postgres::Transaction<'_>,
-        user_id: UserId,
     ) -> anyhow::Result<()>;
 
     /// Fetch a pending-downgrade row with row lock.
@@ -782,23 +753,6 @@ pub trait SubscriptionRepository: Send + Sync {
         txn: &tokio_postgres::Transaction<'_>,
         subscription_id: &str,
     ) -> anyhow::Result<Option<String>>;
-
-    /// Fetch a subscription row with a row lock (FOR UPDATE).
-    /// Returns None if the subscription does not exist.
-    async fn get_subscription_for_update(
-        &self,
-        txn: &tokio_postgres::Transaction<'_>,
-        subscription_id: &str,
-    ) -> anyhow::Result<Option<Subscription>>;
-
-    /// Replace exactly one existing subscription row selected by subscription_id.
-    /// Returns None if the row does not exist.
-    async fn replace_subscription(
-        &self,
-        txn: &tokio_postgres::Transaction<'_>,
-        subscription_id: &str,
-        replacement: SubscriptionReplacement,
-    ) -> anyhow::Result<Option<Subscription>>;
 
     /// Unconditionally clear all pending-downgrade fields for a subscription.
     /// Used when an upgrade or explicit cancellation makes the pending intent obsolete.
@@ -1232,23 +1186,6 @@ pub trait SubscriptionService: Send + Sync {
         model_id: &str,
     ) -> Result<(), SubscriptionError>;
 
-    /// Admin only: Set subscription for a user directly (for testing/manual management).
-    /// If a subscription for the given plan/provider already exists, it updates it.
-    /// Otherwise, creates a new one.
-    async fn admin_set_subscription(
-        &self,
-        user_id: UserId,
-        provider: String,
-        plan: String,
-        current_period_end: DateTime<Utc>,
-    ) -> Result<SubscriptionWithPlan, SubscriptionError>;
-
-    /// Admin only: Cancel all subscriptions for a user.
-    async fn admin_cancel_user_subscriptions(
-        &self,
-        user_id: UserId,
-    ) -> Result<(), SubscriptionError>;
-
     /// Admin only: List subscriptions with pagination, optionally filtered by user_id.
     async fn admin_list_subscriptions(
         &self,
@@ -1256,14 +1193,6 @@ pub trait SubscriptionService: Send + Sync {
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<Subscription>, i64), SubscriptionError>;
-
-    /// Admin only: Fully replace exactly one existing subscription row by subscription_id.
-    async fn admin_replace_subscription(
-        &self,
-        admin_user_id: UserId,
-        subscription_id: String,
-        replacement: SubscriptionReplacement,
-    ) -> Result<Subscription, SubscriptionError>;
 
     /// Create a House-of-Stake direct-payment intent for purchasing credits.
     async fn create_credit_purchase_checkout(

@@ -6,7 +6,7 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "NEAR AI Chat API",
-        description = "An authenticated OpenAI-compatible inference proxy with temporary Private Chat read views and established DELETE operations for migration and export.",
+        description = "An authenticated OpenAI-compatible inference proxy. Conversation, file, and sharing APIs have been retired.",
         version = "1.0.0",
         contact(name = "NEAR AI Team", email = "support@near.ai"),
         license(name = "MIT",)
@@ -21,26 +21,13 @@ use utoipa::OpenApi;
         crate::routes::oauth::exchange_oauth_callback_code,
         crate::routes::oauth::near_auth,
         crate::routes::oauth::logout,
+        crate::routes::browser_session::refresh,
+        crate::routes::browser_session::logout,
         // User endpoints
         crate::routes::users::get_current_user,
         crate::routes::users::get_user_status,
         crate::routes::users::delete_current_user,
         crate::routes::users::get_my_usage,
-        // Temporary Stage I Conversation read endpoints and retained DELETE operations
-        crate::routes::api::list_conversations,
-        crate::routes::api::get_conversation,
-        crate::routes::api::list_conversation_items,
-        crate::routes::api::list_conversation_shares,
-        crate::routes::api::delete_conversation,
-        crate::routes::api::delete_conversation_share,
-        crate::routes::api::list_share_groups,
-        crate::routes::api::delete_share_group,
-        crate::routes::api::list_shared_with_me,
-        // Temporary Stage I File read endpoints and retained DELETE operation
-        crate::routes::api::list_files,
-        crate::routes::api::get_file,
-        crate::routes::api::get_file_content,
-        crate::routes::api::delete_file,
         // Proxy endpoints
         crate::routes::api::proxy_responses,
         crate::routes::api::proxy_chat_completions,
@@ -72,8 +59,6 @@ use utoipa::OpenApi;
         crate::routes::admin::get_system_configs_admin,
         crate::routes::admin::get_usage_by_user_id,
         crate::routes::admin::get_top_usage,
-        crate::routes::admin::admin_set_user_subscription,
-        crate::routes::admin::admin_cancel_user_subscriptions,
         crate::routes::admin::admin_list_aml_reports,
         crate::routes::admin::admin_list_aml_allowlist,
         crate::routes::admin::admin_add_aml_allowlist_entry,
@@ -91,7 +76,6 @@ use utoipa::OpenApi;
         crate::routes::agents::list_instances,
         crate::routes::agents::get_instance,
         crate::routes::admin::admin_list_all_instances,
-        crate::routes::admin::admin_create_instance,
         crate::routes::admin::admin_delete_instance,
         crate::routes::admin::admin_start_instance,
         crate::routes::admin::admin_stop_instance,
@@ -114,8 +98,6 @@ use utoipa::OpenApi;
         crate::routes::admin::admin_create_backup,
         crate::routes::admin::admin_list_backups,
         crate::routes::admin::admin_get_backup,
-        crate::routes::admin::admin_create_unbound_api_key,
-        crate::routes::admin::admin_bind_api_key_to_instance,
         crate::routes::agents::create_api_key,
         crate::routes::agents::list_api_keys,
         crate::routes::agents::revoke_api_key,
@@ -154,7 +136,6 @@ use utoipa::OpenApi;
         // System configs models
         crate::models::SystemConfigsResponse,
         crate::models::UpsertSystemConfigsRequest,
-        crate::models::AdminSetSubscriptionRequest,
         // Admin usage models (UserUsageResponse shared with /users/me/usage)
         crate::models::UserUsageResponse,
         crate::routes::admin::TopUsageResponse,
@@ -199,11 +180,8 @@ use utoipa::OpenApi;
         // Agent models
         crate::models::InstanceResponse,
         crate::routes::agents::CreateInstanceRequest,
-        crate::routes::admin::AdminCreateInstanceRequest,
-        crate::routes::admin::AdminCreateApiKeyRequest,
         crate::models::CreateApiKeyRequest,
         crate::models::CreateApiKeyResponse,
-        crate::models::BindApiKeyRequest,
         crate::models::ApiKeyResponse,
         crate::routes::admin::SyncAgentStatusResponse,
         crate::models::UsageResponse,
@@ -238,9 +216,6 @@ use utoipa::OpenApi;
         (name = "Health", description = "Health check and service status endpoints"),
         (name = "Auth", description = "OAuth authentication endpoints"),
         (name = "Users", description = "User profile management endpoints"),
-        (name = "Conversations", description = "Temporary Conversation reads, including existing public/shared access where its ACL permits it, and established DELETE operations remain available for migration/export. Other Conversation mutations and unsupported legacy paths return 410 Gone."),
-        (name = "Share Groups", description = "Existing sharing reads and DELETE /v1/share-groups/{group_id} remain available during Stage I. Share/group creation and updates return 410 Gone."),
-        (name = "Files", description = "Temporary owner-only File views and DELETE /v1/files/{file_id} remain available for migration/export. File uploads, other mutations, and unsupported legacy paths return 410 Gone."),
         (name = "Proxy", description = "Proxy endpoints for OpenAI-compatible APIs"),
         (name = "Credits", description = "Credit purchase and balance endpoints"),
         (name = "Subscriptions", description = "Subscription management endpoints"),
@@ -278,77 +253,25 @@ mod tests {
     use utoipa::OpenApi;
 
     #[test]
-    fn documents_stage_one_views_and_retained_delete_operations() {
+    fn retired_namespaces_are_absent_from_openapi() {
         let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serialization");
+        let paths = spec["paths"].as_object().expect("OpenAPI paths");
 
-        for path in [
-            "/v1/conversations",
-            "/v1/conversations/{conversation_id}",
-            "/v1/conversations/{conversation_id}/items",
-            "/v1/conversations/{conversation_id}/shares",
-            "/v1/share-groups",
-            "/v1/shared-with-me",
-            "/v1/files",
-            "/v1/files/{file_id}",
-            "/v1/files/{file_id}/content",
-        ] {
-            let operation = spec["paths"]
-                .get(path)
-                .and_then(|operations| operations.get("get"));
-            assert!(
-                operation.is_some(),
-                "retained GET operation {path} must be in OpenAPI"
-            );
-            assert!(
-                operation.unwrap()["responses"]["200"]["headers"]["Cache-Control"].is_object(),
-                "retained GET operation {path} must document Cache-Control: no-store"
-            );
+        for path in paths.keys() {
+            for namespace in [
+                "/v1/conversations",
+                "/v1/files",
+                "/v1/share-groups",
+                "/v1/shared-with-me",
+            ] {
+                assert!(
+                    !path.starts_with(namespace),
+                    "retired endpoint must not be advertised: {path}"
+                );
+            }
         }
 
-        for (path, method, status) in [
-            ("/v1/conversations/{conversation_id}", "delete", "200"),
-            (
-                "/v1/conversations/{conversation_id}/shares/{share_id}",
-                "delete",
-                "204",
-            ),
-            ("/v1/share-groups/{group_id}", "delete", "204"),
-            ("/v1/files/{file_id}", "delete", "200"),
-        ] {
-            let operation = spec["paths"]
-                .get(path)
-                .and_then(|operations| operations.get(method));
-            assert!(
-                operation.is_some(),
-                "retained {method} operation {path} must be in OpenAPI"
-            );
-            assert!(
-                operation.unwrap()["responses"][status]["headers"]["Cache-Control"].is_object(),
-                "retained {method} operation {path} must document Cache-Control: no-store"
-            );
-        }
-
-        for (path, method) in [
-            (
-                "/v1/conversations/{conversation_id}/shares/{share_id}",
-                "post",
-            ),
-            ("/v1/conversations/{conversation_id}/pin", "post"),
-            ("/v1/conversations/{conversation_id}/pin", "delete"),
-            ("/v1/conversations/{conversation_id}/archive", "post"),
-            ("/v1/conversations/{conversation_id}/archive", "delete"),
-            ("/v1/conversations/{conversation_id}/clone", "post"),
-            ("/v1/share-groups", "post"),
-            ("/v1/share-groups/{group_id}", "patch"),
-            ("/v1/shared-with-me", "post"),
-        ] {
-            assert!(
-                spec["paths"]
-                    .get(path)
-                    .and_then(|operations| operations.get(method))
-                    .is_none(),
-                "disabled stateful or sharing operation must not be in OpenAPI: {method} {path}"
-            );
-        }
+        assert!(paths.contains_key("/v1/responses"));
+        assert!(paths.contains_key("/v1/users/me"));
     }
 }

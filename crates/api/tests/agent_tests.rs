@@ -127,10 +127,10 @@ async fn test_check_upgrade_available_requires_auth() {
 
 // ===== INTEGRATION TEST SCENARIOS (would require Agent mock/stub) =====
 //
-// Real e2e flow tests that would demonstrate the complete user and admin flows:
+// Real e2e flow tests that would demonstrate the complete user flow:
 //
-// 1. Admin Creates Instance:
-//    POST /v1/admin/agents/instances with user_id and Agent API credentials
+// 1. User Creates Instance:
+//    POST /v1/agents/instances with an eligible subscription
 //    → Creates instance record with instance_url, instance_token, etc.
 //    → User lists instances via GET /v1/agents/instances
 //
