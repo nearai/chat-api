@@ -314,7 +314,6 @@ mod tests {
             .unwrap(),
             write_enabled: true,
             agent_secrets_write_enabled: false,
-            app_config_write_enabled: false,
         });
         let repository = PostgresFileRepository::new(pool);
 

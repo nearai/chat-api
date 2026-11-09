@@ -90,7 +90,6 @@ mod tests {
             .unwrap(),
             write_enabled: true,
             agent_secrets_write_enabled: true,
-            app_config_write_enabled: false,
         };
         let user_id = Uuid::new_v4();
         let ciphertext = encrypt(
@@ -178,7 +177,6 @@ mod tests {
             .unwrap(),
             write_enabled: true,
             agent_secrets_write_enabled: true,
-            app_config_write_enabled: false,
         };
 
         // When the credential is read after rotation.
@@ -232,7 +230,6 @@ mod tests {
             .unwrap(),
             write_enabled: false,
             agent_secrets_write_enabled: true,
-            app_config_write_enabled: false,
         };
         assert!(encrypt(
             Some(&config),

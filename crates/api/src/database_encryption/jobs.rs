@@ -36,14 +36,6 @@ pub async fn create_job(
             "execute for agent credentials requires DB_ENCRYPTION_AGENT_SECRETS_WRITE_ENABLED=true",
         ));
     }
-    if matches!(req.mode, Mode::Execute)
-        && fields.iter().any(|field| field.table == "app_config")
-        && !config.app_config_write_enabled
-    {
-        return Err(bad(
-            "execute for app config requires DB_ENCRYPTION_APP_CONFIG_WRITE_ENABLED=true",
-        ));
-    }
     // Freeze table/default scopes at creation. A later registry update must not
     // add fields to an already-authorized job when it resumes.
     req.scope = Scope {

@@ -111,7 +111,6 @@ pub async fn resolve_field_encryption_with(
         ring,
         write_enabled: config.write_enabled,
         agent_secrets_write_enabled: config.agent_secrets_write_enabled,
-        app_config_write_enabled: config.app_config_write_enabled,
     })
 }
 
