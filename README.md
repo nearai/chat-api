@@ -2,7 +2,7 @@
 
 [![Security Audit](https://github.com/nearai/chat-api/actions/workflows/security-audit.yml/badge.svg)](https://github.com/nearai/chat-api/actions/workflows/security-audit.yml)
 
-A Rust backend service that proxies OpenAI-compatible inference requests to **NEAR AI Cloud API**. It provides OAuth authentication (Google/GitHub), user session management, and serves a frontend as static files. Designed to run in a Trusted Execution Environment (TEE) for enhanced security and privacy.
+A Rust backend service that proxies OpenAI-compatible inference requests to **NEAR AI Cloud API**. It provides OAuth authentication (Google/GitHub) and user session management. Designed to run in a Trusted Execution Environment (TEE) for enhanced security and privacy.
 
 ## Features
 

@@ -10,7 +10,6 @@ pub mod models;
 pub mod openapi;
 pub mod routes;
 pub mod state;
-pub mod static_files;
 pub mod stripe_client_adapter;
 pub mod tasks;
 pub mod usage_parsing;
