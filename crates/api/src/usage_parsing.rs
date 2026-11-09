@@ -187,22 +187,28 @@ pub fn parse_usage_from_response_completed_sse_line(line: &str) -> Option<Parsed
 // waiting for upstream usage. Bound that work if the provider never finishes.
 const DISCONNECTED_USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-pub fn forward_usage_stream<S>(stream: S) -> tokio_stream::wrappers::ReceiverStream<S::Item>
+pub fn forward_usage_stream<S>(
+    stream: S,
+    guard: Option<crate::middleware::rate_limit::RateLimitGuard>,
+) -> tokio_stream::wrappers::ReceiverStream<S::Item>
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send + 'static,
 {
-    forward_usage_stream_with_timeout(stream, DISCONNECTED_USAGE_TIMEOUT)
+    forward_usage_stream_with_timeout(stream, DISCONNECTED_USAGE_TIMEOUT, guard)
 }
 
-fn forward_usage_stream_with_timeout<S>(
+pub(crate) fn forward_usage_stream_with_timeout<S>(
     mut stream: S,
     timeout: std::time::Duration,
+    guard: Option<crate::middleware::rate_limit::RateLimitGuard>,
 ) -> tokio_stream::wrappers::ReceiverStream<S::Item>
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send + 'static,
 {
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
+        // Keep the existing per-user slot through EOF, error and disconnect drain.
+        let _guard = guard;
         loop {
             let item = tokio::select! {
                 _ = sender.closed() => break,
@@ -741,6 +747,7 @@ mod disconnect_tests {
         let receiver = forward_usage_stream_with_timeout(
             PendingWithDrop(Some(sender)),
             std::time::Duration::from_millis(10),
+            None,
         );
         drop(receiver);
         tokio::time::timeout(std::time::Duration::from_secs(1), dropped)

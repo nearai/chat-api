@@ -83,7 +83,7 @@ async fn exercise(responses: bool, agent: bool, disconnect_before_usage: bool, e
     if disconnect_before_usage {
         let first = Bytes::from_static(b"data: {\"delta\":\"hello\"}\n\n");
         let mut body =
-            axum::body::Body::from_stream(forward_usage_stream(tracked)).into_data_stream();
+            axum::body::Body::from_stream(forward_usage_stream(tracked, None)).into_data_stream();
         sender.send(Ok(first.clone())).await.unwrap();
         assert_eq!(body.next().await.unwrap().unwrap(), first);
         drop(body);
