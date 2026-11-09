@@ -2853,7 +2853,7 @@ async fn proxy_responses(
             usage_stream = usage_stream
                 .with_agent_ids(api_key.api_key_info.instance_id, api_key.api_key_info.id);
         }
-        Body::from_stream(usage_stream)
+        Body::from_stream(crate::usage_parsing::forward_usage_stream(usage_stream))
     } else {
         let bytes = match collect_stream_to_bytes(proxy_response.body).await {
             Ok(b) => b,
@@ -4288,7 +4288,7 @@ async fn proxy_chat_completions(
             usage_stream = usage_stream
                 .with_agent_ids(api_key.api_key_info.instance_id, api_key.api_key_info.id);
         }
-        Body::from_stream(usage_stream)
+        Body::from_stream(crate::usage_parsing::forward_usage_stream(usage_stream))
     } else {
         let bytes = match collect_stream_to_bytes(proxy_response.body).await {
             Ok(b) => b,
