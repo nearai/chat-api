@@ -154,14 +154,13 @@ fn validate_frontend_callback_url(
         return Ok(normalize_validated_callback_url(url));
     }
 
-    if let Some(origins) = allowed_origins {
-        if origins.is_empty() {
-            return Err(FrontendCallbackValidationError::UntrustedOrigin);
-        }
+    let url = validate_frontend_url(trimmed_url)?;
+    let origin = url_origin(&url);
+    if !allowed_origins.is_some_and(|origins| origins.contains(&origin)) {
+        return Err(FrontendCallbackValidationError::UntrustedOrigin);
     }
 
-    validate_frontend_url(trimmed_url, allowed_origins.unwrap_or(&[]))
-        .map(normalize_validated_callback_url)
+    Ok(normalize_validated_callback_url(url))
 }
 
 fn build_oauth_frontend_code_redirect(
@@ -192,17 +191,14 @@ fn build_oauth_frontend_code_redirect(
 }
 
 fn validate_frontend_origin(raw_url: &str) -> Result<Url, FrontendCallbackValidationError> {
-    let url = validate_frontend_url(raw_url, &[])?;
+    let url = validate_frontend_url(raw_url)?;
     if !url.path().is_empty() && url.path() != "/" {
         return Err(FrontendCallbackValidationError::Malformed);
     }
     Ok(url)
 }
 
-fn validate_frontend_url(
-    raw_url: &str,
-    allowed_origins: &[String],
-) -> Result<Url, FrontendCallbackValidationError> {
+fn validate_frontend_url(raw_url: &str) -> Result<Url, FrontendCallbackValidationError> {
     let url = Url::parse(raw_url.trim()).map_err(|_| FrontendCallbackValidationError::Malformed)?;
 
     match url.scheme() {
@@ -224,14 +220,6 @@ fn validate_frontend_url(
 
     if url.scheme() != "https" && !is_loopback_http_url(&url) {
         return Err(FrontendCallbackValidationError::Insecure);
-    }
-
-    if !allowed_origins.is_empty()
-        && !allowed_origins
-            .iter()
-            .any(|origin| origin == &url_origin(&url))
-    {
-        return Err(FrontendCallbackValidationError::UntrustedOrigin);
     }
 
     Ok(url)
@@ -1907,9 +1895,9 @@ mod tests {
     }
 
     #[test]
-    fn allows_any_origin_when_allowlist_is_unset() {
-        let callback = validate_frontend_callback_url("https://staging.example.dev", None).unwrap();
-        assert_eq!(callback, "https://staging.example.dev");
+    fn rejects_web_callbacks_when_allowlist_is_unset() {
+        let error = validate_frontend_callback_url("https://untrusted.example", None).unwrap_err();
+        assert_eq!(error, FrontendCallbackValidationError::UntrustedOrigin);
     }
 
     #[test]
@@ -2064,7 +2052,7 @@ mod tests {
     }
 
     #[test]
-    fn unset_env_origin_list_disables_origin_restrictions() {
+    fn unset_env_origin_list_returns_none() {
         assert_eq!(frontend_callback_allowed_origins_from(None), None);
     }
 

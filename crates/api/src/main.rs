@@ -99,6 +99,15 @@ async fn run() -> anyhow::Result<()> {
     api::init_tracing_from_config(&config.logging);
     log_lukka_aml_policy_config(&config.lukka_aml)?;
 
+    let frontend_callback_allowed_origins = api::routes::oauth::frontend_callback_allowed_origins();
+    if (!config.oauth.google_client_id.is_empty() || !config.oauth.github_client_id.is_empty())
+        && frontend_callback_allowed_origins
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+    {
+        anyhow::bail!("FRONTEND_CALLBACK_ALLOWED_ORIGINS must contain at least one valid origin when OAuth is configured");
+    }
+
     if config.tasks.enabled {
         if config.tasks.is_scheduler_configured() {
             if let Err(err) = api::tasks::ensure_daily_cleanup_task(&config.tasks).await {
@@ -113,23 +122,6 @@ async fn run() -> anyhow::Result<()> {
     }
 
     tracing::info!("Starting API server...");
-    let frontend_callback_allowed_origins = api::routes::oauth::frontend_callback_allowed_origins();
-    match frontend_callback_allowed_origins.as_ref() {
-        Some(origins)
-            if origins.is_empty()
-                && (!config.oauth.google_client_id.is_empty()
-                    || !config.oauth.github_client_id.is_empty()) =>
-        {
-            anyhow::bail!("FRONTEND_CALLBACK_ALLOWED_ORIGINS is set but contains no valid origins");
-        }
-        None => {
-            tracing::warn!(
-                "FRONTEND_CALLBACK_ALLOWED_ORIGINS is not set; OAuth frontend callback origins are unrestricted"
-            );
-        }
-        _ => {}
-    }
-
     tracing::info!(
         "Database: {}:{}/{}",
         config

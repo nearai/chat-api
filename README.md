@@ -80,6 +80,11 @@ docker compose logs -f api        # View logs
 docker compose down               # Stop services
 ```
 
+For Google/GitHub OAuth, Compose defaults `FRONTEND_CALLBACK_ALLOWED_ORIGINS` to
+`http://localhost:3000`. If your frontend uses another origin, set this variable
+to the exact trusted origin(s), comma-separated; changing `FRONTEND_URL` alone
+does not update the callback allowlist.
+
 ### Testing
 
 ```bash

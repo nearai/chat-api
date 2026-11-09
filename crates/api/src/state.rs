@@ -64,7 +64,7 @@ pub struct AppState {
     pub agent_proxy_service: Arc<dyn services::agent::AgentProxyService>,
     pub redirect_uri: String,
     /// Exact frontend origins allowed for user-provided OAuth frontend callbacks.
-    /// None means origin restrictions are disabled.
+    /// An unset or empty list rejects all web callbacks.
     pub frontend_callback_allowed_origins: Option<Arc<Vec<String>>>,
     pub admin_domains: Arc<Vec<String>>,
     pub admin_emails: Arc<Vec<String>>,
