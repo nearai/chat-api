@@ -1,12 +1,10 @@
-use super::ports::{VpcAuthConfig, VpcCredentialsRepository, VpcCredentialsService};
-use super::service::{initialize_vpc_credentials, VpcCredentialsServiceImpl};
+use super::ports::{VpcCredentialsRepository, VpcCredentialsService};
+use super::service::{initialize_cloud_api_credentials, VpcCredentialsServiceImpl};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Default)]
 struct Repository {
@@ -57,7 +55,7 @@ async fn cache_first_without_vpc_preserves_identity_and_survives_restart() {
     let repository = Arc::new(Repository::default());
     repository.seed("existing-org", "cached-key").await;
 
-    let service = initialize_vpc_credentials(None, repository.clone(), Some("fallback".into()))
+    let service = initialize_cloud_api_credentials(repository.clone(), Some("fallback".into()))
         .await
         .unwrap();
     let reads_after_startup = repository.reads.load(Ordering::SeqCst);
@@ -74,10 +72,9 @@ async fn cache_first_without_vpc_preserves_identity_and_survives_restart() {
         "existing-org"
     );
     assert_eq!(repository.reads.load(Ordering::SeqCst), reads_after_startup);
-    assert!(!service.is_configured());
 
     repository.fail_reads.store(false, Ordering::SeqCst);
-    let restarted = initialize_vpc_credentials(None, repository, None)
+    let restarted = initialize_cloud_api_credentials(repository, None)
         .await
         .unwrap();
 
@@ -93,7 +90,7 @@ async fn empty_or_incomplete_cache_uses_static_without_persisting_it() {
         }
         let before = repository.values.read().await.clone();
 
-        let service = initialize_vpc_credentials(None, repository.clone(), Some("fallback".into()))
+        let service = initialize_cloud_api_credentials(repository.clone(), Some("fallback".into()))
             .await
             .unwrap();
 
@@ -110,7 +107,7 @@ async fn empty_or_incomplete_cache_uses_static_without_persisting_it() {
 #[tokio::test]
 async fn missing_credentials_fail_startup_without_vpc() {
     for key in [None, Some("".into()), Some(" \n".into())] {
-        let result = initialize_vpc_credentials(None, Arc::new(Repository::default()), key).await;
+        let result = initialize_cloud_api_credentials(Arc::new(Repository::default()), key).await;
 
         assert!(result.is_err());
     }
@@ -121,7 +118,7 @@ async fn database_error_is_not_a_cache_miss_and_is_redacted() {
     let repository = Arc::new(Repository::default());
     repository.fail_reads.store(true, Ordering::SeqCst);
 
-    let result = initialize_vpc_credentials(None, repository, Some("fallback".into())).await;
+    let result = initialize_cloud_api_credentials(repository, Some("fallback".into())).await;
     let error = result.err().unwrap().to_string();
 
     assert_eq!(error, "Failed to load cached Cloud API credentials");
@@ -131,7 +128,7 @@ async fn database_error_is_not_a_cache_miss_and_is_redacted() {
 async fn invalidation_without_vpc_clears_cache_and_uses_fallback() {
     let repository = Arc::new(Repository::default());
     repository.seed("org", "cached").await;
-    let service = initialize_vpc_credentials(None, repository.clone(), Some("fallback".into()))
+    let service = initialize_cloud_api_credentials(repository.clone(), Some("fallback".into()))
         .await
         .unwrap();
 
@@ -146,7 +143,7 @@ async fn invalidation_without_vpc_clears_cache_and_uses_fallback() {
 async fn failed_invalidation_reports_failure_without_leaking_repository_details() {
     let repository = Arc::new(Repository::default());
     repository.seed("org", "cached").await;
-    let service = initialize_vpc_credentials(None, repository.clone(), Some("fallback".into()))
+    let service = initialize_cloud_api_credentials(repository.clone(), Some("fallback".into()))
         .await
         .unwrap();
     repository.fail_deletes.store(true, Ordering::SeqCst);
@@ -160,11 +157,7 @@ async fn failed_invalidation_reports_failure_without_leaking_repository_details(
 async fn simultaneous_cold_requests_load_persisted_credentials_once() {
     let repository = Arc::new(Repository::default());
     repository.seed("org", "cached").await;
-    let service = Arc::new(VpcCredentialsServiceImpl::new(
-        None,
-        repository.clone(),
-        None,
-    ));
+    let service = Arc::new(VpcCredentialsServiceImpl::new(repository.clone(), None));
     let mut requests = Vec::new();
 
     for _ in 0..16 {
@@ -182,33 +175,40 @@ async fn simultaneous_cold_requests_load_persisted_credentials_once() {
 }
 
 #[tokio::test]
-async fn explicit_vpc_configuration_preserves_legacy_login_on_cache_miss() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/auth/vpc/login"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "organization": { "id": "org" },
-            "api_key": "issued-key",
-            "access_token": "unused-access",
-            "refresh_token": "unused-refresh",
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let config = VpcAuthConfig {
-        client_id: "client".into(),
-        shared_secret: "test-secret".into(),
-        base_url: server.uri(),
-    };
-    let repository = Arc::new(Repository::default());
+async fn a_partial_persisted_pair_does_not_invent_an_organization() {
+    for missing in ["vpc_api_key", "vpc_organization_id"] {
+        let repository = Arc::new(Repository::default());
+        repository.seed("org", "cached").await;
+        repository.values.write().await.remove(missing);
 
-    let service = initialize_vpc_credentials(Some(config), repository.clone(), None)
+        let service = initialize_cloud_api_credentials(repository, Some("fallback".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(service.get_api_key().await.unwrap(), "fallback");
+        assert!(service.get_credentials().await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn peer_process_rechecks_persistence_after_restart() {
+    let repository = Arc::new(Repository::default());
+    repository.seed("org", "cached").await;
+    let api = initialize_cloud_api_credentials(repository.clone(), Some("fallback".into()))
+        .await
+        .unwrap();
+    let worker = initialize_cloud_api_credentials(repository.clone(), Some("fallback".into()))
         .await
         .unwrap();
 
-    assert_eq!(service.get_api_key().await.unwrap(), "issued-key");
-    assert_eq!(
-        repository.values.read().await.get("vpc_api_key").unwrap(),
-        "issued-key"
-    );
+    api.revoke_credentials().await.unwrap();
+
+    assert_eq!(api.get_api_key().await.unwrap(), "fallback");
+    assert_eq!(worker.get_api_key().await.unwrap(), "cached");
+
+    let restarted_worker = initialize_cloud_api_credentials(repository, Some("fallback".into()))
+        .await
+        .unwrap();
+
+    assert_eq!(restarted_worker.get_api_key().await.unwrap(), "fallback");
 }
