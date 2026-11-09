@@ -56,6 +56,8 @@ const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 
 /// Duration to cache model settings needed by /v1/responses in memory (in seconds)
 const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
+const MODEL_SETTINGS_CACHE_MAX_ENTRIES: usize = 1024;
+const MODEL_SETTINGS_CACHE_MAX_KEY_BYTES: usize = 256;
 
 /// Duration to cache system configs in memory (in seconds)
 const SYSTEM_CONFIGS_CACHE_TTL_SECS: i64 = 60;
@@ -3601,6 +3603,34 @@ async fn enforce_model_access(
     }
 }
 
+fn cache_model_settings(
+    cache: &mut std::collections::HashMap<String, crate::state::ModelSettingsCacheEntry>,
+    model_id: &str,
+    entry: crate::state::ModelSettingsCacheEntry,
+) {
+    // Bound retained key memory without changing accepted model IDs.
+    if model_id.len() > MODEL_SETTINGS_CACHE_MAX_KEY_BYTES {
+        return;
+    }
+    cache.retain(|_, cached| {
+        let age = entry
+            .last_checked_at
+            .signed_duration_since(cached.last_checked_at)
+            .num_seconds();
+        (0..MODEL_SETTINGS_CACHE_TTL_SECS).contains(&age)
+    });
+    if cache.len() >= MODEL_SETTINGS_CACHE_MAX_ENTRIES && !cache.contains_key(model_id) {
+        if let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_checked_at)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(model_id.to_owned(), entry);
+}
+
 /// Helper function to get model settings with caching support.
 /// Returns (system_prompt, cache_hit) if model is found and public.
 /// Validates model visibility and populates cache if needed.
@@ -3612,8 +3642,8 @@ async fn get_model_settings_with_cache(
     let mut model_system_prompt: Option<String> = None;
     let mut model_settings_cache_hit: Option<bool> = None;
 
-    // 1) Try cache first
-    {
+    // Long IDs bypass the cache but still go through the same DB visibility check.
+    if model_id.len() <= MODEL_SETTINGS_CACHE_MAX_KEY_BYTES {
         let cache = state.model_settings_cache.read().await;
         if let Some(entry) = cache.get(model_id) {
             let age = Utc::now().signed_duration_since(entry.last_checked_at);
@@ -3648,8 +3678,9 @@ async fn get_model_settings_with_cache(
                 // Populate cache
                 {
                     let mut cache = state.model_settings_cache.write().await;
-                    cache.insert(
-                        model_id.to_string(),
+                    cache_model_settings(
+                        &mut cache,
+                        model_id,
                         crate::state::ModelSettingsCacheEntry {
                             last_checked_at: Utc::now(),
                             exists: true,
@@ -3681,8 +3712,9 @@ async fn get_model_settings_with_cache(
                 // Cache with defaults to avoid repeated DB hits
                 {
                     let mut cache = state.model_settings_cache.write().await;
-                    cache.insert(
-                        model_id.to_string(),
+                    cache_model_settings(
+                        &mut cache,
+                        model_id,
                         crate::state::ModelSettingsCacheEntry {
                             last_checked_at: Utc::now(),
                             exists: false, // Not in DB but allowed with defaults
@@ -4388,6 +4420,7 @@ async fn proxy_image_generations(
     };
 
     enforce_model_access(&state, &user, &image_request_model).await?;
+    get_model_settings_with_cache(&state, &image_request_model, user.user_id).await?;
 
     let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
         .expect("usize to string conversion always produces valid HeaderValue");
@@ -4669,6 +4702,7 @@ async fn proxy_image_edits(
     };
 
     enforce_model_access(&state, &user, &request_model).await?;
+    get_model_settings_with_cache(&state, &request_model, user.user_id).await?;
 
     let proxy_response = state
         .proxy_service
@@ -6040,5 +6074,43 @@ mod tests {
             path,
             "conversations/conv_1/items?after=msg_1%26limit%3D1%23frag&limit=100&order=asc"
         );
+    }
+}
+
+#[cfg(test)]
+mod model_settings_cache_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn arbitrary_model_ids_cannot_exceed_capacity_and_expired_entries_are_removed() {
+        let now = Utc::now();
+        let mut cache = std::collections::HashMap::new();
+        let entry = |last_checked_at| crate::state::ModelSettingsCacheEntry {
+            last_checked_at,
+            exists: false,
+            public: true,
+            system_prompt: None,
+        };
+        cache_model_settings(
+            &mut cache,
+            &"x".repeat(MODEL_SETTINGS_CACHE_MAX_KEY_BYTES + 1),
+            entry(now),
+        );
+        assert!(
+            cache.is_empty(),
+            "oversized IDs must not consume cache memory"
+        );
+        for i in 0..MODEL_SETTINGS_CACHE_MAX_ENTRIES + 100 {
+            cache_model_settings(&mut cache, &format!("unknown-{i}"), entry(now));
+            assert!(cache.len() <= MODEL_SETTINGS_CACHE_MAX_ENTRIES);
+        }
+        assert_eq!(cache.len(), MODEL_SETTINGS_CACHE_MAX_ENTRIES);
+        cache_model_settings(
+            &mut cache,
+            "after-expiry",
+            entry(now + chrono::Duration::seconds(60)),
+        );
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key("after-expiry"));
     }
 }
