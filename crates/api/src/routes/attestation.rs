@@ -1,21 +1,24 @@
 use crate::common::is_dev;
+use crate::middleware::{AuthState, AuthenticatedUser};
 use crate::{
     models::{ApiGatewayAttestation, AttestationReport, CombinedAttestationReport},
     state::AppState,
     ApiError,
 };
 use axum::{
-    extract::{Query, State},
+    extract::{Query, Request, State},
+    middleware::Next,
     response::Json,
+    response::Response,
     routing::get,
-    Router,
+    Extension, Router,
 };
 use futures::TryStreamExt;
 use http::Method;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use services::logging::error_type;
-use services::vpc::load_vpc_info;
+use services::{agent::ports::AgentInstance, vpc::load_vpc_info};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttestationQuery {
@@ -43,6 +46,8 @@ pub struct AttestationQuery {
 /// GET /v1/attestation/report
 ///
 /// Returns a combined attestation report combining attestations from multiple layers.
+/// Agent reports require a user session and ownership of the requested instance.
+/// Gateway and model reports without `agent` remain public.
 ///
 /// This endpoint (chat-api) acts as an AI Gateway Service and combines attestations from multiple layers:
 /// 1. **This API's own CPU attestation** (chat_api_gateway_attestation) - Proves this chat-api runs in a trusted TEE
@@ -62,6 +67,8 @@ pub struct AttestationQuery {
     ),
     responses(
         (status = 200, description = "Combined attestation report", body = CombinedAttestationReport),
+        (status = 401, description = "Agent report requires a user session", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Agent instance not found or not owned", body = crate::error::ApiErrorResponse),
         (status = 503, description = "Attestation service unavailable", body = crate::error::ApiErrorResponse)
     ),
     tag = "Attestation"
@@ -69,7 +76,24 @@ pub struct AttestationQuery {
 pub async fn get_attestation_report(
     State(app_state): State<AppState>,
     Query(params): Query<AttestationQuery>,
+    user: Option<Extension<AuthenticatedUser>>,
 ) -> Result<Json<CombinedAttestationReport>, ApiError> {
+    // Authorize before contacting either the cloud gateway or an agent manager.
+    let agent_instance = if let Some(agent_id) = &params.agent {
+        let Extension(user) = user.ok_or_else(ApiError::missing_auth_header)?;
+        let id = uuid::Uuid::parse_str(agent_id)
+            .map_err(|_| ApiError::bad_request("Invalid agent ID format"))?;
+        Some(
+            app_state
+                .agent_service
+                .get_instance(id, user.user_id)
+                .await
+                .map_err(|_| ApiError::internal_server_error("Failed to fetch agent instance"))?
+                .ok_or_else(|| ApiError::not_found("Agent instance not found"))?,
+        )
+    } else {
+        None
+    };
     // Exclude agent parameter from cloud-api query since it's not relevant there
     let mut cloud_api_params = params.clone();
     cloud_api_params.agent = None;
@@ -191,9 +215,9 @@ pub async fn get_attestation_report(
 
     let model_attestations = proxy_report.model_attestations;
 
-    // Fetch agent attestations if agent parameter is provided (no user auth required)
-    let agent_attestations = if let Some(agent_id) = &params.agent {
-        match fetch_agent_attestations(&app_state, agent_id, &request_nonce).await {
+    // Fetch only the instance authorized above. Upstream failures remain optional.
+    let agent_attestations = if let Some(instance) = &agent_instance {
+        match fetch_agent_attestations(&app_state, instance, &request_nonce).await {
             Ok(attestations) => Some(attestations),
             Err(e) => {
                 tracing::warn!("Failed to fetch agent attestations: {:?}", error_type(&e));
@@ -330,36 +354,11 @@ fn manager_attestation_client() -> Result<Client, ApiError> {
 
 async fn fetch_agent_attestations(
     app_state: &AppState,
-    agent_id: &str,
+    agent_instance: &AgentInstance,
     request_nonce: &str,
 ) -> Result<Vec<crate::models::AgentAttestation>, ApiError> {
-    use uuid::Uuid;
-
-    // Security: Validate nonce to prevent panic/DoS from malformed input
     validate_nonce(request_nonce)?;
-
-    // Parse the agent_id as UUID
-    let agent_uuid = Uuid::parse_str(agent_id).map_err(|e| {
-        tracing::error!("Invalid agent ID format: {}", error_type(&e));
-        ApiError::bad_request(format!("Invalid agent ID format: {}", e))
-    })?;
-
-    // Fetch the agent instance from database (no user_id check - attestation is public)
-    let agent_instance = app_state
-        .agent_repository
-        .get_instance(agent_uuid)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to fetch agent instance from database: {}",
-                error_type(&e)
-            );
-            ApiError::internal_server_error("Failed to fetch agent instance")
-        })?
-        .ok_or_else(|| {
-            tracing::warn!("Agent instance not found: {}", agent_id);
-            ApiError::not_found("Agent instance not found")
-        })?;
+    let agent_id = agent_instance.id.to_string();
 
     // Security: Validate instance name to prevent path traversal attacks
     validate_instance_name(&agent_instance.name)?;
@@ -471,8 +470,29 @@ async fn fetch_agent_attestations(
 }
 
 /// Create the attestation router
-pub fn create_attestation_router() -> Router<AppState> {
-    Router::new().route("/v1/attestation/report", get(get_attestation_report))
+pub fn create_attestation_router(auth_state: AuthState) -> Router<AppState> {
+    Router::new()
+        .route("/v1/attestation/report", get(get_attestation_report))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            require_agent_auth,
+        ))
+        .layer(axum::middleware::map_response(
+            super::api::force_no_store_response,
+        ))
+}
+
+async fn require_agent_auth(
+    State(state): State<AuthState>,
+    Query(params): Query<AttestationQuery>,
+    request: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    if params.agent.is_some() {
+        crate::middleware::auth_middleware(State(state), request, next).await
+    } else {
+        Ok(next.run(request).await)
+    }
 }
 
 #[cfg(test)]
