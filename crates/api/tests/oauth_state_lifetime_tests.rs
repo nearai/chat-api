@@ -184,3 +184,40 @@ async fn cleanup_skips_rows_locked_by_another_request() {
         .unwrap()
         .is_some());
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn near_login_is_limited_before_parsing_and_shares_oauth_quota() {
+    let (server, _) = common::create_test_server_and_db(Default::default()).await;
+    for _ in 0..20 {
+        // Malformed attempts count too; no signature verification or RPC is needed.
+        server
+            .post("/v1/auth/near")
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status(http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let response = server
+        .post("/v1/auth/near")
+        .json(&serde_json::json!({}))
+        .await;
+    response.assert_status(http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.header("retry-after"), "60");
+    for provider in ["google", "github"] {
+        server
+            .get(&format!(
+                "/v1/auth/{provider}?frontend_callback=http://localhost:3000"
+            ))
+            .await
+            .assert_status(http::StatusCode::TOO_MANY_REQUESTS);
+    }
+    // Exchange is not a new login attempt and must not consume the initiation quota.
+    assert_ne!(
+        server
+            .post("/v1/auth/exchange")
+            .json(&serde_json::json!({}))
+            .await
+            .status_code(),
+        http::StatusCode::TOO_MANY_REQUESTS
+    );
+}
