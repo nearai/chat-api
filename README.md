@@ -30,7 +30,7 @@ crates/
 - **Repository Pattern**: Database access through trait-based repositories (`PostgresUserRepository`, etc.)
 - **Service Layer**: Business logic in `services` crate, injected into `AppState`
 - **NEAR AI Cloud API Proxy**: OpenAI-compatible inference routes forward to NEAR AI Cloud API with auth; Responses requests are stateless
-- **Private Chat retirement**: Conversation, File, and sharing endpoints return `410 Gone` with `Cache-Control: no-store`. Users can request an encrypted archive through Feedback at https://private.near.ai.
+- **API retirement**: Conversation, File, and sharing endpoints return `410 Gone` with `Cache-Control: no-store`.
 - **PostgreSQL deployment modes**: Optional Patroni discovery via `DATABASE_PRIMARY_APP_ID`, plus verified direct TLS connections for managed endpoints such as RDS
 
 ### Request Flow
@@ -193,7 +193,7 @@ OpenAPI docs available at `/docs`.
 - `/v1/users/*` - User management
 - `/v1/admin/*` - Admin operations
 
-**Private Chat retirement**: `/v1/conversations`, `/v1/files`, `/v1/share-groups`, and `/v1/shared-with-me`, including their descendants, return `410 Gone` for all resource requests. CORS preflights retain their standard handling. The notice is available without authentication, has `Cache-Control: no-store`, and directs users to Feedback at https://private.near.ai to request an encrypted archive. These APIs are no longer listed in OpenAPI.
+**API retirement**: `/v1/conversations`, `/v1/files`, `/v1/share-groups`, and `/v1/shared-with-me`, including their descendants, return `410 Gone` for all resource requests. CORS preflights retain their standard handling. The notice is available without authentication and has `Cache-Control: no-store`. These APIs are no longer listed in OpenAPI.
 
 **Account-deletion exception**: `DELETE /v1/users/me` remains available. Its existing asynchronous worker continues Cloud Conversation/File cleanup through Cloud API's retained, API-key/workspace-scoped resource DELETE endpoints before it performs local finalization; this flow is outside the retired session-proxy write surface.
 

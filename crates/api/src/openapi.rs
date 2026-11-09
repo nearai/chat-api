@@ -6,7 +6,7 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "NEAR AI Chat API",
-        description = "An authenticated OpenAI-compatible inference proxy. Private Chat conversation, file, and sharing APIs have been retired.",
+        description = "An authenticated OpenAI-compatible inference proxy. Conversation, file, and sharing APIs have been retired.",
         version = "1.0.0",
         contact(name = "NEAR AI Team", email = "support@near.ai"),
         license(name = "MIT",)

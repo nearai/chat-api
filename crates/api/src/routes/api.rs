@@ -207,7 +207,7 @@ pub struct ErrorResponse {
 
 /// Message returned by retired Conversation, File, and sharing endpoints.
 pub const STATEFUL_API_RETIRED_MESSAGE: &str =
-    "Private Chat conversation and file APIs have been retired. To request an encrypted archive of your conversations, use the Feedback button at https://private.near.ai.";
+    "Conversation, file, and sharing APIs have been retired.";
 
 fn with_no_store_cache_control(mut response: Response) -> Response {
     response.headers_mut().insert(
