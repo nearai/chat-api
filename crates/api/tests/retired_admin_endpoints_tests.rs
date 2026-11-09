@@ -112,28 +112,28 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
     let requests = [
         (
             "create API key",
-            StatusCode::NOT_FOUND,
             Method::POST,
             "/v1/admin/agents/keys".to_string(),
             json!({ "user_id": user_id, "name": "removed-admin-key" }),
+            StatusCode::NOT_FOUND,
         ),
         (
             "bind API key",
-            StatusCode::NOT_FOUND,
             Method::POST,
             format!("/v1/admin/agents/keys/{}/bind-instance", key.id),
             json!({ "instance_id": instance.id }),
+            StatusCode::NOT_FOUND,
         ),
         (
             "create instance",
-            StatusCode::METHOD_NOT_ALLOWED,
             Method::POST,
             "/v1/admin/agents/instances".to_string(),
             json!({ "user_id": user_id, "name": "removed-admin-instance" }),
+            // GET remains registered at this path; only POST is retired.
+            StatusCode::METHOD_NOT_ALLOWED,
         ),
         (
             "create subscription",
-            StatusCode::NOT_FOUND,
             Method::POST,
             format!("/v1/admin/users/{user_id}/subscription"),
             json!({
@@ -141,17 +141,17 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
                 "plan": "pro",
                 "current_period_end": period_end,
             }),
+            StatusCode::NOT_FOUND,
         ),
         (
             "delete subscription",
-            StatusCode::NOT_FOUND,
             Method::DELETE,
             format!("/v1/admin/users/{user_id}/subscription"),
             Value::Null,
+            StatusCode::NOT_FOUND,
         ),
         (
             "replace subscription",
-            StatusCode::NOT_FOUND,
             Method::PUT,
             format!("/v1/admin/subscriptions/{subscription_id}"),
             json!({
@@ -164,12 +164,12 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
                 "cancel_at_period_end": true,
                 "created_at": chrono::Utc::now(),
             }),
+            StatusCode::NOT_FOUND,
         ),
     ];
 
-    // Removed paths return 404. The retained GET instances route rejects POST
-    // with 405, so each assertion distinguishes route removal from method removal.
-    for (operation, expected_status, method, path, body) in requests {
+    // Fully removed paths use the API's 404 fallback, not the former SPA fallback.
+    for (operation, method, path, body, expected_status) in requests {
         let response = server
             .method(method.clone(), &path)
             .add_header(AUTHORIZATION, authorization.clone())

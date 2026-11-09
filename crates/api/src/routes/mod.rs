@@ -125,16 +125,6 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     // Public subscription routes (webhook, no auth required)
     let public_subscription_routes = subscriptions::create_public_subscriptions_router();
 
-    // Existing public/shared Conversation reads retain optional authentication:
-    // authenticated callers use the normal ACL, while anonymous callers may
-    // read only public shares. Keep every result out of shared caches.
-    let optional_auth_routes = api::create_optional_auth_router()
-        .layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::optional_auth_middleware,
-        ))
-        .layer(axum::middleware::map_response(api::force_no_store_response));
-
     let dual_auth_state = crate::middleware::DualAuthState {
         auth_state: auth_state.clone(),
         agent_auth_state: crate::middleware::AgentAuthState {
@@ -146,16 +136,10 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         subscription_service: app_state.subscription_service.clone(),
     };
 
-    // API routes: llm proxy (dual auth + subscription + rate limit), models proxy (dual auth), session routes
-    let api_routes = api::create_api_router(
-        rate_limit_state,
-        dual_auth_state,
-        auth_state,
-        subscription_state,
-    );
+    // API routes: llm proxy (dual auth + subscription + rate limit), models proxy (dual auth), retirement notices
+    let api_routes = api::create_api_router(rate_limit_state, dual_auth_state, subscription_state);
 
-    // Build the base router. Optional-auth GET routes are merged before the
-    // Stage I router, which owns the same paths' authenticated write methods.
+    // Build the base router.
     let router = Router::new()
         .route("/health", get(health_check))
         .merge(configs_routes) // Configs route (requires user auth)
@@ -176,8 +160,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/agents", agent_routes) // Agent routes (requires user auth)
         .merge(verify_agent_key_route) // Agent key verification (no session auth)
         .nest("/v1/admin", admin_routes)
-        .merge(optional_auth_routes)
-        .merge(api_routes) // API routes: proxy, temporary views, and disabled mutations
+        .merge(api_routes) // API routes: inference proxy and retirement notices
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
         // Temporarily disable frontend serving. An explicit fallback keeps the
