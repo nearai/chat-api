@@ -31,6 +31,7 @@ const TEST_DATABASE_ENCRYPTION_KEY: &str =
 /// Configuration for test server with Cloud API mocking
 #[derive(Default)]
 pub struct TestServerConfig {
+    pub stripe_config: Option<config::StripeConfig>,
     pub database_name: Option<String>,
     pub field_encryption: Option<services::db_pool::FieldEncryptionConfig>,
     pub vpc_credentials: Option<VpcCredentials>,
@@ -213,6 +214,9 @@ pub async fn create_test_server_with_state(
 
     // Load configuration
     let mut config = config::Config::from_env();
+    if let Some(stripe) = &test_config.stripe_config {
+        config.stripe = stripe.clone();
+    }
     if let Some(name) = &test_config.database_name {
         config.database.database = name.clone();
     }

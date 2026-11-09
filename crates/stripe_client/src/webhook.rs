@@ -32,6 +32,9 @@ impl StripeWebhookVerifier {
         secret: &str,
         now: DateTime<Utc>,
     ) -> Result<VerifiedStripeWebhook, StripeWebhookError> {
+        if secret.trim().is_empty() {
+            return Err(StripeWebhookError::MissingSecret);
+        }
         if stripe_signature.is_empty() {
             return Err(StripeWebhookError::MissingSignatureHeader);
         }
@@ -51,6 +54,7 @@ impl StripeWebhookVerifier {
         let timestamp_age = now
             .timestamp()
             .checked_sub(header.timestamp)
+            .and_then(i64::checked_abs)
             .ok_or(StripeWebhookError::TimestampOutsideTolerance)?;
         if self.tolerance_seconds > 0 && timestamp_age > self.tolerance_seconds {
             return Err(StripeWebhookError::TimestampOutsideTolerance);
@@ -184,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_use_absolute_timestamp_difference() {
+    fn rejects_future_timestamp() {
         let verifier = StripeWebhookVerifier::default();
         let payload = br#"{"id":"evt_1"}"#;
         let ts = 1_700_000_000;
@@ -192,7 +196,35 @@ mod tests {
         let header = format!("t={ts},v1={sig}");
         let now = Utc.timestamp_opt(ts - 301, 0).unwrap();
 
-        assert!(verifier.verify(payload, &header, "whsec_test", now).is_ok());
+        assert!(matches!(
+            verifier.verify(payload, &header, "whsec_test", now),
+            Err(StripeWebhookError::TimestampOutsideTolerance)
+        ));
+    }
+
+    #[test]
+    fn rejects_blank_secret_even_with_matching_signature() {
+        let payload = b"{}";
+        let ts = 1_700_000_000;
+        let now = Utc.timestamp_opt(ts, 0).unwrap();
+        for secret in ["", "   "] {
+            let header = format!("t={ts},v1={}", sign(secret, ts, payload));
+            assert!(matches!(
+                StripeWebhookVerifier::default().verify(payload, &header, secret, now),
+                Err(StripeWebhookError::MissingSecret)
+            ));
+        }
+    }
+
+    #[test]
+    fn accepts_future_timestamp_at_tolerance_boundary() {
+        let payload = b"{}";
+        let ts = 1_700_000_000;
+        let header = format!("t={ts},v1={}", sign("whsec_test", ts, payload));
+        let now = Utc.timestamp_opt(ts - 300, 0).unwrap();
+        assert!(StripeWebhookVerifier::default()
+            .verify(payload, &header, "whsec_test", now)
+            .is_ok());
     }
 
     #[test]
