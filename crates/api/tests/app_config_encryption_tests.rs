@@ -17,6 +17,7 @@ async fn stored(db: &database::Database, key: &str) -> String {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn config_values_are_encrypted_and_bound_to_the_key() {
     let (_, db) = create_test_server_and_db(Default::default()).await;
     enable_config_writes(&db);
@@ -64,6 +65,7 @@ async fn config_values_are_encrypted_and_bound_to_the_key() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn reading_a_legacy_value_encrypts_it_in_place() {
     let (_, db) = create_test_server_and_db(Default::default()).await;
     enable_config_writes(&db);
@@ -119,6 +121,7 @@ async fn job(server: &axum_test::TestServer, token: &str, action: &str) {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn registry_backfill_and_key_rotation_preserve_config_reads() {
     let (server, db) = create_test_server_and_db(TestServerConfig {
         database_encryption_write_enabled: Some(true),
@@ -198,6 +201,7 @@ fn enable_config_writes(db: &database::Database) {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn separate_rollout_gate_preserves_plaintext_and_blocks_backfill() {
     let (server, db) = create_test_server_and_db(TestServerConfig {
         database_encryption_write_enabled: Some(true),
