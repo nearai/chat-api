@@ -2522,6 +2522,7 @@ async fn get_file_content(
 async fn proxy_responses(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    Extension(rate_limit_guard): Extension<crate::middleware::rate_limit::RateLimitGuard>,
     api_key_ext: Option<Extension<AuthenticatedApiKey>>,
     mut headers: HeaderMap,
     request: Request,
@@ -2758,7 +2759,10 @@ async fn proxy_responses(
             usage_stream = usage_stream
                 .with_agent_ids(api_key.api_key_info.instance_id, api_key.api_key_info.id);
         }
-        Body::from_stream(usage_stream)
+        Body::from_stream(crate::usage_parsing::forward_usage_stream(
+            usage_stream,
+            Some(rate_limit_guard),
+        ))
     } else {
         let bytes = match collect_stream_to_bytes(proxy_response.body).await {
             Ok(b) => b,
@@ -4134,6 +4138,7 @@ async fn proxy_post_to_cloud_api(
 async fn proxy_chat_completions(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    Extension(rate_limit_guard): Extension<crate::middleware::rate_limit::RateLimitGuard>,
     api_key_ext: Option<Extension<AuthenticatedApiKey>>,
     mut headers: HeaderMap,
     request: Request,
@@ -4209,7 +4214,10 @@ async fn proxy_chat_completions(
             usage_stream = usage_stream
                 .with_agent_ids(api_key.api_key_info.instance_id, api_key.api_key_info.id);
         }
-        Body::from_stream(usage_stream)
+        Body::from_stream(crate::usage_parsing::forward_usage_stream(
+            usage_stream,
+            Some(rate_limit_guard),
+        ))
     } else {
         let bytes = match collect_stream_to_bytes(proxy_response.body).await {
             Ok(b) => b,
