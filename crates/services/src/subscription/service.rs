@@ -302,7 +302,7 @@ pub struct SubscriptionServiceImpl {
 impl SubscriptionServiceImpl {
     /// Returns true when Stripe is configured well enough to perform Stripe API calls.
     fn is_stripe_configured(&self) -> bool {
-        !self.stripe_secret_key.is_empty() && !self.stripe_webhook_secret.is_empty()
+        !self.stripe_secret_key.trim().is_empty() && !self.stripe_webhook_secret.trim().is_empty()
     }
 
     #[inline]
@@ -3545,6 +3545,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
         payload: &[u8],
         signature: &str,
     ) -> Result<(), SubscriptionError> {
+        if !self.is_stripe_configured() {
+            return Err(SubscriptionError::NotConfigured);
+        }
+
         tracing::info!("Processing Stripe webhook");
 
         self.stripe_client

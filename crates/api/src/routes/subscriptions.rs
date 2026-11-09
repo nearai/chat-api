@@ -894,6 +894,9 @@ pub async fn handle_stripe_webhook(
         .handle_stripe_webhook(&body, signature)
         .await
         .map_err(|e| match e {
+            SubscriptionError::NotConfigured => {
+                ApiError::service_unavailable("Stripe webhooks are not configured")
+            }
             SubscriptionError::WebhookVerificationFailed(msg) => {
                 tracing::warn!(error_type = error_type(&msg), "Webhook verification failed");
                 ApiError::bad_request("Invalid webhook signature")

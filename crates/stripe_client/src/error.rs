@@ -2,6 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum StripeWebhookError {
+    #[error("webhook secret is not configured")]
+    MissingSecret,
     #[error("missing Stripe-Signature header")]
     MissingSignatureHeader,
     #[error("invalid Stripe-Signature header")]
