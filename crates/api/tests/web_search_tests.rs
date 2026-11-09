@@ -127,6 +127,7 @@ fn other_tool_call() -> serde_json::Value {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_requires_authentication() {
     let mock_upstream = MockServer::start().await;
 
@@ -136,6 +137,7 @@ async fn web_search_requires_authentication() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let response = server
         .post("/mcp")
@@ -146,6 +148,7 @@ async fn web_search_requires_authentication() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_records_usage_only_on_success() {
     let mock_upstream = MockServer::start().await;
 
@@ -194,6 +197,7 @@ async fn web_search_records_usage_only_on_success() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let email = format!(
         "test_web_search_success_{}@example.com",
@@ -252,6 +256,7 @@ async fn web_search_records_usage_only_on_success() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_does_not_record_usage_when_is_error_flag_is_missing() {
     let mock_upstream = MockServer::start().await;
 
@@ -288,6 +293,7 @@ async fn web_search_does_not_record_usage_when_is_error_flag_is_missing() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let email = format!(
         "test_web_search_missing_flag_{}@example.com",
@@ -317,6 +323,7 @@ async fn web_search_does_not_record_usage_when_is_error_flag_is_missing() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_does_not_record_usage_for_failed_agent_request() {
     let mock_upstream = MockServer::start().await;
 
@@ -343,6 +350,7 @@ async fn web_search_does_not_record_usage_for_failed_agent_request() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let failed_agent_email = format!(
         "test_web_search_failed_agent_{}@example.com",
@@ -386,6 +394,7 @@ async fn web_search_does_not_record_usage_for_failed_agent_request() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn non_web_search_mcp_call_does_not_record_usage() {
     let mock_upstream = MockServer::start().await;
 
@@ -418,6 +427,7 @@ async fn non_web_search_mcp_call_does_not_record_usage() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let email = format!(
         "test_mcp_other_tool_{}@example.com",
@@ -447,6 +457,7 @@ async fn non_web_search_mcp_call_does_not_record_usage() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_records_usage_for_successful_agent_request() {
     let mock_upstream = MockServer::start().await;
 
@@ -495,6 +506,7 @@ async fn web_search_records_usage_for_successful_agent_request() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let success_agent_email = format!(
         "test_web_search_success_agent_{}@example.com",
@@ -601,6 +613,7 @@ async fn web_search_records_usage_for_successful_agent_request() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_supports_cloud_api_base_url_with_v1_suffix() {
     let mock_upstream = MockServer::start().await;
 
@@ -650,6 +663,7 @@ async fn web_search_supports_cloud_api_base_url_with_v1_suffix() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let email = format!(
         "test_web_search_v1_base_url_{}@example.com",
@@ -684,6 +698,7 @@ async fn web_search_supports_cloud_api_base_url_with_v1_suffix() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn mcp_rejects_unsubscribed_sessions_and_agent_keys_before_forwarding() {
     let upstream = MockServer::start().await;
     let (server, db) = create_test_server_and_db(TestServerConfig {
@@ -722,6 +737,7 @@ async fn mcp_rejects_unsubscribed_sessions_and_agent_keys_before_forwarding() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn mcp_rejects_banned_users_before_forwarding() {
     let upstream = MockServer::start().await;
     let (server, db) = create_test_server_and_db(TestServerConfig {
@@ -754,6 +770,7 @@ async fn mcp_rejects_banned_users_before_forwarding() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn mcp_enforces_request_rate_limit() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
@@ -784,6 +801,7 @@ async fn mcp_enforces_request_rate_limit() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn mcp_rejects_low_near_balance_on_first_request() {
     let upstream = MockServer::start().await;
     let rpc = MockServer::start().await;
