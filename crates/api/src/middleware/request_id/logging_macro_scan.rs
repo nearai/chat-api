@@ -13,6 +13,7 @@ pub(super) fn logging_macro_bodies(source: &str) -> Vec<(usize, String)> {
         "println!(",
         "eprintln!(",
         "dbg!(",
+        "panic!(",
         "event!(",
         "info_span!(",
         "debug_span!(",
@@ -200,7 +201,7 @@ fn next_non_whitespace_byte(code: &str, start: usize) -> Option<u8> {
 }
 
 fn has_positional_argument_named(code: &str, identifier: &str) -> bool {
-    code.split(',').skip(1).any(|argument| {
+    code.split(',').any(|argument| {
         let trimmed = argument.trim();
         trimmed == identifier
             || trimmed

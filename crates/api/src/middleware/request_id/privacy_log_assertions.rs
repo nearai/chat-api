@@ -147,6 +147,7 @@ impl<'ast> syn::visit::Visit<'ast> for ProductionLogs {
                 | "println"
                 | "eprintln"
                 | "dbg"
+                | "panic"
                 | "event"
                 | "info_span"
                 | "debug_span"
@@ -286,6 +287,10 @@ fn source_guard_rejects_credentials_and_nested_errors() {
         r#""internal error: {err:#}""#,
         r#""database row: {:?}", db_err.detail()"#,
         r#"?instance, "instance created""#,
+        r#"token, "authenticating""#,
+        r#"url, "sending request""#,
+        r#"err, "request failed""#,
+        r#""Agent manager #{} ({}) has an empty API token", i, mgr.url"#,
     ] {
         let code: String = string_literals_removed(body)
             .chars()

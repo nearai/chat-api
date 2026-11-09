@@ -47,7 +47,9 @@ impl Default for DatabaseConfig {
         let connection_mode = std::env::var("DATABASE_CONNECTION_MODE")
             .unwrap_or_else(|_| "patroni".into())
             .parse::<DatabaseConnectionMode>()
-            .unwrap_or_else(|error| panic!("{error}"));
+            .unwrap_or_else(|_| {
+                panic!("DATABASE_CONNECTION_MODE must be exactly 'patroni' or 'direct' (lowercase, no surrounding whitespace)")
+            });
         let host = std::env::var("DATABASE_HOST").ok();
         if connection_mode == DatabaseConnectionMode::Direct
             && host.as_deref().is_none_or(|host| host.trim().is_empty())
@@ -94,9 +96,7 @@ impl Default for DatabaseConfig {
             password: if let Ok(path) = std::env::var("DATABASE_PASSWORD_FILE") {
                 std::fs::read_to_string(&path)
                     .map(|p| p.trim().to_string())
-                    .unwrap_or_else(|e| {
-                        panic!("Failed to read DATABASE_PASSWORD_FILE at {}: {}", path, e)
-                    })
+                    .unwrap_or_else(|_| panic!("Failed to read DATABASE_PASSWORD_FILE"))
             } else {
                 std::env::var("DATABASE_PASSWORD").unwrap_or_else(|_| "postgres".to_string())
             },
@@ -233,9 +233,7 @@ impl Default for OpenAIConfig {
             api_key: if let Ok(path) = std::env::var("OPENAI_API_KEY_FILE") {
                 std::fs::read_to_string(&path)
                     .map(|p| p.trim().to_string())
-                    .unwrap_or_else(|e| {
-                        panic!("Failed to read OPENAI_API_KEY_FILE at {}: {}", path, e)
-                    })
+                    .unwrap_or_else(|_| panic!("Failed to read OPENAI_API_KEY_FILE"))
             } else {
                 std::env::var("OPENAI_API_KEY").unwrap_or_default()
             },
@@ -634,21 +632,14 @@ impl Default for StripeConfig {
             secret_key: if let Ok(path) = std::env::var("STRIPE_SECRET_KEY_FILE") {
                 std::fs::read_to_string(&path)
                     .map(|p| p.trim().to_string())
-                    .unwrap_or_else(|e| {
-                        panic!("Failed to read STRIPE_SECRET_KEY_FILE at {}: {}", path, e)
-                    })
+                    .unwrap_or_else(|_| panic!("Failed to read STRIPE_SECRET_KEY_FILE"))
             } else {
                 std::env::var("STRIPE_SECRET_KEY").unwrap_or_default()
             },
             webhook_secret: if let Ok(path) = std::env::var("STRIPE_WEBHOOK_SECRET_FILE") {
                 std::fs::read_to_string(&path)
                     .map(|p| p.trim().to_string())
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "Failed to read STRIPE_WEBHOOK_SECRET_FILE at {}: {}",
-                            path, e
-                        )
-                    })
+                    .unwrap_or_else(|_| panic!("Failed to read STRIPE_WEBHOOK_SECRET_FILE"))
             } else {
                 std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default()
             },

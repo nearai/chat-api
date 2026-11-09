@@ -318,7 +318,7 @@ impl AgentServiceImpl {
         }
         for (i, mgr) in managers.iter().enumerate() {
             if mgr.token.is_empty() {
-                panic!("Agent manager #{} ({}) has an empty API token", i, mgr.url);
+                panic!("Agent manager #{i} has an empty API token");
             }
         }
 
@@ -4206,16 +4206,28 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "empty API token")]
-    fn test_panics_on_empty_token() {
-        make_service(
-            vec![AgentManager {
-                url: "https://test.com".to_string(),
-                token: "".to_string(),
-            }],
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
-        );
+    fn empty_token_panic_excludes_manager_credentials() {
+        let result = std::panic::catch_unwind(|| {
+            make_service(
+                vec![AgentManager {
+                    url: "https://user:PASSWORD_SENTINEL@test.com/?token=TOKEN_SENTINEL"
+                        .to_string(),
+                    token: String::new(),
+                }],
+                Arc::new(mock_repo_with_manager_count(0)),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+        });
+
+        let payload = result.expect_err("missing token must prevent startup");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("startup panic must have a text message");
+
+        assert_eq!(message, "Agent manager #0 has an empty API token");
+        assert!(!message.contains("SENTINEL"));
     }
 
     // --- Wiremock-based integration tests ---
