@@ -128,11 +128,12 @@ pub fn create_api_router(
     dual_auth_state: crate::middleware::DualAuthState,
     subscription_state: crate::middleware::SubscriptionState,
 ) -> Router<crate::state::AppState> {
-    // Dual auth + subscription + rate limited: chat completions and images
+    // Paid inference and tools share authentication, subscription and rate limits.
     let llm_proxy_router = Router::new()
         .route("/v1/chat/completions", post(proxy_chat_completions))
         .route("/v1/images/generations", post(proxy_image_generations))
         .route("/v1/images/edits", post(proxy_image_edits))
+        .route("/mcp", post(proxy_mcp))
         .layer(axum::middleware::from_fn_with_state(
             rate_limit_state.clone(),
             crate::middleware::rate_limit_middleware,
@@ -174,20 +175,10 @@ pub fn create_api_router(
             crate::middleware::dual_auth_middleware,
         ));
 
-    // Dual auth only: MCP passthrough for tool calls (separate from llm_proxy)
-    let mcp_router =
-        Router::new()
-            .route("/mcp", post(proxy_mcp))
-            .layer(axum::middleware::from_fn_with_state(
-                dual_auth_state,
-                crate::middleware::dual_auth_middleware,
-            ));
-
     Router::new()
         .merge(llm_proxy_router)
         .merge(responses_proxy_router)
         .merge(models_proxy_router)
-        .merge(mcp_router)
         .merge(create_retired_stateful_router())
 }
 
@@ -3357,6 +3348,9 @@ async fn proxy_mcp(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
+    ensure_user_not_banned(&state, &user).await?;
+    ensure_near_balance_for_near_user(&state, &user).await?;
+
     let body_bytes = extract_body_bytes(request).await?;
     let mcp_request = serde_json::from_slice::<McpRequestEnvelope>(&body_bytes).ok();
     let is_web_search_call = mcp_request

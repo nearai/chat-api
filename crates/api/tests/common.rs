@@ -562,7 +562,11 @@ pub async fn create_test_server_with_state(
         metrics_service,
         analytics_service,
         user_usage_service,
-        near_rpc_url: config.near.rpc_url.clone(),
+        near_rpc_url: test_config
+            .near_rpc_url
+            .as_deref()
+            .map(|url| url.parse().expect("valid test RPC URL"))
+            .unwrap_or_else(|| config.near.rpc_url.clone()),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(
