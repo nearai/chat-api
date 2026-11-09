@@ -56,7 +56,7 @@ const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 /// Duration to cache model settings needed by /v1/responses in memory (in seconds)
 const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 const MODEL_SETTINGS_CACHE_MAX_ENTRIES: usize = 1024;
-const MODEL_ID_MAX_BYTES: usize = 256;
+const MODEL_SETTINGS_CACHE_MAX_KEY_BYTES: usize = 256;
 
 /// Duration to cache system configs in memory (in seconds)
 const SYSTEM_CONFIGS_CACHE_TTL_SECS: i64 = 60;
@@ -3580,6 +3580,10 @@ fn cache_model_settings(
     model_id: &str,
     entry: crate::state::ModelSettingsCacheEntry,
 ) {
+    // Bound retained key memory without changing accepted model IDs.
+    if model_id.len() > MODEL_SETTINGS_CACHE_MAX_KEY_BYTES {
+        return;
+    }
     cache.retain(|_, cached| {
         let age = entry
             .last_checked_at
@@ -3607,20 +3611,11 @@ async fn get_model_settings_with_cache(
     model_id: &str,
     user_id: services::UserId,
 ) -> Result<(Option<String>, Option<bool>), Response> {
-    if model_id.len() > MODEL_ID_MAX_BYTES {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Model ID must not exceed 256 bytes".to_string(),
-            }),
-        )
-            .into_response());
-    }
     let mut model_system_prompt: Option<String> = None;
     let mut model_settings_cache_hit: Option<bool> = None;
 
-    // 1) Try cache first
-    {
+    // Long IDs bypass the cache but still go through the same DB visibility check.
+    if model_id.len() <= MODEL_SETTINGS_CACHE_MAX_KEY_BYTES {
         let cache = state.model_settings_cache.read().await;
         if let Some(entry) = cache.get(model_id) {
             let age = Utc::now().signed_duration_since(entry.last_checked_at);
@@ -6053,6 +6048,15 @@ mod model_settings_cache_bounds_tests {
             public: true,
             system_prompt: None,
         };
+        cache_model_settings(
+            &mut cache,
+            &"x".repeat(MODEL_SETTINGS_CACHE_MAX_KEY_BYTES + 1),
+            entry(now),
+        );
+        assert!(
+            cache.is_empty(),
+            "oversized IDs must not consume cache memory"
+        );
         for i in 0..MODEL_SETTINGS_CACHE_MAX_ENTRIES + 100 {
             cache_model_settings(&mut cache, &format!("unknown-{i}"), entry(now));
             assert!(cache.len() <= MODEL_SETTINGS_CACHE_MAX_ENTRIES);
