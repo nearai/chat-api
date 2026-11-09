@@ -9,7 +9,7 @@ use services::tasks::{
     AccountDeletionTaskPayload, CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor,
 };
 use services::user::ports::{AccountDeletionError, AccountDeletionStatus, UserRepository};
-use services::vpc::{initialize_vpc_credentials, VpcAuthConfig};
+use services::vpc::initialize_cloud_api_credentials;
 use services::{agent::ports::AgentService, UserId};
 use std::sync::Arc;
 
@@ -509,32 +509,11 @@ async fn main() -> anyhow::Result<()> {
         config.agent.channel_relay_url.clone(),
     ));
 
-    let vpc_auth_config = if config.vpc_auth.is_configured() {
-        let base_url = config.openai.base_url.as_ref().ok_or_else(|| {
-            anyhow!("OPENAI_BASE_URL is required when VPC authentication is configured")
-        })?;
-        let shared_secret = config
-            .vpc_auth
-            .read_shared_secret()
-            .ok_or_else(|| anyhow!("Failed to read VPC shared secret"))?;
-        Some(VpcAuthConfig {
-            client_id: config.vpc_auth.client_id.clone(),
-            shared_secret,
-            base_url: base_url.clone(),
-        })
-    } else {
-        None
-    };
-
-    let static_api_key = if vpc_auth_config.is_none() {
-        Some(config.openai.api_key.clone())
-    } else {
-        None
-    };
-    let vpc_credentials_service = initialize_vpc_credentials(
-        vpc_auth_config,
+    // Reuse persisted Cloud API credentials; the environment key is the
+    // fallback for an empty cache. No VPC secret or login is consulted.
+    let vpc_credentials_service = initialize_cloud_api_credentials(
         db.app_config_repository() as Arc<dyn services::vpc::VpcCredentialsRepository>,
-        static_api_key,
+        Some(config.openai.api_key.clone()),
     )
     .await?;
 

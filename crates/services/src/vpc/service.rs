@@ -1,14 +1,7 @@
-use super::ports::{
-    VpcAuthConfig, VpcCredentials, VpcCredentialsRepository, VpcCredentialsService, VpcInfo,
-};
+use super::ports::{VpcCredentials, VpcCredentialsRepository, VpcCredentialsService, VpcInfo};
 use async_trait::async_trait;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// Database keys for storing VPC credentials
 const VPC_API_KEY_CONFIG_KEY: &str = "vpc_api_key";
@@ -16,100 +9,48 @@ const VPC_ORGANIZATION_ID_CONFIG_KEY: &str = "vpc_organization_id";
 
 const LEGACY_VPC_REFRESH_TOKEN_CONFIG_KEY: &str = "vpc_refresh_token";
 
-/// Response from VPC login endpoint
-#[derive(serde::Deserialize)]
-struct VpcLoginResponse {
-    organization: VpcOrganization,
-    api_key: String,
-    #[allow(unused)]
-    access_token: String,
-    #[allow(unused)]
-    refresh_token: String,
-}
-
-#[derive(serde::Deserialize)]
-struct VpcOrganization {
-    id: String,
-}
-
 /// In-memory cached VPC authentication data.
 struct CachedCredentials {
     organization_id: String,
     api_key: String,
 }
 
+// Remember static selection too, so a cache miss does not add DB reads to
+// every proxied request. Explicit invalidation or restart rechecks persistence.
+enum CredentialCache {
+    Persisted(CachedCredentials),
+    Static,
+}
+
+impl CredentialCache {
+    fn credentials(&self) -> Option<VpcCredentials> {
+        match self {
+            Self::Persisted(creds) => Some(VpcCredentials {
+                organization_id: creds.organization_id.clone(),
+                api_key: creds.api_key.clone(),
+            }),
+            Self::Static => None,
+        }
+    }
+}
+
 /// Implementation of VpcCredentialsService
 pub struct VpcCredentialsServiceImpl {
-    config: Option<VpcAuthConfig>,
     repository: Arc<dyn VpcCredentialsRepository>,
-    cached: RwLock<Option<CachedCredentials>>,
-    http_client: reqwest::Client,
+    cached: RwLock<Option<CredentialCache>>,
     static_api_key: Option<String>,
 }
 
 impl VpcCredentialsServiceImpl {
     pub fn new(
-        config: Option<VpcAuthConfig>,
         repository: Arc<dyn VpcCredentialsRepository>,
         static_api_key: Option<String>,
     ) -> Self {
         Self {
-            config,
             repository,
             cached: RwLock::new(None),
-            http_client: reqwest::Client::new(),
             static_api_key,
         }
-    }
-
-    /// Perform VPC authentication to obtain fresh credentials
-    async fn vpc_authenticate(&self, config: &VpcAuthConfig) -> anyhow::Result<VpcLoginResponse> {
-        // Generate timestamp
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_secs();
-
-        // Generate HMAC-SHA256 signature
-        let mut mac = HmacSha256::new_from_slice(config.shared_secret.as_bytes())
-            .expect("HMAC can take key of any size");
-        mac.update(timestamp.to_string().as_bytes());
-        let signature = hex::encode(mac.finalize().into_bytes());
-
-        tracing::info!(
-            "Performing VPC authentication with client_id: {}",
-            config.client_id
-        );
-
-        // Build the auth URL
-        let auth_url = format!("{}/auth/vpc/login", config.base_url.trim_end_matches('/'));
-
-        // Make authentication request
-        let response = self
-            .http_client
-            .post(&auth_url)
-            .header("Content-Type", "application/json")
-            .json(&serde_json::json!({
-                "timestamp": timestamp,
-                "signature": signature,
-                "client_id": config.client_id
-            }))
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("VPC authentication failed with status {}: {}", status, body);
-        }
-
-        let login_response: VpcLoginResponse = response.json().await?;
-        tracing::info!(
-            "VPC authentication successful, organization_id: {}",
-            login_response.organization.id
-        );
-
-        Ok(login_response)
     }
 
     /// Load credentials from database
@@ -135,48 +76,25 @@ impl VpcCredentialsServiceImpl {
         let api_key = self.repository.get(VPC_API_KEY_CONFIG_KEY).await?;
 
         match (org_id, api_key) {
-            (Some(org_id), Some(api_key)) => Ok(Some(CachedCredentials {
-                organization_id: org_id,
-                api_key,
-            })),
+            (Some(org_id), Some(api_key))
+                if !org_id.trim().is_empty() && !api_key.trim().is_empty() =>
+            {
+                Ok(Some(CachedCredentials {
+                    organization_id: org_id,
+                    api_key,
+                }))
+            }
             _ => Ok(None),
         }
     }
 
-    /// Save credentials to database
-    async fn save_to_db(&self, creds: &CachedCredentials) {
-        if !creds.api_key.is_empty() {
-            if let Err(e) = self
-                .repository
-                .set(VPC_API_KEY_CONFIG_KEY, &creds.api_key)
-                .await
-            {
-                tracing::warn!("Failed to cache VPC API key: {}", e);
-            }
-        }
-
-        if let Err(e) = self
-            .repository
-            .set(VPC_ORGANIZATION_ID_CONFIG_KEY, &creds.organization_id)
-            .await
-        {
-            tracing::warn!("Failed to cache VPC organization ID: {}", e);
-        }
-    }
-
-    /// Get or authenticate credentials
-    async fn get_or_authenticate_credentials(
-        &self,
-        config: &VpcAuthConfig,
-    ) -> anyhow::Result<VpcCredentials> {
+    /// Resolve the process cache, persisted credentials, or static fallback.
+    async fn load_cached_credentials(&self) -> anyhow::Result<Option<VpcCredentials>> {
         // First, try to use cached credentials
         {
             let cached = self.cached.read().await;
             if let Some(creds) = cached.as_ref() {
-                return Ok(VpcCredentials {
-                    organization_id: creds.organization_id.clone(),
-                    api_key: creds.api_key.clone(),
-                });
+                return Ok(creds.credentials());
             }
         }
 
@@ -184,112 +102,90 @@ impl VpcCredentialsServiceImpl {
 
         // Double-check after acquiring write lock
         if let Some(creds) = cached.as_ref() {
-            return Ok(VpcCredentials {
-                organization_id: creds.organization_id.clone(),
-                api_key: creds.api_key.clone(),
-            });
+            return Ok(creds.credentials());
         }
 
-        // Try to load from database if not cached
-        if cached.is_none() {
-            if let Some(db_creds) = self.load_from_db().await? {
-                let creds = VpcCredentials {
-                    organization_id: db_creds.organization_id.clone(),
-                    api_key: db_creds.api_key.clone(),
-                };
-                *cached = Some(db_creds);
-                return Ok(creds);
-            }
+        if let Some(db_creds) = self
+            .load_from_db()
+            .await
+            .map_err(|_| anyhow::anyhow!("Failed to load cached Cloud API credentials"))?
+        {
+            let creds = VpcCredentials {
+                organization_id: db_creds.organization_id.clone(),
+                api_key: db_creds.api_key.clone(),
+            };
+
+            *cached = Some(CredentialCache::Persisted(db_creds));
+            return Ok(Some(creds));
         }
 
-        // No cached credentials - perform full VPC auth
-        tracing::info!("Performing full VPC authentication...");
-        let login_response = self.vpc_authenticate(config).await?;
+        if self
+            .static_api_key
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty())
+        {
+            *cached = Some(CredentialCache::Static);
+        }
 
-        let new_creds = CachedCredentials {
-            organization_id: login_response.organization.id.clone(),
-            api_key: login_response.api_key.clone(),
-        };
-
-        // Save to database
-        self.save_to_db(&new_creds).await;
-
-        *cached = Some(new_creds);
-
-        Ok(VpcCredentials {
-            organization_id: login_response.organization.id,
-            api_key: login_response.api_key,
-        })
+        Ok(None)
     }
 }
 
 #[async_trait]
 impl VpcCredentialsService for VpcCredentialsServiceImpl {
     async fn get_credentials(&self) -> anyhow::Result<Option<VpcCredentials>> {
-        match &self.config {
-            Some(config) => Ok(Some(self.get_or_authenticate_credentials(config).await?)),
-            None => Ok(None),
-        }
+        self.load_cached_credentials().await
     }
 
     async fn get_api_key(&self) -> anyhow::Result<String> {
-        if let Some(config) = &self.config {
-            // Ensure we have valid credentials (re-authenticate if needed)
-            let creds = self.get_or_authenticate_credentials(config).await?;
-            Ok(creds.api_key)
-        } else {
-            // Not configured for VPC, use static key
-            Ok(self.static_api_key.clone().unwrap_or_default())
+        if let Some(creds) = self.get_credentials().await? {
+            return Ok(creds.api_key);
         }
+
+        self.static_api_key
+            .as_ref()
+            .filter(|key| !key.trim().is_empty())
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("No cached Cloud API credentials or static API key available")
+            })
     }
 
     async fn revoke_credentials(&self) -> anyhow::Result<()> {
-        // Only meaningful in VPC mode; in static API key mode we do nothing.
-        if self.config.is_none() {
-            return Ok(());
-        }
-
-        self.repository.delete(VPC_API_KEY_CONFIG_KEY).await?;
-        self.repository
-            .delete(VPC_ORGANIZATION_ID_CONFIG_KEY)
-            .await?;
-
-        // Clear in-memory cache
+        // Serialize invalidation with cache loading so an in-flight lookup
+        // cannot repopulate this process with credentials being removed.
         let mut cached = self.cached.write().await;
         *cached = None;
 
-        Ok(())
-    }
+        self.repository
+            .delete(VPC_API_KEY_CONFIG_KEY)
+            .await
+            .map_err(|_| anyhow::anyhow!("Failed to delete cached Cloud API key"))?;
+        self.repository
+            .delete(VPC_ORGANIZATION_ID_CONFIG_KEY)
+            .await
+            .map_err(|_| anyhow::anyhow!("Failed to delete cached Cloud API organization"))?;
 
-    fn is_configured(&self) -> bool {
-        self.config.is_some()
+        Ok(())
     }
 }
 
-/// Initialize VPC credentials and get the API key
-/// This is called during startup to ensure we have a valid API key
-pub async fn initialize_vpc_credentials(
-    config: Option<VpcAuthConfig>,
+/// Resolve a Cloud API credential during API/worker startup.
+pub async fn initialize_cloud_api_credentials(
     repository: Arc<dyn VpcCredentialsRepository>,
     static_api_key: Option<String>,
 ) -> anyhow::Result<Arc<dyn VpcCredentialsService>> {
-    let service = Arc::new(VpcCredentialsServiceImpl::new(
-        config.clone(),
-        repository.clone(),
-        static_api_key,
-    ));
+    let service = Arc::new(VpcCredentialsServiceImpl::new(repository, static_api_key));
 
-    // If VPC is configured, ensure we have valid credentials
-    if config.is_some() {
-        // Also ensure we can get valid credentials (this will refresh if needed)
-        let _ = service.get_credentials().await?;
-        tracing::info!("VPC credentials initialized");
-    }
+    // Both API and worker must prove that credentials are available at startup.
+    // A repository error is not a cache miss and must not switch identities.
+    let _ = service.get_api_key().await?;
+    tracing::info!("Cloud API credentials initialized");
 
     Ok(service)
 }
 
-/// No-op VPC repository for non-VPC mode
+/// No-op repository for callers that deliberately have no persistent cache
 pub struct NoOpVpcRepository;
 
 #[async_trait]
@@ -342,10 +238,6 @@ pub mod test_helpers {
 
         async fn revoke_credentials(&self) -> anyhow::Result<()> {
             Ok(())
-        }
-
-        fn is_configured(&self) -> bool {
-            self.credentials.is_some()
         }
     }
 }
