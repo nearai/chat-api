@@ -21,6 +21,8 @@ use utoipa::OpenApi;
         crate::routes::oauth::exchange_oauth_callback_code,
         crate::routes::oauth::near_auth,
         crate::routes::oauth::logout,
+        crate::routes::browser_session::refresh,
+        crate::routes::browser_session::logout,
         // User endpoints
         crate::routes::users::get_current_user,
         crate::routes::users::get_user_status,
