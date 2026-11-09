@@ -193,8 +193,8 @@ OpenAPI docs available at `/docs`.
 - `/v1/users/*` - User management
 - `/v1/admin/*` - Admin operations
 
-**Agent secrets**: Admin sessions can call
-`PATCH /v1/admin/agents/instances/{id}/secrets` with
+**Agent credentials**: Admin sessions can call
+`PATCH /v1/admin/agents/instances/{id}/credentials` with
 `{"instance_token":"<new-token>"}`, where `{id}` is the database instance UUID.
 The endpoint encrypts the token before storage and returns `204 No Content`.
 It rejects blank tokens and extra fields, and returns `404` for missing or deleted

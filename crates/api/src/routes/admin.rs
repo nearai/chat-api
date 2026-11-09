@@ -1580,10 +1580,10 @@ pub async fn admin_list_all_instances(
     }))
 }
 
-/// Secrets that an administrator can replace in chat-api's instance record.
+/// Credentials that an administrator can replace in chat-api's instance record.
 #[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct UpdateInstanceSecretsRequest {
+pub struct UpdateInstanceCredentialsRequest {
     /// New plaintext instance token. Encrypted before storage; never returned.
     #[schema(write_only = true, min_length = 1)]
     pub instance_token: String,
@@ -1593,20 +1593,20 @@ pub struct UpdateInstanceSecretsRequest {
 /// This does not rotate the token in the running agent or update per-user provisioning credentials.
 #[utoipa::path(
     patch,
-    path = "/v1/admin/agents/instances/{id}/secrets",
+    path = "/v1/admin/agents/instances/{id}/credentials",
     tag = "Admin",
     params(
         ("id" = String, Path, description = "Database instance UUID")
     ),
-    request_body = UpdateInstanceSecretsRequest,
+    request_body = UpdateInstanceCredentialsRequest,
     responses(
         (
             status = 204,
-            description = "Instance secrets updated; no credentials returned",
+            description = "Instance credentials updated; no credentials returned",
         ),
         (
             status = 400,
-            description = "Invalid instance ID or secrets payload",
+            description = "Invalid instance ID or credentials payload",
             body = crate::error::ApiErrorResponse,
         ),
         (
@@ -1626,13 +1626,13 @@ pub struct UpdateInstanceSecretsRequest {
         ),
         (
             status = 500,
-            description = "Failed to update instance secrets",
+            description = "Failed to update instance credentials",
             body = crate::error::ApiErrorResponse,
         )
     ),
     security(("session_token" = []))
 )]
-pub async fn admin_update_instance_secrets(
+pub async fn admin_update_instance_credentials(
     State(app_state): State<AppState>,
     Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
@@ -1649,7 +1649,7 @@ pub async fn admin_update_instance_secrets(
     let invalid_payload =
         || ApiError::bad_request("Expected a JSON object containing only a string instance_token");
     let Json(payload) = payload.map_err(|_| invalid_payload())?;
-    let request: UpdateInstanceSecretsRequest =
+    let request: UpdateInstanceCredentialsRequest =
         serde_json::from_value(serde_json::Value::Object(payload))
             .map_err(|_| invalid_payload())?;
 
@@ -1666,9 +1666,9 @@ pub async fn admin_update_instance_secrets(
             tracing::error!(
                 %instance_id,
                 admin_user_id = %admin.user_id,
-                "Failed to update instance secrets"
+                "Failed to update instance credentials"
             );
-            ApiError::internal_server_error("Failed to update instance secrets")
+            ApiError::internal_server_error("Failed to update instance credentials")
         })?;
 
     if !updated {
@@ -1678,7 +1678,7 @@ pub async fn admin_update_instance_secrets(
     tracing::info!(
         %instance_id,
         admin_user_id = %admin.user_id,
-        "Admin updated instance secrets"
+        "Admin updated instance credentials"
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -3303,8 +3303,8 @@ pub fn create_admin_router() -> Router<AppState> {
                 .route("/instances/sync-status", post(admin_sync_agent_status))
                 .route("/instances/{id}", delete(admin_delete_instance))
                 .route(
-                    "/instances/{id}/secrets",
-                    patch(admin_update_instance_secrets),
+                    "/instances/{id}/credentials",
+                    patch(admin_update_instance_credentials),
                 )
                 .route("/instances/{id}/start", post(admin_start_instance))
                 .route("/instances/{id}/stop", post(admin_stop_instance))

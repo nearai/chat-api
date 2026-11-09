@@ -13,7 +13,7 @@ use services::agent::ports::{AgentRepository, CreateInstanceParams};
 use services::UserId;
 use uuid::Uuid;
 
-const ADMIN_EMAIL: &str = "agent-secrets@admin.org";
+const ADMIN_EMAIL: &str = "agent-credentials@admin.org";
 
 struct Fixture {
     server: TestServer,
@@ -34,7 +34,7 @@ impl Fixture {
             ..Default::default()
         })
         .await;
-        let owner_email = format!("agent-secrets-{}@example.com", Uuid::new_v4());
+        let owner_email = format!("agent-credentials-{}@example.com", Uuid::new_v4());
         let owner_token = mock_login(&server, &owner_email).await;
         let admin_token = mock_login(&server, ADMIN_EMAIL).await;
         let client = db.pool().get().await.unwrap();
@@ -51,7 +51,7 @@ impl Fixture {
             .create_instance(CreateInstanceParams {
                 user_id: owner_id,
                 instance_id: Uuid::new_v4().to_string(),
-                name: "secrets-update".into(),
+                name: "credentials-update".into(),
                 public_ssh_key: Some("ssh-ed25519 test-public-key".into()),
                 instance_url: Some("https://agent.example.com".into()),
                 instance_token: Some("old-instance-token".into()),
@@ -78,7 +78,10 @@ impl Fixture {
     }
 
     fn path(&self) -> String {
-        format!("/v1/admin/agents/instances/{}/secrets", self.instance_id)
+        format!(
+            "/v1/admin/agents/instances/{}/credentials",
+            self.instance_id
+        )
     }
 
     async fn patch(&self, payload: Value) -> TestResponse {
@@ -176,7 +179,7 @@ async fn admin_replaces_only_the_token_in_both_encryption_modes() {
 
 #[tokio::test]
 #[serial]
-async fn instance_secrets_require_admin_authentication() {
+async fn instance_credentials_require_admin_authentication() {
     let fixture = Fixture::new(false).await;
     let before = fixture.stored().await;
     let payload = json!({ "instance_token": "unauthorized-replacement" });
@@ -201,7 +204,7 @@ async fn instance_secrets_require_admin_authentication() {
 
 #[tokio::test]
 #[serial]
-async fn instance_secrets_reject_metadata_and_invalid_payloads_without_echoing_values() {
+async fn instance_credentials_reject_metadata_and_invalid_payloads_without_echoing_values() {
     let fixture = Fixture::new(false).await;
     let before = fixture.stored().await;
     let marker = "sensitive-value-must-not-be-echoed";
@@ -257,7 +260,7 @@ async fn instance_secrets_reject_metadata_and_invalid_payloads_without_echoing_v
 
 #[tokio::test]
 #[serial]
-async fn instance_secrets_reject_invalid_missing_and_deleted_instances() {
+async fn instance_credentials_reject_invalid_missing_and_deleted_instances() {
     let fixture = Fixture::new(false).await;
     let before = fixture.stored().await;
 
@@ -267,7 +270,7 @@ async fn instance_secrets_reject_invalid_missing_and_deleted_instances() {
     ] {
         let response = fixture
             .server
-            .patch(&format!("/v1/admin/agents/instances/{id}/secrets"))
+            .patch(&format!("/v1/admin/agents/instances/{id}/credentials"))
             .add_header(
                 HeaderName::from_static("authorization"),
                 fixture.admin_auth.clone(),
@@ -305,7 +308,7 @@ async fn instance_secrets_reject_invalid_missing_and_deleted_instances() {
 
 #[tokio::test]
 #[serial]
-async fn instance_secrets_repair_an_unreadable_token_and_fail_closed_on_encryption_errors() {
+async fn instance_credentials_repair_an_unreadable_token_and_fail_closed_on_encryption_errors() {
     let fixture = Fixture::new(true).await;
     fixture
         .db
@@ -361,12 +364,12 @@ async fn instance_secrets_repair_an_unreadable_token_and_fail_closed_on_encrypti
 }
 
 #[test]
-fn openapi_exposes_only_the_secrets_patch_with_a_write_only_token() {
+fn openapi_exposes_only_the_credentials_patch_with_a_write_only_token() {
     use utoipa::OpenApi;
 
     let spec = serde_json::to_value(api::openapi::ApiDoc::openapi()).unwrap();
-    let operation = &spec["paths"]["/v1/admin/agents/instances/{id}/secrets"]["patch"];
-    let schema = &spec["components"]["schemas"]["UpdateInstanceSecretsRequest"];
+    let operation = &spec["paths"]["/v1/admin/agents/instances/{id}/credentials"]["patch"];
+    let schema = &spec["components"]["schemas"]["UpdateInstanceCredentialsRequest"];
 
     assert!(operation.is_object());
     assert!(operation["responses"]["204"]["content"].is_null());
