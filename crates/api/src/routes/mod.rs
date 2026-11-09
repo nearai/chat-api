@@ -14,7 +14,7 @@ mod cors;
 // Re-export validation constants from services crate for API layer usage
 pub use services::agent::ports::{is_valid_service_type, VALID_SERVICE_TYPES};
 
-use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use axum::{http::StatusCode, middleware::from_fn_with_state, routing::get, Json, Router};
 use serde::Serialize;
 use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
@@ -22,7 +22,6 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::{
     middleware::{AuthState, MetricsState},
     state::AppState,
-    static_files,
 };
 
 #[derive(Serialize, ToSchema)]
@@ -181,8 +180,9 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .merge(api_routes) // API routes: proxy, temporary views, and disabled mutations
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
-        // Add static file serving as fallback (must be last)
-        .fallback(static_files::static_handler);
+        // Temporarily disable frontend serving. An explicit fallback keeps the
+        // API's middleware on 404s when the docs router is merged below.
+        .fallback(|| async { StatusCode::NOT_FOUND });
 
     let cors = cors::create_cors_layer(cors_config);
 
