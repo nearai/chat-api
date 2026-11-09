@@ -1,16 +1,12 @@
 mod common;
+mod retired_stateful;
 
-use api::routes::api::STATEFUL_API_RETIRED_MESSAGE;
-use axum_test::{TestResponse, TestServer};
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
-use http::{HeaderName, HeaderValue, Method, StatusCode};
-use serde_json::Value;
 use services::file::ports::{FileData, FileRepository};
 use services::user::ports::UserRepository;
 use services::UserId;
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::MockServer;
 
 #[tokio::test]
 async fn repository_encrypts_filename_and_dual_reads_it() {
@@ -21,9 +17,11 @@ async fn repository_encrypts_filename_and_dual_reads_it() {
             write_enabled: true,
             ..config
         });
+
     let user_id = Uuid::new_v4();
     let file_id = format!("file-{user_id}");
     let client = db.pool().get().await.unwrap();
+
     client
         .execute(
             "INSERT INTO users(id,email) VALUES($1,$2)",
@@ -32,6 +30,7 @@ async fn repository_encrypts_filename_and_dual_reads_it() {
         .await
         .unwrap();
     drop(client);
+
     let file = FileData {
         id: file_id.clone(),
         bytes: 7,
@@ -40,186 +39,77 @@ async fn repository_encrypts_filename_and_dual_reads_it() {
         filename: "private-name.txt".into(),
         purpose: "assistants".into(),
     };
+
     db.file_repository()
         .upsert_file(&file, UserId(user_id))
         .await
         .unwrap();
+
     let client = db.pool().get().await.unwrap();
     let stored: String = client
         .query_one("SELECT filename FROM files WHERE id=$1", &[&file_id])
         .await
         .unwrap()
         .get(0);
+
     assert!(stored.contains(database::field_encryption::MARKER));
     assert!(!stored.contains("private-name.txt"));
     drop(client);
+
     let loaded = db
         .file_repository()
         .get_file(&file_id, UserId(user_id))
         .await
         .unwrap();
+
     assert_eq!(loaded.filename, "private-name.txt");
 }
 
-fn bearer(token: &str) -> (HeaderName, HeaderValue) {
-    (
-        HeaderName::from_static("authorization"),
-        HeaderValue::from_str(&format!("Bearer {token}")).expect("test token header"),
-    )
-}
-
-fn assert_no_store(response: &TestResponse) {
-    assert_eq!(
-        response
-            .headers()
-            .get(http::header::CACHE_CONTROL)
-            .and_then(|value| value.to_str().ok()),
-        Some("no-store")
-    );
-}
-
-fn assert_retired_mutation(response: TestResponse) {
-    assert_eq!(response.status_code(), StatusCode::GONE);
-    assert_no_store(&response);
-    let body: Value = response.json();
-    assert_eq!(
-        body.get("error").and_then(Value::as_str),
-        Some(STATEFUL_API_RETIRED_MESSAGE)
-    );
-}
-
-async fn stage_one_fixture() -> (TestServer, MockServer, String, String) {
+#[tokio::test]
+async fn file_endpoints_are_retired_without_accessing_data() {
     let upstream = MockServer::start().await;
-    let file_id = format!("file_stage1_{}", Uuid::new_v4());
-    Mock::given(method("GET"))
-        .and(path(format!("/files/{file_id}/content")))
-        .respond_with(ResponseTemplate::new(200).set_body_string("temporary file content"))
-        .mount(&upstream)
-        .await;
-    Mock::given(method("DELETE"))
-        .and(path(format!("/files/{file_id}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": file_id.clone(),
-            "deleted": true
-        })))
-        .mount(&upstream)
-        .await;
-
     let (server, db) = create_test_server_and_db(TestServerConfig {
         proxy_base_url: Some(upstream.uri()),
-        ..Default::default()
+        ..TestServerConfig::default()
     })
     .await;
-    let email = format!("stage-one-files-{}@example.com", Uuid::new_v4());
+    let email = format!("retired-file-{}@example.com", Uuid::new_v4());
     let token = mock_login(&server, &email).await;
-    let user = db
+    let owner = db
         .user_repository()
         .get_user_by_email(&email)
         .await
-        .expect("get user")
-        .expect("user exists");
-    db.pool()
-        .get()
+        .unwrap()
+        .unwrap();
+    let file = FileData {
+        id: format!("file-{}", Uuid::new_v4()),
+        bytes: 7,
+        created_at: 1,
+        expires_at: None,
+        filename: "private.txt".into(),
+        purpose: "assistants".into(),
+    };
+
+    db.file_repository()
+        .upsert_file(&file, owner.id)
         .await
-        .expect("db client")
-        .execute(
-            "INSERT INTO files (id, user_id, bytes, file_created_at, filename, purpose)
-             VALUES ($1, $2, 25, 123, 'temporary-export.txt', 'assistants')",
-            &[&file_id, &user.id],
-        )
+        .unwrap();
+    let paths = vec![
+        "/v1/files".to_string(),
+        "/v1/files/".to_string(),
+        "/v1/files/missing".to_string(),
+        format!("/v1/files/{}", file.id),
+        format!("/v1/files/{}/content", file.id),
+        format!("/v1/files/{}/unknown/child", file.id),
+    ];
+
+    retired_stateful::assert_retired_paths(&server, &paths, &token).await;
+
+    let stored = db
+        .file_repository()
+        .get_file(&file.id, owner.id)
         .await
-        .expect("insert file");
-
-    (server, upstream, token, file_id)
-}
-
-#[tokio::test]
-async fn stage_one_file_views_remain_readable() {
-    let (server, _upstream, token, file_id) = stage_one_fixture().await;
-    let auth = bearer(&token);
-
-    let response = server
-        .get("/v1/files")
-        .add_header(auth.0.clone(), auth.1.clone())
-        .await;
-    assert_eq!(response.status_code(), StatusCode::OK);
-    assert_no_store(&response);
-    let list: Value = response.json();
-    assert_eq!(list["data"][0]["id"], file_id);
-
-    let response = server
-        .get(&format!("/v1/files/{file_id}"))
-        .add_header(auth.0.clone(), auth.1.clone())
-        .await;
-    assert_eq!(response.status_code(), StatusCode::OK);
-    assert_no_store(&response);
-    let file: Value = response.json();
-    assert_eq!(file["id"], file_id);
-
-    let response = server
-        .get(&format!("/v1/files/{file_id}/content"))
-        .add_header(auth.0.clone(), auth.1.clone())
-        .await;
-    assert_eq!(response.status_code(), StatusCode::OK);
-    assert_no_store(&response);
-    assert_eq!(response.text(), "temporary file content");
-
-    let unauthenticated = server.get("/v1/files").await;
-    assert_eq!(unauthenticated.status_code(), StatusCode::UNAUTHORIZED);
-    assert_no_store(&unauthenticated);
-
-    let unauthenticated_unknown = server
-        .get(&format!("/v1/files/{file_id}/unknown-child"))
-        .await;
-    assert_eq!(
-        unauthenticated_unknown.status_code(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_no_store(&unauthenticated_unknown);
-
-    let unauthenticated_trailing_slash = server.get("/v1/files/").await;
-    assert_eq!(
-        unauthenticated_trailing_slash.status_code(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_no_store(&unauthenticated_trailing_slash);
-}
-
-#[tokio::test]
-async fn stage_one_non_delete_file_mutations_and_fallbacks_are_gone() {
-    let (server, _upstream, token, file_id) = stage_one_fixture().await;
-    let auth = bearer(&token);
-
-    for (method, path) in [
-        (Method::POST, "/v1/files".to_string()),
-        // Unsupported methods on retained views and unlisted descendants must
-        // remain inside the authenticated migration namespace.
-        (Method::PATCH, format!("/v1/files/{file_id}")),
-        (Method::POST, format!("/v1/files/{file_id}/content")),
-        (Method::GET, format!("/v1/files/{file_id}/unknown-child")),
-        (Method::GET, "/v1/files/".to_string()),
-    ] {
-        assert_retired_mutation(
-            server
-                .method(method, &path)
-                .add_header(auth.0.clone(), auth.1.clone())
-                .await,
-        );
-    }
-}
-
-#[tokio::test]
-async fn stage_one_file_delete_remains_available() {
-    let (server, _upstream, token, file_id) = stage_one_fixture().await;
-    let auth = bearer(&token);
-
-    let response = server
-        .delete(&format!("/v1/files/{file_id}"))
-        .add_header(auth.0, auth.1)
-        .await;
-    assert_eq!(response.status_code(), StatusCode::OK);
-    assert_no_store(&response);
-    let body: Value = response.json();
-    assert_eq!(body["id"], file_id);
-    assert_eq!(body["deleted"], true);
+        .unwrap();
+    assert_eq!(stored.filename, file.filename);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
 }
