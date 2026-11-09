@@ -130,6 +130,7 @@ dependencies = [
  "services",
  "sha2 0.10.9",
  "stripe_client",
+ "syn 2.0.119",
  "tokio",
  "tokio-stream",
  "tower",

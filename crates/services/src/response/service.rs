@@ -1,3 +1,4 @@
+use crate::logging::error_type;
 use crate::vpc::VpcCredentialsService;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -98,13 +99,16 @@ impl OpenAIProxyService for OpenAIProxy {
 
         // Get API key
         let api_key = self.vpc_service.get_api_key().await.map_err(|e| {
-            tracing::error!("Failed to get API key: {}", e);
+            tracing::error!("Failed to get API key: {}", error_type(&e));
             ProxyError::ApiError("Failed to get API key".to_string())
         })?;
 
         let url = format!("{}/{}", self.base_url.trim_end_matches('/'), clean_path);
 
-        tracing::info!("OpenAI Proxy: Forwarding request {} to {}", method, url);
+        tracing::info!(
+            %method,
+            "OpenAI Proxy: forwarding request"
+        );
 
         let body_size = body.as_ref().map(|b| b.len()).unwrap_or(0);
         tracing::debug!("Request body size: {} bytes", body_size);
@@ -141,9 +145,20 @@ impl OpenAIProxyService for OpenAIProxy {
         }
 
         // Send the request
-        tracing::debug!("Sending request to OpenAI: {} {}", method, url);
+        tracing::debug!(
+            %method,
+            "Sending request to OpenAI"
+        );
         let response = request_builder.send().await.map_err(|e| {
-            tracing::error!("OpenAI API request failed for {} {}: {}", method, url, e);
+            tracing::error!(
+                %method,
+                error_type = error_type(&e),
+                is_timeout = e.is_timeout(),
+                is_connect = e.is_connect(),
+                is_builder = e.is_builder(),
+                status = e.status().map(|status| status.as_u16()),
+                "OpenAI API request failed"
+            );
             ProxyError::ApiError(e.to_string())
         })?;
 
@@ -152,10 +167,9 @@ impl OpenAIProxyService for OpenAIProxy {
         let response_headers = response.headers().clone();
 
         tracing::info!(
-            "OpenAI Proxy: Received response from {} {} - status: {}",
-            method,
-            url,
-            status
+            %method,
+            %status,
+            "OpenAI Proxy: received response"
         );
 
         tracing::debug!("Response has {} header(s)", response_headers.len());

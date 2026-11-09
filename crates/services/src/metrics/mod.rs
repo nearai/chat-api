@@ -71,7 +71,7 @@ impl MetricsServiceTrait for LoggingMetricsService {
             metric_name = name,
             metric_type = "latency",
             duration_ms = duration.as_millis() as u64,
-            tags = ?tags,
+            tag_count = tags.len(),
             "Recording latency metric"
         );
     }
@@ -81,7 +81,7 @@ impl MetricsServiceTrait for LoggingMetricsService {
             metric_name = name,
             metric_type = "count",
             value = value,
-            tags = ?tags,
+            tag_count = tags.len(),
             "Recording count metric"
         );
     }
@@ -91,7 +91,7 @@ impl MetricsServiceTrait for LoggingMetricsService {
             metric_name = name,
             metric_type = "histogram",
             value = value,
-            tags = ?tags,
+            tag_count = tags.len(),
             "Recording histogram metric"
         );
     }

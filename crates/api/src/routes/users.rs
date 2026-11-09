@@ -7,6 +7,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use services::logging::error_type;
 use services::tasks::{AccountDeletionTaskPayload, TaskId, TaskMessage, TaskPayload};
 use services::user::ports::{AccountDeletionError, UserStatusError};
 
@@ -45,7 +46,7 @@ pub async fn get_user_status(
             UserStatusError::Internal(err) => {
                 tracing::error!(
                     user_id = %user.user_id,
-                    error = ?err,
+                    error_type = error_type(&err),
                     "Failed to check user status"
                 );
                 ApiError::internal_server_error("Failed to check user status")
@@ -83,7 +84,7 @@ pub async fn get_current_user(
         .get_user_profile(user.user_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get user profile: {}", e);
+            tracing::error!("Failed to get user profile: {}", error_type(&e));
             ApiError::user_profile_error()
         })?;
 
@@ -134,7 +135,10 @@ pub async fn delete_current_user(
 
     if deletion_request.was_inserted {
         let task_id = TaskId::new(format!("account-deletion-{}", deletion.id)).map_err(|e| {
-            tracing::error!("Failed to create account deletion task id: {}", e);
+            tracing::error!(
+                "Failed to create account deletion task id: {}",
+                error_type(&e)
+            );
             ApiError::internal_server_error("Failed to enqueue account deletion")
         })?;
         let message = TaskMessage {
@@ -146,10 +150,10 @@ pub async fn delete_current_user(
 
         if let Err(e) = task_publisher.publish(message).await {
             tracing::error!(
-                "Failed to enqueue account deletion task, cleaning up request: user_id={}, deletion_id={}, error={:#}",
+                "Failed to enqueue account deletion task, cleaning up request: user_id={}, deletion_id={}, error={}",
                 user.user_id,
                 deletion.id,
-                e
+                error_type(&e)
             );
             let _ = app_state
                 .user_service
@@ -208,7 +212,7 @@ fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
             ApiError::conflict(format!("Account deletion is already {status}"))
         }
         AccountDeletionError::Internal(err) => {
-            tracing::error!("Failed to delete account: {:#}", err);
+            tracing::error!(error_type = error_type(&err), "Failed to delete account");
             ApiError::internal_server_error("Failed to delete account")
         }
     }
@@ -265,7 +269,11 @@ pub async fn get_my_usage(
         .get_usage_by_user_id(user.user_id, start, end)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get usage for user_id={}: {}", user.user_id, e);
+            tracing::error!(
+                "Failed to get usage for user_id={}: {}",
+                user.user_id,
+                error_type(&e)
+            );
             ApiError::internal_server_error("Failed to retrieve usage")
         })?;
 
@@ -309,7 +317,7 @@ pub async fn get_user_settings(
         .get_settings(user.user_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get user settings: {}", e);
+            tracing::error!("Failed to get user settings: {}", error_type(&e));
             ApiError::internal_server_error("Failed to get user settings")
         })?;
 
@@ -357,7 +365,7 @@ pub async fn update_user_settings(
         .update_settings(user.user_id, content)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to update user settings: {}", e);
+            tracing::error!("Failed to update user settings: {}", error_type(&e));
             ApiError::internal_server_error("Failed to update user settings")
         })?;
 
@@ -408,7 +416,7 @@ pub async fn update_user_settings_partially(
         .update_settings_partially(user.user_id, content)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to update user settings: {}", e);
+            tracing::error!("Failed to update user settings: {}", error_type(&e));
             ApiError::internal_server_error("Failed to update user settings")
         })?;
 

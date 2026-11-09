@@ -1,3 +1,4 @@
+use crate::logging::error_type;
 use crate::system_configs::ports::{AgentHostingConfig, SystemConfigs, SystemConfigsService};
 use crate::UserId;
 use anyhow::anyhow;
@@ -266,7 +267,7 @@ async fn get_instance_details_static(
     // Use provided bearer token (e.g., session token from passkey login), fall back to manager token
     let token = bearer_token.unwrap_or(&manager.token);
 
-    tracing::debug!("Calling GET {}/instances/{}", manager.url, encoded_name);
+    tracing::debug!("Fetching agent instance");
 
     let response = http_client.get(&url).bearer_auth(token).send().await.ok()?;
 
@@ -317,7 +318,7 @@ impl AgentServiceImpl {
         }
         for (i, mgr) in managers.iter().enumerate() {
             if mgr.token.is_empty() {
-                panic!("Agent manager #{} ({}) has an empty API token", i, mgr.url);
+                panic!("Agent manager #{i} has an empty API token");
             }
         }
 
@@ -398,7 +399,7 @@ impl AgentServiceImpl {
             }
             Err(e) => {
                 tracing::warn!(
-                    error = %e,
+                    error_type = error_type(&e),
                     service_type = %canonical_service_type,
                     "Latest allowlist image unavailable; falling back to configured image ref"
                 );
@@ -425,10 +426,7 @@ impl AgentServiceImpl {
             let max = match max {
                 Some(limit) => limit,
                 None => {
-                    tracing::info!(
-                        "Manager limit missing in config, treating as unlimited: manager_url={}",
-                        mgr.url
-                    );
+                    tracing::info!("Manager limit missing in config, treating as unlimited");
                     return Ok(mgr.clone());
                 }
             };
@@ -436,12 +434,7 @@ impl AgentServiceImpl {
             if (count as u64) < max {
                 return Ok(mgr.clone());
             }
-            tracing::info!(
-                "Manager at capacity: manager_url={}, count={}, max={}",
-                mgr.url,
-                count,
-                max
-            );
+            tracing::info!(count, max, "Manager at capacity");
         }
 
         Err(anyhow!("All {} agent manager(s) are at capacity", n))
@@ -505,7 +498,7 @@ impl AgentServiceImpl {
             "user_id": user_id,
         });
 
-        tracing::debug!("Calling compose-api /auth/login: url={}", url);
+        tracing::debug!("Calling compose-api /auth/login");
 
         let response = http_client
             .post(&url)
@@ -575,7 +568,7 @@ impl AgentServiceImpl {
             "user_id": user_id,
         });
 
-        tracing::debug!("Calling compose-api /auth/register: url={}", url);
+        tracing::debug!("Calling compose-api /auth/register");
 
         let response = self
             .http_client
@@ -674,9 +667,8 @@ impl AgentServiceImpl {
         };
 
         tracing::info!(
-            "Calling compose-api /auth/proxy-session: url={}, user_id={}",
-            url,
-            user_id
+            %user_id,
+            "Calling compose-api /auth/proxy-session"
         );
 
         let response = self
@@ -780,7 +772,7 @@ impl AgentServiceImpl {
                     tracing::error!(
                         "Failed to load API key spend total: api_key_id={}, error={}",
                         api_key_info.id,
-                        e
+                        error_type(&e)
                     );
                     AgentApiKeyAuthError::Internal
                 })?;
@@ -806,7 +798,7 @@ impl AgentServiceImpl {
                 tracing::error!(
                     "Failed to update last_used_at for api_key_id={}: {}",
                     api_key_id,
-                    e
+                    error_type(&e)
                 );
                 AgentApiKeyAuthError::Internal
             })
@@ -869,11 +861,7 @@ impl AgentServiceImpl {
         // Use provided bearer token (e.g., session token from passkey login), fall back to manager token
         let token = bearer_token.unwrap_or(&manager.token);
 
-        tracing::debug!(
-            "Fetching SSH command from Agent API: instance_name={}, url={}",
-            instance_name,
-            url
-        );
+        tracing::debug!("Fetching SSH command from Agent API");
 
         let response = http_client
             .get(&url)
@@ -910,7 +898,7 @@ impl AgentServiceImpl {
                 tracing::warn!(
                     "Failed to parse SSH command response: instance_name={}, error={}",
                     instance_name,
-                    e
+                    error_type(&e)
                 );
                 None
             }
@@ -1017,7 +1005,7 @@ impl AgentServiceImpl {
         let AuthMethod::BearerToken(token) = auth_method;
         request = request.bearer_auth(token);
 
-        tracing::debug!("Calling Agent API create instance: url={}", url);
+        tracing::debug!("Calling Agent API create instance");
 
         let response = request
             .json(&request_body)
@@ -1098,20 +1086,15 @@ impl AgentServiceImpl {
                             if let Some(data) = line.strip_prefix("data: ") {
                                 match serde_json::from_str::<serde_json::Value>(data) {
                                     Ok(event) => {
-                                        if let Some(event_type) =
-                                            event.get("event").and_then(|v| v.as_str())
-                                        {
-                                            tracing::info!(
-                                                "Agent API SSE event received: event_type={}",
-                                                event_type
-                                            );
+                                        if event.get("event").and_then(|v| v.as_str()).is_some() {
+                                            tracing::info!("Agent API SSE event received");
                                         }
                                         let _ = tx.send(Ok(event)).await;
                                     }
                                     Err(e) => {
                                         tracing::debug!(
                                             "Failed to parse Agent API SSE data as JSON: {}",
-                                            e
+                                            error_type(&e)
                                         );
                                     }
                                 }
@@ -1128,7 +1111,7 @@ impl AgentServiceImpl {
                         // Unprocessed data remains - this is a real error
                         tracing::error!(
                             "Agent API stream error: error={}, chunks_received={}, buffer_len={}",
-                            e,
+                            error_type(&e),
                             chunk_count,
                             buffer.len()
                         );
@@ -1203,10 +1186,9 @@ async fn save_passkey_instance_from_event(
         .map(|s| s.to_string());
 
     tracing::debug!(
-        "Extracted from instance_data (passkey): instance_id={}, has_token={}, instance_data_keys={:?}",
-        instance_id,
-        instance_token.is_some(),
-        instance_data.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()
+        %instance_id,
+        has_token = instance_token.is_some(),
+        "Extracted passkey instance metadata"
     );
 
     // Reject empty instance_token if present (defense-in-depth)
@@ -1272,20 +1254,15 @@ async fn save_passkey_instance_from_event(
     let final_service_type = service_type_from_response.or(params.service_type.clone());
 
     tracing::info!(
-        "URL extraction for passkey instance: instance_name={}, has_instance_url={}, has_dashboard_url={}, all_keys_in_instance_data={:?}",
-        instance_name,
-        instance_url.is_some(),
-        dashboard_url.is_some(),
-        instance_data.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()
+        has_instance_url = instance_url.is_some(),
+        has_dashboard_url = dashboard_url.is_some(),
+        "Extracted passkey instance URLs"
     );
 
     tracing::debug!(
-        "Saving passkey instance to database: user_id={}, instance_id={}, name={}, service_type={:?}, agent_api_base_url={:?}",
-        user_id,
-        instance_id,
-        instance_name,
-        final_service_type,
-        params.agent_api_base_url
+        %user_id,
+        %instance_id,
+        "Saving passkey instance to database"
     );
 
     let instance = repository
@@ -1301,13 +1278,12 @@ async fn save_passkey_instance_from_event(
             service_type: final_service_type,
         })
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             tracing::error!(
-                "Database save failed for passkey instance: user_id={}, error_chain: {}",
+                "Database save failed for passkey instance: user_id={}, error_type={}",
                 user_id,
-                format!("{:#}", e)
+                error_type(e)
             );
-            e
         })?;
 
     // Defense-in-depth: verify the created instance belongs to the requesting user
@@ -1391,9 +1367,8 @@ impl AgentService for AgentServiceImpl {
         let manager_url = manager.url.clone();
 
         tracing::info!(
-            "create_passkey_instance_streaming: selected manager_url={}, user_id={}",
-            manager_url,
-            user_id
+            %user_id,
+            "Selected manager for passkey instance creation"
         );
 
         // Get or create user's passkey credentials and login to compose-api
@@ -1437,7 +1412,7 @@ impl AgentService for AgentServiceImpl {
                     tracing::warn!(
                         "Failed to fetch user passkey credentials: user_id={}, error={}",
                         user_id,
-                        e
+                        error_type(&e)
                     );
                     return Err(e);
                 }
@@ -1498,14 +1473,14 @@ impl AgentService for AgentServiceImpl {
                 tracing::error!(
                     "Failed to start Agent API streaming for passkey instance: user_id={}, error={}. Revoking orphaned API key.",
                     user_id,
-                    e
+                    error_type(&e)
                 );
                 if let Err(cleanup_err) = self.repository.revoke_api_key(api_key.id).await {
                     tracing::warn!(
                         "Failed to revoke API key after streaming setup failure: user_id={}, api_key_id={}, error={}",
                         user_id,
                         api_key.id,
-                        cleanup_err
+                        error_type(&cleanup_err)
                     );
                 }
                 return Err(e);
@@ -1546,7 +1521,7 @@ impl AgentService for AgentServiceImpl {
                                     "Failed to revoke API key on client disconnect: user_id={}, api_key_id={}, error={}",
                                     user_id,
                                     api_key_id,
-                                    cleanup_err
+                                    error_type(&cleanup_err)
                                 );
                             }
                             stream_interrupted = true;
@@ -1557,14 +1532,14 @@ impl AgentService for AgentServiceImpl {
                         tracing::warn!(
                             "Stream error: user_id={}, revoking unbound API key: {}",
                             user_id,
-                            e
+                            error_type(&e)
                         );
                         if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
                             tracing::warn!(
                                 "Failed to revoke API key on stream error: user_id={}, api_key_id={}, error={}",
                                 user_id,
                                 api_key_id,
-                                cleanup_err
+                                error_type(&cleanup_err)
                             );
                         }
                         let _ = tx.send(Err(e)).await;
@@ -1670,7 +1645,7 @@ impl AgentService for AgentServiceImpl {
                                 tracing::warn!(
                                     "Failed to send final event to frontend: user_id={}, error={}",
                                     user_id,
-                                    send_err
+                                    error_type(&send_err)
                                 );
                             }
                         }
@@ -1678,14 +1653,14 @@ impl AgentService for AgentServiceImpl {
                             tracing::error!(
                                 "Failed to save passkey instance: user_id={}, error_details={:#}",
                                 user_id,
-                                e
+                                error_type(&e)
                             );
                             if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
                                 tracing::warn!(
                                     "Failed to revoke API key on save failure: user_id={}, api_key_id={}, error={}",
                                     user_id,
                                     api_key_id,
-                                    cleanup_err
+                                    error_type(&cleanup_err)
                                 );
                             }
                         }
@@ -1700,7 +1675,7 @@ impl AgentService for AgentServiceImpl {
                             "Failed to revoke API key: user_id={}, api_key_id={}, error={}",
                             user_id,
                             api_key_id,
-                            cleanup_err
+                            error_type(&cleanup_err)
                         );
                     }
                 }
@@ -1893,16 +1868,11 @@ impl AgentService for AgentServiceImpl {
         // Query only the managers that own at least one instance in the list
         let futures: Vec<_> = by_manager
             .keys()
-            .filter_map(|url| {
-                match self.managers.iter().find(|m| &m.url == url) {
-                    Some(mgr) => Some(self.call_agent_api_list(mgr)),
-                    None => {
-                        tracing::warn!(
-                            "Stored agent_api_base_url not found in configured managers, skipping enrichment: url={}",
-                            url
-                        );
-                        None
-                    }
+            .filter_map(|url| match self.managers.iter().find(|m| &m.url == url) {
+                Some(mgr) => Some(self.call_agent_api_list(mgr)),
+                None => {
+                    tracing::warn!("Stored agent manager is not configured; skipping enrichment");
+                    None
                 }
             })
             .collect();
@@ -1948,7 +1918,7 @@ impl AgentService for AgentServiceImpl {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Agent API list failed on one manager: {}", e);
+                    tracing::warn!("Agent API list failed on one manager: {}", error_type(&e));
                 }
             }
         }
@@ -2238,10 +2208,8 @@ impl AgentService for AgentServiceImpl {
         // Route to the correct manager
         let manager = self.resolve_manager(&instance)?;
         tracing::info!(
-            "Restart: resolved manager: stored_url={:?}, using_manager_url={}, instance_name={}",
-            instance.agent_api_base_url,
-            manager.url,
-            instance.name
+            instance_id = %instance.id,
+            "Restart: resolved manager"
         );
 
         // Resolve bearer token: for passkey instances, login to get a fresh token
@@ -2251,9 +2219,8 @@ impl AgentService for AgentServiceImpl {
         let encoded_name = urlencoding::encode(&instance.name);
         let restart_url = format!("{}/instances/{}/restart", manager.url, encoded_name);
         tracing::info!(
-            "Calling Agent API restart: url={}, instance_id={}",
-            restart_url,
-            instance_id
+            %instance_id,
+            "Calling Agent API restart"
         );
         let response = self
             .http_client
@@ -2271,11 +2238,10 @@ impl AgentService for AgentServiceImpl {
                 .await
                 .unwrap_or_else(|_| "unable to read body".to_string());
             tracing::error!(
-                "Agent API restart failed: status={}, url={}, body_len={}, instance_id={}",
-                status,
-                restart_url,
-                body.len(),
-                instance_id
+                %instance_id,
+                %status,
+                body_len = body.len(),
+                "Agent API restart failed"
             );
             return Err(anyhow!(
                 "Agent API restart failed with status {}: instance_id={}",
@@ -2322,9 +2288,8 @@ impl AgentService for AgentServiceImpl {
         let manager = self.resolve_manager(&instance)?;
 
         tracing::info!(
-            "Upgrade: manager_url={}, instance_name={}",
-            manager.url,
-            instance.name
+            instance_id = %instance.id,
+            "Upgrade: resolved manager"
         );
 
         self.upgrade_instance_stream_impl(&instance, manager, instance_id, user_id)
@@ -2354,9 +2319,8 @@ impl AgentService for AgentServiceImpl {
 
         let manager = self.resolve_manager(&instance)?;
         tracing::info!(
-            "Upgrade check: manager_url={}, instance_name={}",
-            manager.url,
-            instance.name
+            instance_id = %instance.id,
+            "Upgrade check: resolved manager"
         );
 
         self.check_upgrade_available_impl(&instance, manager, instance_id)
@@ -2391,10 +2355,8 @@ impl AgentService for AgentServiceImpl {
         // Route to the correct manager
         let manager = self.resolve_manager(&instance)?;
         tracing::info!(
-            "Stop: resolved manager: stored_url={:?}, using_manager_url={}, instance_name={}",
-            instance.agent_api_base_url,
-            manager.url,
-            instance.name
+            instance_id = %instance.id,
+            "Stop: resolved manager"
         );
 
         // Resolve bearer token: for passkey instances, login to get a fresh token
@@ -2404,9 +2366,8 @@ impl AgentService for AgentServiceImpl {
         let encoded_name = urlencoding::encode(&instance.name);
         let stop_url = format!("{}/instances/{}/stop", manager.url, encoded_name);
         tracing::info!(
-            "Calling Agent API stop: url={}, instance_id={}",
-            stop_url,
-            instance_id
+            %instance_id,
+            "Calling Agent API stop"
         );
         let response = self
             .http_client
@@ -2424,11 +2385,10 @@ impl AgentService for AgentServiceImpl {
                 .await
                 .unwrap_or_else(|_| "unable to read body".to_string());
             tracing::error!(
-                "Agent API stop failed: status={}, url={}, body_len={}, instance_id={}",
-                status,
-                stop_url,
-                body.len(),
-                instance_id
+                %instance_id,
+                %status,
+                body_len = body.len(),
+                "Agent API stop failed"
             );
             return Err(anyhow!(
                 "Agent API stop failed with status {}: instance_id={}",
@@ -2479,10 +2439,8 @@ impl AgentService for AgentServiceImpl {
         // Route to the correct manager
         let manager = self.resolve_manager(&instance)?;
         tracing::info!(
-            "Start: resolved manager: stored_url={:?}, using_manager_url={}, instance_name={}",
-            instance.agent_api_base_url,
-            manager.url,
-            instance.name
+            instance_id = %instance.id,
+            "Start: resolved manager"
         );
 
         // Resolve bearer token: for passkey instances, login to get a fresh token
@@ -2492,9 +2450,8 @@ impl AgentService for AgentServiceImpl {
         let encoded_name = urlencoding::encode(&instance.name);
         let start_url = format!("{}/instances/{}/start", manager.url, encoded_name);
         tracing::info!(
-            "Calling Agent API start: url={}, instance_id={}",
-            start_url,
-            instance_id
+            %instance_id,
+            "Calling Agent API start"
         );
         let response = self
             .http_client
@@ -2512,11 +2469,10 @@ impl AgentService for AgentServiceImpl {
                 .await
                 .unwrap_or_else(|_| "unable to read body".to_string());
             tracing::error!(
-                "Agent API start failed: status={}, url={}, body_len={}, instance_id={}",
-                status,
-                start_url,
-                body.len(),
-                instance_id
+                %instance_id,
+                %status,
+                body_len = body.len(),
+                "Agent API start failed"
             );
             return Err(anyhow!(
                 "Agent API start failed with status {}: instance_id={}",
@@ -2604,10 +2560,7 @@ impl AgentService for AgentServiceImpl {
             {
                 Some(m) => m,
                 None => {
-                    tracing::error!(
-                        "sync_all_instance_statuses: manager not configured: {}",
-                        mgr_url
-                    );
+                    tracing::error!("sync_all_instance_statuses: manager not configured");
                     unconfigured_count += 1;
                     failed_managers.insert(mgr_url.trim_end_matches('/').to_string());
                     continue;
@@ -2630,7 +2583,10 @@ impl AgentService for AgentServiceImpl {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("sync_all_instance_statuses: failed to query manager: {}", e);
+                    tracing::error!(
+                        "sync_all_instance_statuses: failed to query manager: {}",
+                        error_type(&e)
+                    );
                     result
                         .errors
                         .push(format!("Failed to query an agent manager: {}", e));
@@ -2716,7 +2672,7 @@ impl AgentService for AgentServiceImpl {
                 tracing::warn!(
                     "Failed to fetch user passkey credentials: user_id={}, error={}",
                     user_id,
-                    e
+                    error_type(&e)
                 );
                 return Err(e);
             }
@@ -3000,7 +2956,7 @@ impl AgentService for AgentServiceImpl {
             .get_instance_by_api_key_hash(&key_hash)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to fetch API key by hash: {}", e);
+                tracing::error!("Failed to fetch API key by hash: {}", error_type(&e));
                 AgentApiKeyAuthError::Internal
             })?
             .ok_or_else(|| {
@@ -3025,7 +2981,7 @@ impl AgentService for AgentServiceImpl {
             tracing::error!(
                 "Failed to mark API key as used: api_key_id={}, error={:?}",
                 api_key_info.id,
-                err
+                error_type(&err)
             );
         }
 
@@ -3180,11 +3136,7 @@ impl AgentServiceImpl {
 
         // Fetch available images from crabshack allowlist
         let images_url = format!("{}/images", manager.url);
-        tracing::debug!(
-            "Allowlist ({}): Fetching image allowlist from: {}",
-            context,
-            images_url
-        );
+        tracing::debug!(context, "Fetching image allowlist");
         let images_resp = self
             .http_client
             .get(&images_url)
@@ -3217,19 +3169,11 @@ impl AgentServiceImpl {
         let image_entries: Vec<CrabshackImageEntry> = serde_json::from_str(&response_body)
             .map_err(|e| anyhow!("Failed to parse images response: {}", e))?;
 
-        let sample_refs = image_entries
-            .iter()
-            .take(5)
-            .map(|img| img.ref_.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-
         tracing::debug!(
-            "Allowlist ({}): Parsed {} allowlist images (response_bytes={}, sample_refs=[{}])",
             context,
-            image_entries.len(),
-            response_body_len,
-            sample_refs
+            image_count = image_entries.len(),
+            response_bytes = response_body_len,
+            "Parsed image allowlist"
         );
 
         // Per-entry lines are verbose for large allowlists; use trace for full breakdown.
@@ -3405,10 +3349,7 @@ impl AgentServiceImpl {
         // Fetch current instance status from crabshack
         let encoded_name = urlencoding::encode(&instance.name);
         let instance_url = format!("{}/instances/{}", manager.url, encoded_name);
-        tracing::debug!(
-            "Upgrade check: Fetching instance status from: {}",
-            instance_url
-        );
+        tracing::debug!("Upgrade check: fetching instance status");
         let instance_resp = self
             .http_client
             .get(&instance_url)
@@ -3662,7 +3603,7 @@ impl AgentServiceImpl {
         let bearer_token = &manager.token;
         let encoded_name = urlencoding::encode(&instance.name);
         let instance_url = format!("{}/instances/{}", manager.url, encoded_name);
-        tracing::debug!("Upgrade: Fetching current instance from: {}", instance_url);
+        tracing::debug!("Upgrade: fetching current instance");
 
         let instance_resp = self
             .http_client
@@ -3785,9 +3726,8 @@ impl AgentServiceImpl {
         let restart_url = format!("{}/instances/{}/restart", manager.url, encoded_name);
 
         tracing::debug!(
-            "Calling restart endpoint for streaming: url={}, image={}",
-            restart_url,
-            image
+            %instance_id,
+            "Calling restart endpoint for streaming"
         );
 
         #[derive(serde::Serialize)]
@@ -3801,7 +3741,6 @@ impl AgentServiceImpl {
 
         let http_client = self.http_client.clone();
         let token = bearer_token.clone();
-        let instance_name = instance.name.clone();
         let image_for_task = image.to_string();
 
         tokio::spawn(async move {
@@ -3825,12 +3764,9 @@ impl AgentServiceImpl {
 
             if !response.status().is_success() {
                 tracing::error!(
-                    "Upgrade restart failed: instance_id={}, instance_name={}, image={}, restart_url={}, status={}",
-                    instance_id,
-                    instance_name,
-                    image_for_task,
-                    restart_url,
-                    response.status()
+                    %instance_id,
+                    status = %response.status(),
+                    "Upgrade restart failed"
                 );
                 let _ = tx
                     .send(Err(anyhow!(
@@ -3861,7 +3797,7 @@ impl AgentServiceImpl {
                         tracing::error!(
                             "Upgrade stream error: instance_id={}, error={}",
                             instance_id,
-                            e
+                            error_type(&e)
                         );
                         let _ = tx.send(Err(anyhow!("Stream error: {}", e))).await;
                         return;
@@ -4270,16 +4206,28 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "empty API token")]
-    fn test_panics_on_empty_token() {
-        make_service(
-            vec![AgentManager {
-                url: "https://test.com".to_string(),
-                token: "".to_string(),
-            }],
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
-        );
+    fn empty_token_panic_excludes_manager_credentials() {
+        let result = std::panic::catch_unwind(|| {
+            make_service(
+                vec![AgentManager {
+                    url: "https://user:PASSWORD_SENTINEL@test.com/?token=TOKEN_SENTINEL"
+                        .to_string(),
+                    token: String::new(),
+                }],
+                Arc::new(mock_repo_with_manager_count(0)),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+        });
+
+        let payload = result.expect_err("missing token must prevent startup");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("startup panic must have a text message");
+
+        assert_eq!(message, "Agent manager #0 has an empty API token");
+        assert!(!message.contains("SENTINEL"));
     }
 
     // --- Wiremock-based integration tests ---

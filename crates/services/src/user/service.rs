@@ -1,3 +1,4 @@
+use crate::logging::error_type;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
@@ -267,7 +268,7 @@ impl UserService for UserServiceImpl {
             Err(err) => {
                 tracing::error!(
                     user_id = %user_id,
-                    error = ?err,
+                    error_type = error_type(&err),
                     "Failed to read AML report candidates during user status check; continuing with provider check"
                 );
                 Vec::new()
@@ -313,7 +314,7 @@ impl UserService for UserServiceImpl {
         {
             tracing::error!(
                 user_id = %user_id,
-                error = ?err,
+                error_type = error_type(&err),
                 "Failed to record AML report during user status check; continuing with provider result"
             );
         }

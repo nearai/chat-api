@@ -2,6 +2,7 @@
 //! Used to compute cost in nano-dollars for web_search usage recording.
 
 use chrono::{DateTime, Utc};
+use services::logging::error_type;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -77,16 +78,18 @@ impl WebSearchPricingCache {
         let resp = match self.http_client.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("Failed to fetch web_search pricing from {}: {}", url, e);
+                tracing::warn!(
+                    error_type = error_type(&e),
+                    "Failed to fetch web_search pricing"
+                );
                 return 0;
             }
         };
 
         if !resp.status().is_success() {
             tracing::warn!(
-                "Web search pricing API returned {} for {}",
-                resp.status(),
-                url
+                status = %resp.status(),
+                "Web search pricing API returned an error"
             );
             return 0;
         }
@@ -94,7 +97,10 @@ impl WebSearchPricingCache {
         let body = match resp.json::<ServicePricingResponse>().await {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!("Failed to parse web_search pricing response: {}", e);
+                tracing::warn!(
+                    "Failed to parse web_search pricing response: {}",
+                    error_type(&e)
+                );
                 return 0;
             }
         };

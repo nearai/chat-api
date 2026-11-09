@@ -12,6 +12,7 @@
 
 use bytes::Bytes;
 use futures::Stream;
+use services::logging::error_type;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -444,7 +445,7 @@ fn record_usage_on_stream_end(usage: Option<ParsedUsage>, ctx: StreamUsageContex
                         .await
                     {
                         tracing::warn!(
-                            error = ?e,
+                            error_type = error_type(&e),
                             "Failed to reconcile purchased credits after stream usage"
                         );
                     }
@@ -454,7 +455,7 @@ fn record_usage_on_stream_end(usage: Option<ParsedUsage>, ctx: StreamUsageContex
                     tracing::warn!(
                         "Failed to record usage from stream for user_id={}: {}",
                         ctx.user_id,
-                        e
+                        error_type(&e)
                     );
                 }
             });

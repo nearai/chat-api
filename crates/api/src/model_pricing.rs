@@ -2,6 +2,7 @@
 //! Used to compute cost in nano-dollars from token usage for rate limiting and analytics.
 
 use chrono::{DateTime, Utc};
+use services::logging::error_type;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -195,7 +196,7 @@ impl ModelPricingCache {
         let resp = match self.http_client.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("Failed to fetch model pricing from {}: {}", url, e);
+                tracing::warn!(error_type = error_type(&e), "Failed to fetch model pricing");
                 return None;
             }
         };
@@ -223,7 +224,7 @@ impl ModelPricingCache {
                     } else {
                         model_name.to_string()
                     },
-                    e
+                    error_type(&e)
                 );
                 return None;
             }

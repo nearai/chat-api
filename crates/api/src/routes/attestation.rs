@@ -17,6 +17,7 @@ use futures::TryStreamExt;
 use http::Method;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use services::logging::error_type;
 use services::{agent::ports::AgentInstance, vpc::load_vpc_info};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -110,7 +111,7 @@ pub async fn get_attestation_report(
         .map_err(|e| {
             tracing::error!(
                 "Failed to fetch attestation report from proxy_service: {}",
-                e
+                error_type(&e)
             );
             ApiError::bad_gateway(format!("Failed to fetch attestation report: {}", e))
         })?;
@@ -133,7 +134,10 @@ pub async fn get_attestation_report(
         .try_collect::<Vec<_>>()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to read response body from proxy_service: {}", e);
+            tracing::error!(
+                "Failed to read response body from proxy_service: {}",
+                error_type(&e)
+            );
             ApiError::internal_server_error(format!("Failed to read response body: {}", e))
         })?
         .into_iter()
@@ -144,7 +148,7 @@ pub async fn get_attestation_report(
     let proxy_report: AttestationReport = serde_json::from_slice(&body_bytes).map_err(|e| {
         tracing::error!(
             "Failed to parse attestation report from proxy_service: {}",
-            e
+            error_type(&e)
         );
         ApiError::internal_server_error(format!("Failed to parse attestation report: {}", e))
     })?;
@@ -155,7 +159,7 @@ pub async fn get_attestation_report(
 
     // Parse nonce from cloud API gateway attestation to keep consistent
     let nonce_bytes = hex::decode(&request_nonce).map_err(|e| {
-        tracing::error!("Failed to decode nonce hex string: {}", e);
+        tracing::error!("Failed to decode nonce hex string: {}", error_type(&e));
         ApiError::internal_server_error(format!("Invalid nonce format: {e}"))
     })?;
 
@@ -180,7 +184,7 @@ pub async fn get_attestation_report(
         let info = client.info().await.map_err(|e| {
             tracing::error!(
                 "Failed to get chat API attestation info, are you running in a CVM?: {:?}",
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to get chat API attestation info")
         })?;
@@ -188,7 +192,7 @@ pub async fn get_attestation_report(
         let cpu_quote = client.get_quote(report_data).await.map_err(|e| {
             tracing::error!(
                 "Failed to get chat API attestation, are you running in a CVM?: {:?}",
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to get chat API attestation")
         })?;
@@ -216,7 +220,7 @@ pub async fn get_attestation_report(
         match fetch_agent_attestations(&app_state, instance, &request_nonce).await {
             Ok(attestations) => Some(attestations),
             Err(e) => {
-                tracing::warn!("Failed to fetch agent attestations: {:?}", e);
+                tracing::warn!("Failed to fetch agent attestations: {:?}", error_type(&e));
                 // Don't fail the entire request if agent attestation fetch fails
                 None
             }
@@ -303,11 +307,11 @@ fn validate_instance_name(name: &str) -> Result<(), ApiError> {
 /// Build full URL for agent manager request (handles base URL with/without trailing slash)
 fn build_manager_url(base_url: &str, path: &str) -> Result<String, ApiError> {
     let base = url::Url::parse(base_url).map_err(|e| {
-        tracing::error!("Invalid agent manager URL {}: {}", base_url, e);
+        tracing::error!(error_type = error_type(&e), "Invalid agent manager URL");
         ApiError::internal_server_error("Invalid agent manager URL")
     })?;
     let full = base.join(path).map_err(|e| {
-        tracing::error!("Failed to build manager URL: {}", e);
+        tracing::error!("Failed to build manager URL: {}", error_type(&e));
         ApiError::internal_server_error("Failed to build manager URL")
     })?;
     Ok(full.to_string())
@@ -331,7 +335,7 @@ async fn handle_manager_response(
         )));
     }
     response.bytes().await.map_err(|e| {
-        tracing::error!("Failed to read {} response: {}", context, e);
+        tracing::error!("Failed to read {} response: {}", context, error_type(&e));
         ApiError::internal_server_error(format!("Failed to read {} response", context))
     })
 }
@@ -343,7 +347,7 @@ fn manager_attestation_client() -> Result<Client, ApiError> {
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| {
-            tracing::error!("Failed to create HTTP client: {}", e);
+            tracing::error!("Failed to create HTTP client: {}", error_type(&e));
             ApiError::internal_server_error("Failed to create HTTP client")
         })
 }
@@ -413,9 +417,8 @@ async fn fetch_agent_attestations(
 
     let attestation_response = attestation_response.map_err(|e| {
         tracing::error!(
-            "Failed to fetch agent attestation from manager {}: {}",
-            manager_base_url,
-            e
+            error_type = error_type(&e),
+            "Failed to fetch agent attestation from manager"
         );
         ApiError::bad_gateway(format!("Failed to fetch agent attestation: {}", e))
     })?;
@@ -425,15 +428,17 @@ async fn fetch_agent_attestations(
 
     let attestation_data: AgentAttestationResponse = serde_json::from_slice(&attestation_bytes)
         .map_err(|e| {
-            tracing::error!("Failed to parse agent attestation response: {}", e);
+            tracing::error!(
+                "Failed to parse agent attestation response: {}",
+                error_type(&e)
+            );
             ApiError::internal_server_error("Failed to parse agent attestation")
         })?;
 
     let instance_response = instance_response.map_err(|e| {
         tracing::error!(
-            "Failed to fetch instance attestation from manager {}: {}",
-            manager_base_url,
-            e
+            error_type = error_type(&e),
+            "Failed to fetch instance attestation from manager"
         );
         ApiError::bad_gateway(format!("Failed to fetch instance attestation: {}", e))
     })?;
@@ -442,7 +447,10 @@ async fn fetch_agent_attestations(
 
     let instance_data: AgentInstanceAttestationResponse = serde_json::from_slice(&instance_bytes)
         .map_err(|e| {
-        tracing::error!("Failed to parse instance attestation response: {}", e);
+        tracing::error!(
+            "Failed to parse instance attestation response: {}",
+            error_type(&e)
+        );
         ApiError::internal_server_error("Failed to parse instance attestation")
     })?;
 
