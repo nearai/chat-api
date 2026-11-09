@@ -171,7 +171,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .merge(api_routes) // API routes: proxy, temporary views, and disabled mutations
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
-        // Keep the API's middleware on 404s when the docs router is merged below.
+        // Temporarily disable frontend serving. An explicit fallback keeps the
+        // API's middleware on 404s when the docs router is merged below.
         .fallback(|| async { StatusCode::NOT_FOUND });
 
     let cors = cors::create_cors_layer(cors_config);
