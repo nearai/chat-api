@@ -10,6 +10,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::aml::{AmlCheckResult, AmlRiskLevel};
+use services::logging::error_type;
 use services::subscription::ports::{
     CancelSubscriptionOutcome, ChangePlanOutcome, CreateSubscriptionOutcome,
     NearStakingStorageIntent, NearStakingSyncSummary, ResumeSubscriptionOutcome, SubscriptionError,
@@ -317,15 +318,24 @@ pub async fn create_subscription(
                 ApiError::service_unavailable(msg)
             }
             SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error creating subscription");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Database error creating subscription"
+                );
                 ApiError::internal_server_error("Failed to create subscription")
             }
             SubscriptionError::StripeError(msg) => {
-                tracing::error!(error = ?msg, "Stripe error creating subscription");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Stripe error creating subscription"
+                );
                 ApiError::internal_server_error("Failed to create subscription")
             }
             SubscriptionError::InternalError(msg) => {
-                tracing::error!(error = ?msg, "Internal error creating subscription");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Internal error creating subscription"
+                );
                 ApiError::internal_server_error("Failed to create subscription")
             }
             SubscriptionError::CreditsNotConfigured => {
@@ -357,7 +367,10 @@ pub async fn create_subscription(
             ),
             SubscriptionError::AmlHighRiskBlocked { account_id } => aml_blocked_error(account_id),
             unexpected => {
-                tracing::error!(error = ?unexpected, "Unexpected subscription error in create");
+                tracing::error!(
+                    error_type = error_type(&unexpected),
+                    "Unexpected subscription error in create"
+                );
                 ApiError::internal_server_error("Failed to create subscription")
             }
         })?;
@@ -400,19 +413,28 @@ pub async fn cancel_subscription(
             }
             SubscriptionError::AmlHighRiskBlocked { account_id } => aml_blocked_error(account_id),
             SubscriptionError::NearRpcError(msg) => {
-                tracing::error!(error = ?msg, "NEAR RPC error canceling subscription");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "NEAR RPC error canceling subscription"
+                );
                 ApiError::service_unavailable("Failed to reach NEAR RPC for subscription sync")
             }
             SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error canceling subscription");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Database error canceling subscription"
+                );
                 ApiError::internal_server_error("Failed to cancel subscription")
             }
             SubscriptionError::StripeError(msg) => {
-                tracing::error!(error = ?msg, "Stripe error canceling subscription");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Stripe error canceling subscription"
+                );
                 ApiError::internal_server_error("Failed to cancel subscription")
             }
             _ => {
-                tracing::error!(error = ?e, "Failed to cancel subscription");
+                tracing::error!(error_type = error_type(&e), "Failed to cancel subscription");
                 ApiError::internal_server_error("Failed to cancel subscription")
             }
         })?;
@@ -486,19 +508,28 @@ pub async fn resume_subscription(
             }
             SubscriptionError::AmlHighRiskBlocked { account_id } => aml_blocked_error(account_id),
             SubscriptionError::NearRpcError(msg) => {
-                tracing::error!(error = ?msg, "NEAR RPC error resuming subscription");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "NEAR RPC error resuming subscription"
+                );
                 ApiError::service_unavailable("Failed to reach NEAR RPC for subscription sync")
             }
             SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error resuming subscription");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Database error resuming subscription"
+                );
                 ApiError::internal_server_error("Failed to resume subscription")
             }
             SubscriptionError::StripeError(msg) => {
-                tracing::error!(error = ?msg, "Stripe error resuming subscription");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Stripe error resuming subscription"
+                );
                 ApiError::internal_server_error("Failed to resume subscription")
             }
             _ => {
-                tracing::error!(error = ?e, "Failed to resume subscription");
+                tracing::error!(error_type = error_type(&e), "Failed to resume subscription");
                 ApiError::internal_server_error("Failed to resume subscription")
             }
         })?;
@@ -590,11 +621,11 @@ pub async fn change_plan(
                 )
             }
             SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error changing plan");
+                tracing::error!(error_type = error_type(&msg), "Database error changing plan");
                 ApiError::internal_server_error("Failed to change plan")
             }
             SubscriptionError::StripeError(msg) => {
-                tracing::error!(error = ?msg, "Stripe error changing plan");
+                tracing::error!(error_type = error_type(&msg), "Stripe error changing plan");
                 ApiError::internal_server_error("Failed to change plan")
             }
             SubscriptionError::NoPendingDowngrade => {
@@ -608,11 +639,11 @@ pub async fn change_plan(
             }
             SubscriptionError::AmlHighRiskBlocked { account_id } => aml_blocked_error(account_id),
             SubscriptionError::NearRpcError(msg) => {
-                tracing::error!(error = ?msg, "NEAR RPC error changing plan");
+                tracing::error!(error_type = error_type(&msg), "NEAR RPC error changing plan");
                 ApiError::service_unavailable("Failed to reach NEAR RPC for staking catalog")
             }
             _ => {
-                tracing::error!(error = ?e, "Failed to change plan");
+                tracing::error!(error_type = error_type(&e), "Failed to change plan");
                 ApiError::internal_server_error("Failed to change plan")
             }
         })?;
@@ -678,7 +709,7 @@ pub async fn list_plans(
                 ApiError::service_unavailable("House-of-Stake billing is not configured")
             }
             _ => {
-                tracing::error!(error = ?e, "Failed to list plans");
+                tracing::error!(error_type = error_type(&e), "Failed to list plans");
                 ApiError::internal_server_error("Failed to list plans")
             }
         })?;
@@ -724,15 +755,21 @@ pub async fn list_subscriptions(
                 "Subscription plans are not configured for any billing provider",
             ),
             SubscriptionError::NearRpcError(msg) => {
-                tracing::error!(error = ?msg, "NEAR RPC error listing subscriptions");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "NEAR RPC error listing subscriptions"
+                );
                 ApiError::service_unavailable("Failed to sync subscription from NEAR RPC")
             }
             SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error listing subscriptions");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Database error listing subscriptions"
+                );
                 ApiError::internal_server_error("Failed to list subscriptions")
             }
             _ => {
-                tracing::error!(error = ?e, "Failed to list subscriptions");
+                tracing::error!(error_type = error_type(&e), "Failed to list subscriptions");
                 ApiError::internal_server_error("Failed to list subscriptions")
             }
         })?;
@@ -779,7 +816,10 @@ pub async fn create_portal_session(
                 ApiError::service_unavailable("Stripe is not configured")
             }
             _ => {
-                tracing::error!(error = ?e, "Failed to create portal session");
+                tracing::error!(
+                    error_type = error_type(&e),
+                    "Failed to create portal session"
+                );
                 ApiError::internal_server_error("Failed to create portal session")
             }
         })?;
@@ -812,15 +852,21 @@ pub async fn sync_near_staking_subscription(
         .await
         .map_err(|e| match e {
             SubscriptionError::NearRpcError(msg) => {
-                tracing::error!(error = ?msg, "NEAR RPC sync failed");
+                tracing::error!(error_type = error_type(&msg), "NEAR RPC sync failed");
                 ApiError::service_unavailable("Failed to sync subscription from NEAR RPC")
             }
             SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error syncing NEAR subscription");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Database error syncing NEAR subscription"
+                );
                 ApiError::internal_server_error("Failed to sync subscription")
             }
             _ => {
-                tracing::error!(error = ?e, "Failed to sync NEAR subscription");
+                tracing::error!(
+                    error_type = error_type(&e),
+                    "Failed to sync NEAR subscription"
+                );
                 ApiError::internal_server_error("Failed to sync subscription")
             }
         })?;
@@ -852,15 +898,18 @@ pub async fn handle_stripe_webhook(
                 ApiError::service_unavailable("Stripe webhooks are not configured")
             }
             SubscriptionError::WebhookVerificationFailed(msg) => {
-                tracing::warn!(error = ?msg, "Webhook verification failed");
+                tracing::warn!(error_type = error_type(&msg), "Webhook verification failed");
                 ApiError::bad_request("Invalid webhook signature")
             }
             SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error processing webhook");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Database error processing webhook"
+                );
                 ApiError::internal_server_error("Failed to process webhook")
             }
             _ => {
-                tracing::error!(error = ?e, "Failed to process webhook");
+                tracing::error!(error_type = error_type(&e), "Failed to process webhook");
                 ApiError::internal_server_error("Failed to process webhook")
             }
         })?;

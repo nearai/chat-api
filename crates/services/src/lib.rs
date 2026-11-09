@@ -8,6 +8,7 @@ pub mod conversation;
 pub mod db_pool;
 pub mod encryption_key_ring;
 pub mod file;
+pub mod logging;
 pub mod metrics;
 pub mod model;
 pub mod response;

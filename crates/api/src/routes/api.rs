@@ -33,6 +33,7 @@ use services::conversation::ports::{
     ConversationError, SharePermission, ShareRecipient, ShareRecipientKind, ShareTarget,
 };
 use services::file::ports::FileError;
+use services::logging::error_type;
 use services::metrics::consts::{
     METRIC_CONVERSATION_CREATED, METRIC_FILE_UPLOADED, METRIC_RESPONSE_CREATED,
 };
@@ -55,6 +56,8 @@ const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 
 /// Duration to cache model settings needed by /v1/responses in memory (in seconds)
 const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
+const MODEL_SETTINGS_CACHE_MAX_ENTRIES: usize = 1024;
+const MODEL_SETTINGS_CACHE_MAX_KEY_BYTES: usize = 256;
 
 /// Duration to cache system configs in memory (in seconds)
 const SYSTEM_CONFIGS_CACHE_TTL_SECS: i64 = 60;
@@ -127,11 +130,12 @@ pub fn create_api_router(
     dual_auth_state: crate::middleware::DualAuthState,
     subscription_state: crate::middleware::SubscriptionState,
 ) -> Router<crate::state::AppState> {
-    // Dual auth + subscription + rate limited: chat completions and images
+    // Paid inference and tools share authentication, subscription and rate limits.
     let llm_proxy_router = Router::new()
         .route("/v1/chat/completions", post(proxy_chat_completions))
         .route("/v1/images/generations", post(proxy_image_generations))
         .route("/v1/images/edits", post(proxy_image_edits))
+        .route("/mcp", post(proxy_mcp))
         .layer(axum::middleware::from_fn_with_state(
             rate_limit_state.clone(),
             crate::middleware::rate_limit_middleware,
@@ -173,20 +177,10 @@ pub fn create_api_router(
             crate::middleware::dual_auth_middleware,
         ));
 
-    // Dual auth only: MCP passthrough for tool calls (separate from llm_proxy)
-    let mcp_router =
-        Router::new()
-            .route("/mcp", post(proxy_mcp))
-            .layer(axum::middleware::from_fn_with_state(
-                dual_auth_state,
-                crate::middleware::dual_auth_middleware,
-            ));
-
     Router::new()
         .merge(llm_proxy_router)
         .merge(responses_proxy_router)
         .merge(models_proxy_router)
-        .merge(mcp_router)
         .merge(create_retired_stateful_router())
 }
 
@@ -611,7 +605,10 @@ fn with_upstream_query<T: Serialize>(
     params: &T,
 ) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     let query = serde_urlencoded::to_string(params).map_err(|e| {
-        tracing::error!("Failed to encode upstream query parameters: {}", e);
+        tracing::error!(
+            "Failed to encode upstream query parameters: {}",
+            error_type(&e)
+        );
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -663,7 +660,7 @@ async fn create_conversation(
             tracing::error!(
                 "Failed to read request body for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_REQUEST,
@@ -704,7 +701,7 @@ async fn create_conversation(
             tracing::error!(
                 "OpenAI API error during conversation creation for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -796,7 +793,7 @@ async fn update_conversation(
             tracing::error!(
                 "OpenAI API error during conversation update for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -849,7 +846,7 @@ async fn list_conversations(
             tracing::error!(
                 "Failed to list conversations for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -966,7 +963,7 @@ async fn delete_conversation(
                 "Failed to delete conversation {} for user_id={}: {}",
                 conversation_id,
                 user.user_id,
-                e
+                error_type(&e)
             );
 
             let (status, msg) = match e {
@@ -1089,7 +1086,10 @@ async fn create_conversation_share(
         })
         .await
     {
-        tracing::warn!("Failed to record analytics for share creation: {}", e);
+        tracing::warn!(
+            "Failed to record analytics for share creation: {}",
+            error_type(&e)
+        );
     }
 
     Ok(Json(
@@ -1689,7 +1689,7 @@ async fn create_conversation_items(
             tracing::error!(
                 "OpenAI API error during conversation items creation for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -1775,7 +1775,10 @@ async fn list_conversation_items(
         .forward_request(Method::GET, &path, headers.clone(), None)
         .await
         .map_err(|e| {
-            tracing::error!("OpenAI API error during conversation items list: {}", e);
+            tracing::error!(
+                "OpenAI API error during conversation items list: {}",
+                error_type(&e)
+            );
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
@@ -1847,7 +1850,7 @@ async fn pin_conversation(
             tracing::error!(
                 "OpenAI API error during conversation pin for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -1920,7 +1923,7 @@ async fn unpin_conversation(
             tracing::error!(
                 "OpenAI API error during conversation unpin for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -1993,7 +1996,7 @@ async fn archive_conversation(
             tracing::error!(
                 "OpenAI API error during conversation archive for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -2066,7 +2069,7 @@ async fn unarchive_conversation(
             tracing::error!(
                 "OpenAI API error during conversation unarchive for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -2142,7 +2145,7 @@ async fn clone_conversation(
             tracing::error!(
                 "OpenAI API error during conversation clone for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -2214,7 +2217,7 @@ async fn upload_file(
             tracing::error!(
                 "OpenAI API error during file upload for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -2274,7 +2277,11 @@ async fn list_files(
         )
         .await
         .map_err(|e| {
-            tracing::error!("Failed to list files for user_id={}: {}", user.user_id, e);
+            tracing::error!(
+                "Failed to list files for user_id={}: {}",
+                user.user_id,
+                error_type(&e)
+            );
             let (status, error) = match e {
                 FileError::NotFound => (StatusCode::NOT_FOUND, "File not found".to_string()),
                 FileError::ApiError(msg) => {
@@ -2405,7 +2412,7 @@ async fn delete_file(
                 "Failed to delete file {} for user_id={}: {}",
                 file_id,
                 user.user_id,
-                e
+                error_type(&e)
             );
             let (status, error_msg) = match e {
                 FileError::NotFound => (StatusCode::NOT_FOUND, "File not found".to_string()),
@@ -2478,7 +2485,7 @@ async fn get_file_content(
             tracing::error!(
                 "OpenAI API error during file content get for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -2517,6 +2524,7 @@ async fn get_file_content(
 async fn proxy_responses(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    Extension(rate_limit_guard): Extension<crate::middleware::rate_limit::RateLimitGuard>,
     api_key_ext: Option<Extension<AuthenticatedApiKey>>,
     mut headers: HeaderMap,
     request: Request,
@@ -2568,7 +2576,7 @@ async fn proxy_responses(
             tracing::debug!(
                 "Failed to parse /responses request body as JSON for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             stateless_responses_bad_request(
                 "The stateless Responses API requires an uncompressed JSON object body.",
@@ -2674,7 +2682,7 @@ async fn proxy_responses(
             tracing::error!(
                 "OpenAI API error for POST /v1/responses (user_id={}): {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -2721,7 +2729,10 @@ async fn proxy_responses(
             })
             .await
         {
-            tracing::warn!("Failed to record analytics for response creation: {}", e);
+            tracing::warn!(
+                "Failed to record analytics for response creation: {}",
+                error_type(&e)
+            );
         }
     }
 
@@ -2750,12 +2761,19 @@ async fn proxy_responses(
             usage_stream = usage_stream
                 .with_agent_ids(api_key.api_key_info.instance_id, api_key.api_key_info.id);
         }
-        Body::from_stream(usage_stream)
+        Body::from_stream(crate::usage_parsing::forward_usage_stream(
+            usage_stream,
+            Some(rate_limit_guard),
+        ))
     } else {
         let bytes = match collect_stream_to_bytes(proxy_response.body).await {
             Ok(b) => b,
             Err(e) => {
-                tracing::error!("Upstream stream error for user_id={}: {}", user.user_id, e);
+                tracing::error!(
+                    "Upstream stream error for user_id={}: {}",
+                    user.user_id,
+                    error_type(&e)
+                );
                 return Err((
                     StatusCode::BAD_GATEWAY,
                     Json(ErrorResponse {
@@ -2771,7 +2789,7 @@ async fn proxy_responses(
                 tracing::error!(
                     "Failed to decompress non-stream response for user_id={}: {}",
                     user.user_id,
-                    e
+                    error_type(&e)
                 );
                 bytes.clone()
             });
@@ -2826,7 +2844,7 @@ async fn ensure_near_balance_for_near_user(
             tracing::error!(
                 "Failed to get user profile for NEAR balance check (user_id={}): {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2861,7 +2879,7 @@ async fn ensure_near_balance_for_near_user(
             tracing::warn!(
                 "Failed to check paid subscription for user_id={}, proceeding with NEAR balance check: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
         }
     }
@@ -2900,7 +2918,7 @@ async fn ensure_near_balance_for_near_user(
             "Invalid NEAR account id '{}' for user_id={}: {}",
             account_id_str,
             user.user_id,
-            e
+            error_type(&e)
         );
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2917,7 +2935,7 @@ async fn ensure_near_balance_for_near_user(
             tracing::error!(
                 "Failed to fetch NEAR account info for account_id='{}': {}",
                 account_id_str,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2961,7 +2979,7 @@ async fn ensure_near_balance_for_near_user(
             tracing::error!(
                 "Failed to create NEAR balance ban for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
         }
 
@@ -2998,7 +3016,7 @@ async fn ensure_user_not_banned(
             tracing::error!(
                 "Failed to check user ban status for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -3077,7 +3095,7 @@ async fn proxy_model_list(
             tracing::error!(
                 "OpenAI API error for GET /v1/model/list (user_id={}): {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -3112,7 +3130,7 @@ async fn proxy_model_list(
             tracing::error!(
                 "Failed to read model list response body for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -3128,7 +3146,7 @@ async fn proxy_model_list(
             tracing::warn!(
                 "Failed to decompress model list response body for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             body_bytes.clone()
         });
@@ -3140,7 +3158,7 @@ async fn proxy_model_list(
             tracing::warn!(
                 "Failed to parse model list JSON for user_id={}: {}, returning original body",
                 user.user_id,
-                e
+                error_type(&e)
             );
             return build_response(
                 proxy_response.status,
@@ -3188,7 +3206,7 @@ async fn proxy_model_list(
         .unwrap_or_else(|e| {
             tracing::warn!(
                 "Failed to batch load model settings for model list: {}, defaulting all public={}",
-                e,
+                error_type(&e),
                 MODEL_PUBLIC_DEFAULT
             );
             std::collections::HashMap::new()
@@ -3218,7 +3236,7 @@ async fn proxy_model_list(
     let filtered_bytes = serde_json::to_vec(&body_json).unwrap_or_else(|e| {
         tracing::error!(
             "Failed to serialize filtered model list JSON: {}, returning original body",
-            e
+            error_type(&e)
         );
         body_bytes.to_vec()
     });
@@ -3289,7 +3307,7 @@ async fn proxy_signature(
                 "OpenAI API error for GET /v1/signature/{} (user_id={}): {}",
                 chat_id,
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -3336,6 +3354,9 @@ async fn proxy_mcp(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
+    ensure_user_not_banned(&state, &user).await?;
+    ensure_near_balance_for_near_user(&state, &user).await?;
+
     let body_bytes = extract_body_bytes(request).await?;
     let mcp_request = serde_json::from_slice::<McpRequestEnvelope>(&body_bytes).ok();
     let is_web_search_call = mcp_request
@@ -3350,7 +3371,10 @@ async fn proxy_mcp(
         .get_api_key()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get VPC API key for MCP proxy: {}", e);
+            tracing::error!(
+                "Failed to get VPC API key for MCP proxy: {}",
+                error_type(&e)
+            );
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
@@ -3379,7 +3403,11 @@ async fn proxy_mcp(
     }
 
     let upstream_response = request_builder.send().await.map_err(|e| {
-        tracing::error!("MCP proxy error for user_id={}: {}", user.user_id, e);
+        tracing::error!(
+            "MCP proxy error for user_id={}: {}",
+            user.user_id,
+            error_type(&e)
+        );
         (
             StatusCode::BAD_GATEWAY,
             Json(ErrorResponse {
@@ -3395,7 +3423,7 @@ async fn proxy_mcp(
         tracing::error!(
             "Failed to read MCP response for user_id={}: {}",
             user.user_id,
-            e
+            error_type(&e)
         );
         (
             StatusCode::BAD_GATEWAY,
@@ -3412,7 +3440,7 @@ async fn proxy_mcp(
                 tracing::warn!(
                     "Failed to decompress MCP response for user_id={}: {}",
                     user.user_id,
-                    e
+                    error_type(&e)
                 );
                 response_body.clone()
             });
@@ -3466,7 +3494,7 @@ async fn proxy_mcp(
                     tracing::warn!(
                         "Failed to record web search MCP usage for user_id={}: {}",
                         user.user_id,
-                        e
+                        error_type(&e)
                     );
                 }
             });
@@ -3519,9 +3547,11 @@ async fn get_system_configs_cached(
         .system_configs_service
         .get_configs()
         .await
-        .map_err(|e| {
-            tracing::warn!("Failed to load system configs, using defaults: {e}");
-            e
+        .inspect_err(|e| {
+            tracing::warn!(
+                "Failed to load system configs, using defaults: {e_type}",
+                e_type = error_type(e)
+            );
         })
         .ok()
         .flatten();
@@ -3560,7 +3590,7 @@ async fn enforce_model_access(
                 "Failed to validate model access for user_id={}, model_id={}: {}",
                 user.user_id,
                 model_id,
-                err
+                error_type(&err)
             );
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -3571,6 +3601,34 @@ async fn enforce_model_access(
                 .into_response())
         }
     }
+}
+
+fn cache_model_settings(
+    cache: &mut std::collections::HashMap<String, crate::state::ModelSettingsCacheEntry>,
+    model_id: &str,
+    entry: crate::state::ModelSettingsCacheEntry,
+) {
+    // Bound retained key memory without changing accepted model IDs.
+    if model_id.len() > MODEL_SETTINGS_CACHE_MAX_KEY_BYTES {
+        return;
+    }
+    cache.retain(|_, cached| {
+        let age = entry
+            .last_checked_at
+            .signed_duration_since(cached.last_checked_at)
+            .num_seconds();
+        (0..MODEL_SETTINGS_CACHE_TTL_SECS).contains(&age)
+    });
+    if cache.len() >= MODEL_SETTINGS_CACHE_MAX_ENTRIES && !cache.contains_key(model_id) {
+        if let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_checked_at)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(model_id.to_owned(), entry);
 }
 
 /// Helper function to get model settings with caching support.
@@ -3584,8 +3642,8 @@ async fn get_model_settings_with_cache(
     let mut model_system_prompt: Option<String> = None;
     let mut model_settings_cache_hit: Option<bool> = None;
 
-    // 1) Try cache first
-    {
+    // Long IDs bypass the cache but still go through the same DB visibility check.
+    if model_id.len() <= MODEL_SETTINGS_CACHE_MAX_KEY_BYTES {
         let cache = state.model_settings_cache.read().await;
         if let Some(entry) = cache.get(model_id) {
             let age = Utc::now().signed_duration_since(entry.last_checked_at);
@@ -3620,8 +3678,9 @@ async fn get_model_settings_with_cache(
                 // Populate cache
                 {
                     let mut cache = state.model_settings_cache.write().await;
-                    cache.insert(
-                        model_id.to_string(),
+                    cache_model_settings(
+                        &mut cache,
+                        model_id,
                         crate::state::ModelSettingsCacheEntry {
                             last_checked_at: Utc::now(),
                             exists: true,
@@ -3653,8 +3712,9 @@ async fn get_model_settings_with_cache(
                 // Cache with defaults to avoid repeated DB hits
                 {
                     let mut cache = state.model_settings_cache.write().await;
-                    cache.insert(
-                        model_id.to_string(),
+                    cache_model_settings(
+                        &mut cache,
+                        model_id,
                         crate::state::ModelSettingsCacheEntry {
                             last_checked_at: Utc::now(),
                             exists: false, // Not in DB but allowed with defaults
@@ -3773,7 +3833,7 @@ async fn prepare_chat_completions_body(
                 tracing::debug!(
                     "Failed to parse request body as JSON for chat/completions (user_id={}): {}",
                     user.user_id,
-                    e
+                    error_type(&e)
                 );
             }
         }
@@ -3947,7 +4007,7 @@ async fn proxy_post_to_cloud_api(
                     "Failed to parse request body as JSON for POST {} (user_id={}): {}",
                     config.endpoint_full_path,
                     user.user_id,
-                    e
+                    error_type(&e)
                 );
             }
         }
@@ -4064,7 +4124,7 @@ async fn proxy_post_to_cloud_api(
                 "Cloud API error for POST {} (user_id={}): {}",
                 config.endpoint_full_path,
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -4110,6 +4170,7 @@ async fn proxy_post_to_cloud_api(
 async fn proxy_chat_completions(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    Extension(rate_limit_guard): Extension<crate::middleware::rate_limit::RateLimitGuard>,
     api_key_ext: Option<Extension<AuthenticatedApiKey>>,
     mut headers: HeaderMap,
     request: Request,
@@ -4153,7 +4214,7 @@ async fn proxy_chat_completions(
                 "Cloud API error for POST {} (user_id={}): {}",
                 ENDPOINT_FULL_PATH,
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -4185,7 +4246,10 @@ async fn proxy_chat_completions(
             usage_stream = usage_stream
                 .with_agent_ids(api_key.api_key_info.instance_id, api_key.api_key_info.id);
         }
-        Body::from_stream(usage_stream)
+        Body::from_stream(crate::usage_parsing::forward_usage_stream(
+            usage_stream,
+            Some(rate_limit_guard),
+        ))
     } else {
         let bytes = match collect_stream_to_bytes(proxy_response.body).await {
             Ok(b) => b,
@@ -4194,7 +4258,7 @@ async fn proxy_chat_completions(
                     "Upstream stream error for user_id={} on {}: {}",
                     user.user_id,
                     ENDPOINT_FULL_PATH,
-                    e
+                    error_type(&e)
                 );
                 return Err((
                     StatusCode::BAD_GATEWAY,
@@ -4211,7 +4275,7 @@ async fn proxy_chat_completions(
                     "Failed to decompress non-stream response for user_id={} on {}: {}",
                     user.user_id,
                     ENDPOINT_FULL_PATH,
-                    e
+                    error_type(&e)
                 );
                 bytes.clone()
             });
@@ -4285,7 +4349,7 @@ async fn proxy_image_generations(
         tracing::error!(
             "Failed to parse image generations request body as JSON for user_id={}: {}",
             user.user_id,
-            e
+            error_type(&e)
         );
         (
             StatusCode::BAD_REQUEST,
@@ -4356,6 +4420,7 @@ async fn proxy_image_generations(
     };
 
     enforce_model_access(&state, &user, &image_request_model).await?;
+    get_model_settings_with_cache(&state, &image_request_model, user.user_id).await?;
 
     let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
         .expect("usize to string conversion always produces valid HeaderValue");
@@ -4375,7 +4440,7 @@ async fn proxy_image_generations(
                 "Cloud API error for POST {} (user_id={}): {}",
                 ENDPOINT_FULL_PATH,
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -4396,7 +4461,7 @@ async fn proxy_image_generations(
                     "Upstream stream error for user_id={} on {}: {}",
                     user.user_id,
                     ENDPOINT_FULL_PATH,
-                    e
+                    error_type(&e)
                 );
                 return Err((
                     StatusCode::BAD_GATEWAY,
@@ -4528,7 +4593,7 @@ async fn proxy_image_edits(
         tracing::error!(
             "Failed to parse multipart field for image edits (user_id={}): {}",
             user.user_id,
-            e
+            error_type(&e)
         );
         (
             StatusCode::BAD_REQUEST,
@@ -4545,7 +4610,7 @@ async fn proxy_image_edits(
                     tracing::error!(
                         "Failed to read `model` field in image edits request (user_id={}): {}",
                         user.user_id,
-                        e
+                        error_type(&e)
                     );
                     (
                         StatusCode::BAD_REQUEST,
@@ -4562,7 +4627,7 @@ async fn proxy_image_edits(
                     tracing::error!(
                         "Failed to read `n` field in image edits request (user_id={}): {}",
                         user.user_id,
-                        e
+                        error_type(&e)
                     );
                     (
                         StatusCode::BAD_REQUEST,
@@ -4637,6 +4702,7 @@ async fn proxy_image_edits(
     };
 
     enforce_model_access(&state, &user, &request_model).await?;
+    get_model_settings_with_cache(&state, &request_model, user.user_id).await?;
 
     let proxy_response = state
         .proxy_service
@@ -4652,7 +4718,7 @@ async fn proxy_image_edits(
                 "Cloud API error for POST {} (user_id={}): {}",
                 ENDPOINT_FULL_PATH,
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -4673,7 +4739,7 @@ async fn proxy_image_edits(
                     "Upstream stream error for user_id={} on {}: {}",
                     user.user_id,
                     ENDPOINT_FULL_PATH,
-                    e
+                    error_type(&e)
                 );
                 return Err((
                     StatusCode::BAD_GATEWAY,
@@ -4746,7 +4812,7 @@ async fn proxy_models(
             tracing::error!(
                 "Cloud API error for GET /v1/models (user_id={}): {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             (
                 StatusCode::BAD_GATEWAY,
@@ -4820,7 +4886,7 @@ async fn handle_trackable_response(
             tracing::error!(
                 "Failed to decompress response for user_id={}: {}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             body_bytes.clone()
         });
@@ -4848,7 +4914,7 @@ async fn handle_trackable_response(
                     "Failed to track conversation {} for user {}: {}",
                     id,
                     user.user_id,
-                    e
+                    error_type(&e)
                 );
             }
 
@@ -4870,7 +4936,7 @@ async fn handle_trackable_response(
             {
                 tracing::warn!(
                     "Failed to record analytics for conversation creation: {}",
-                    e
+                    error_type(&e)
                 );
             }
         }
@@ -4885,7 +4951,7 @@ async fn handle_trackable_response(
                     "Failed to track conversation update {} for user {}: {}",
                     id,
                     user.user_id,
-                    e
+                    error_type(&e)
                 );
             }
         }
@@ -4897,7 +4963,7 @@ async fn handle_trackable_response(
                             "Failed to track file {} for user {}: {}",
                             id,
                             user.user_id,
-                            e
+                            error_type(&e)
                         );
                     }
 
@@ -4917,14 +4983,17 @@ async fn handle_trackable_response(
                         })
                         .await
                     {
-                        tracing::warn!("Failed to record analytics for file upload: {}", e);
+                        tracing::warn!(
+                            "Failed to record analytics for file upload: {}",
+                            error_type(&e)
+                        );
                     }
                 }
                 Err(e) => {
                     tracing::error!(
                         "Failed to parse file data from response for user {}: {}",
                         user.user_id,
-                        e
+                        error_type(&e)
                     );
                 }
             }
@@ -5134,7 +5203,7 @@ async fn fetch_conversation_from_proxy(
             tracing::warn!(
                 "Failed to decompress conversation response body for conversation_id={}: {}",
                 conversation_id,
-                e
+                error_type(&e)
             );
             body_bytes.clone()
         });
@@ -5177,7 +5246,7 @@ async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
     let result = axum::body::to_bytes(request.into_body(), MAX_REQUEST_BODY_SIZE)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to read request body: {}", e);
+            tracing::error!("Failed to read request body: {}", error_type(&e));
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -5365,7 +5434,7 @@ async fn record_image_usage(
         tracing::warn!(
             "Failed to record image usage for user_id={}: {}",
             user_id,
-            e
+            error_type(&e)
         );
     } else if cost_nano_usd > 0 {
         if let Err(e) = state
@@ -5374,7 +5443,7 @@ async fn record_image_usage(
             .await
         {
             tracing::warn!(
-                error = ?e,
+                error_type = error_type(&e),
                 "Failed to reconcile purchased credits after image usage"
             );
         }
@@ -5460,7 +5529,11 @@ async fn record_chat_usage_from_body(
     };
 
     if let Err(e) = result {
-        tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
+        tracing::warn!(
+            "Failed to record usage for user_id={}: {}",
+            user_id,
+            error_type(&e)
+        );
         return false;
     }
 
@@ -5471,7 +5544,7 @@ async fn record_chat_usage_from_body(
             .await
         {
             tracing::warn!(
-                error = ?e,
+                error_type = error_type(&e),
                 "Failed to reconcile purchased credits after chat usage"
             );
         }
@@ -5548,7 +5621,11 @@ async fn record_response_usage_from_body(
     };
 
     if let Err(e) = result {
-        tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
+        tracing::warn!(
+            "Failed to record usage for user_id={}: {}",
+            user_id,
+            error_type(&e)
+        );
         return false;
     }
 
@@ -5559,7 +5636,7 @@ async fn record_response_usage_from_body(
             .await
         {
             tracing::warn!(
-                error = ?e,
+                error_type = error_type(&e),
                 "Failed to reconcile purchased credits after response usage"
             );
         }
@@ -5997,5 +6074,43 @@ mod tests {
             path,
             "conversations/conv_1/items?after=msg_1%26limit%3D1%23frag&limit=100&order=asc"
         );
+    }
+}
+
+#[cfg(test)]
+mod model_settings_cache_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn arbitrary_model_ids_cannot_exceed_capacity_and_expired_entries_are_removed() {
+        let now = Utc::now();
+        let mut cache = std::collections::HashMap::new();
+        let entry = |last_checked_at| crate::state::ModelSettingsCacheEntry {
+            last_checked_at,
+            exists: false,
+            public: true,
+            system_prompt: None,
+        };
+        cache_model_settings(
+            &mut cache,
+            &"x".repeat(MODEL_SETTINGS_CACHE_MAX_KEY_BYTES + 1),
+            entry(now),
+        );
+        assert!(
+            cache.is_empty(),
+            "oversized IDs must not consume cache memory"
+        );
+        for i in 0..MODEL_SETTINGS_CACHE_MAX_ENTRIES + 100 {
+            cache_model_settings(&mut cache, &format!("unknown-{i}"), entry(now));
+            assert!(cache.len() <= MODEL_SETTINGS_CACHE_MAX_ENTRIES);
+        }
+        assert_eq!(cache.len(), MODEL_SETTINGS_CACHE_MAX_ENTRIES);
+        cache_model_settings(
+            &mut cache,
+            "after-expiry",
+            entry(now + chrono::Duration::seconds(60)),
+        );
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key("after-expiry"));
     }
 }

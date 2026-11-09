@@ -14,6 +14,7 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use services::logging::error_type;
 use services::{
     analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest},
     system_configs::ports::{RateLimitConfig, WindowLimit},
@@ -122,7 +123,7 @@ impl RateLimitState {
         let window_duration = config.window_duration.to_std().map_err(|e| {
             tracing::error!(
                 "Invalid window_duration in rate limit config: {}. Duration: {:?}",
-                e,
+                error_type(&e),
                 config.window_duration
             );
             RateLimitError::InternalServerError
@@ -220,7 +221,7 @@ impl RateLimitState {
         for window_limit in &config.window_limits {
             let limit_value = window_limit.limit.try_into().map_err(|e| {
                 tracing::error!(
-                    error = ?e,
+                    error_type = error_type(&e),
                     limit = window_limit.limit,
                     "Failed to convert window limit to i64"
                 );
@@ -243,7 +244,7 @@ impl RateLimitState {
                         user_id = %user_id.0,
                         window_seconds = window_limit.window_duration.num_seconds(),
                         "Failed to check usage limit: {}",
-                        e
+                        error_type(&e)
                     );
                     // Rollback: remove timestamp and release permit
                     self.rollback_acquire(user_id, added_timestamp).await;
@@ -362,7 +363,7 @@ impl RateLimitState {
                     tracing::warn!(
                         user_id = %user_id.0,
                         "Failed to record activity after window checks passed: {}",
-                        e
+                        error_type(&e)
                     );
                     // Rollback: remove timestamp and release permit
                     self.rollback_acquire(user_id, added_timestamp).await;
@@ -371,7 +372,9 @@ impl RateLimitState {
             }
         }
 
-        Ok(RateLimitGuard { _permit: permit })
+        Ok(RateLimitGuard {
+            _permit: Arc::new(permit),
+        })
     }
 
     /// Checks usage limits for a list of windows (token or cost).
@@ -406,7 +409,7 @@ impl RateLimitState {
                         UsageLimitType::Token => "Failed to check token usage sum",
                         UsageLimitType::Cost => "Failed to check cost usage sum",
                     };
-                    tracing::warn!(user_id = %user_id.0, "{}: {}", error_msg, e);
+                    tracing::warn!(user_id = %user_id.0, "{}: {}", error_msg, error_type(&e));
                     self.rollback_acquire(user_id, added_timestamp).await;
                     return Err(RateLimitError::InternalServerError);
                 }
@@ -485,8 +488,10 @@ impl RateLimitState {
     }
 }
 
+/// Shared with streaming handlers so admission lasts until upstream work ends.
+#[derive(Clone)]
 pub struct RateLimitGuard {
-    _permit: OwnedSemaphorePermit,
+    _permit: Arc<OwnedSemaphorePermit>,
 }
 
 #[derive(Debug)]
@@ -595,15 +600,18 @@ impl IntoResponse for RateLimitError {
 pub async fn rate_limit_middleware(
     State(state): State<RateLimitState>,
     Extension(user): Extension<AuthenticatedUser>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let _guard = match state.try_acquire(user.user_id).await {
+    let guard = match state.try_acquire(user.user_id).await {
         Ok(guard) => guard,
         Err(e) => return e.into_response(),
     };
 
-    next.run(request).await
+    request.extensions_mut().insert(guard.clone());
+    let response = next.run(request).await;
+    drop(guard);
+    response
 }
 
 #[cfg(test)]
@@ -1641,6 +1649,100 @@ mod tests {
             result,
             Err(RateLimitError::RateLimitExceeded { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn stream_admission_survives_response_and_disconnect_until_upstream_finishes() {
+        use axum::{body::Body, routing::get, Router};
+        use tower::ServiceExt;
+
+        for end in ["eof", "error", "timeout"] {
+            let state = configured_state(RateLimitConfig {
+                max_concurrent: 1,
+                max_requests_per_window: 100,
+                window_duration: ChronoDuration::seconds(1),
+                window_limits: vec![],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
+            });
+            let (sender, receiver) = tokio::sync::mpsc::channel(1);
+            let receiver = Arc::new(Mutex::new(Some(receiver)));
+            let app = Router::new()
+                .route(
+                    "/stream",
+                    get(move |Extension(guard): Extension<RateLimitGuard>| {
+                        let receiver = receiver.clone();
+                        async move {
+                            let stream = tokio_stream::wrappers::ReceiverStream::new(
+                                receiver.lock().await.take().unwrap(),
+                            );
+                            Body::from_stream(
+                                crate::usage_parsing::forward_usage_stream_with_timeout(
+                                    stream,
+                                    Duration::from_secs(1),
+                                    Some(guard),
+                                ),
+                            )
+                        }
+                    }),
+                )
+                .route("/done", get(|| async { "ok" }))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit_middleware,
+                ))
+                .layer(Extension(AuthenticatedUser {
+                    user_id: test_user_id(1),
+                    session_id: services::SessionId(Uuid::new_v4()),
+                }));
+            let request = |path| {
+                axum::http::Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            let response = app.clone().oneshot(request("/stream")).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            // Returning headers must not release the upstream's admission slot.
+            assert_eq!(
+                app.clone()
+                    .oneshot(request("/done"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            drop(response);
+            // Repeated requests after disconnect cannot accumulate drain tasks.
+            for _ in 0..3 {
+                assert_eq!(
+                    app.clone()
+                        .oneshot(request("/stream"))
+                        .await
+                        .unwrap()
+                        .status(),
+                    StatusCode::TOO_MANY_REQUESTS
+                );
+            }
+            if end == "error" {
+                let error = reqwest::get(":invalid-url").await.unwrap_err();
+                sender.send(Err(error)).await.unwrap();
+            } else if end == "eof" {
+                drop(sender);
+            }
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let response = app.clone().oneshot(request("/done")).await.unwrap();
+                    if response.status() == StatusCode::OK {
+                        break;
+                    }
+                    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("EOF, error and timeout must each release the slot");
+        }
     }
 
     #[tokio::test]

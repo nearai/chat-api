@@ -32,6 +32,7 @@ const TEST_DATABASE_ENCRYPTION_KEY: &str =
 #[derive(Default)]
 pub struct TestServerConfig {
     pub stripe_config: Option<config::StripeConfig>,
+    pub agent_managers: Option<Vec<config::AgentManager>>,
     pub database_name: Option<String>,
     pub field_encryption: Option<services::db_pool::FieldEncryptionConfig>,
     pub vpc_credentials: Option<VpcCredentials>,
@@ -216,6 +217,9 @@ pub async fn create_test_server_with_state(
     let mut config = config::Config::from_env();
     if let Some(stripe) = &test_config.stripe_config {
         config.stripe = stripe.clone();
+    }
+    if let Some(managers) = &test_config.agent_managers {
+        config.agent.managers = managers.clone();
     }
     if let Some(name) = &test_config.database_name {
         config.database.database = name.clone();
@@ -562,7 +566,11 @@ pub async fn create_test_server_with_state(
         metrics_service,
         analytics_service,
         user_usage_service,
-        near_rpc_url: config.near.rpc_url.clone(),
+        near_rpc_url: test_config
+            .near_rpc_url
+            .as_deref()
+            .map(|url| url.parse().expect("valid test RPC URL"))
+            .unwrap_or_else(|| config.near.rpc_url.clone()),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(

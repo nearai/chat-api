@@ -1,20 +1,24 @@
 use crate::common::is_dev;
+use crate::middleware::{AuthState, AuthenticatedUser};
 use crate::{
     models::{ApiGatewayAttestation, AttestationReport, CombinedAttestationReport},
     state::AppState,
     ApiError,
 };
 use axum::{
-    extract::{Query, State},
+    extract::{Query, Request, State},
+    middleware::Next,
     response::Json,
+    response::Response,
     routing::get,
-    Router,
+    Extension, Router,
 };
 use futures::TryStreamExt;
 use http::Method;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use services::vpc::load_vpc_info;
+use services::logging::error_type;
+use services::{agent::ports::AgentInstance, vpc::load_vpc_info};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttestationQuery {
@@ -42,6 +46,8 @@ pub struct AttestationQuery {
 /// GET /v1/attestation/report
 ///
 /// Returns a combined attestation report combining attestations from multiple layers.
+/// Agent reports require a user session and ownership of the requested instance.
+/// Gateway and model reports without `agent` remain public.
 ///
 /// This endpoint (chat-api) acts as an AI Gateway Service and combines attestations from multiple layers:
 /// 1. **This API's own CPU attestation** (chat_api_gateway_attestation) - Proves this chat-api runs in a trusted TEE
@@ -61,6 +67,8 @@ pub struct AttestationQuery {
     ),
     responses(
         (status = 200, description = "Combined attestation report", body = CombinedAttestationReport),
+        (status = 401, description = "Agent report requires a user session", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Agent instance not found or not owned", body = crate::error::ApiErrorResponse),
         (status = 503, description = "Attestation service unavailable", body = crate::error::ApiErrorResponse)
     ),
     tag = "Attestation"
@@ -68,7 +76,24 @@ pub struct AttestationQuery {
 pub async fn get_attestation_report(
     State(app_state): State<AppState>,
     Query(params): Query<AttestationQuery>,
+    user: Option<Extension<AuthenticatedUser>>,
 ) -> Result<Json<CombinedAttestationReport>, ApiError> {
+    // Authorize before contacting either the cloud gateway or an agent manager.
+    let agent_instance = if let Some(agent_id) = &params.agent {
+        let Extension(user) = user.ok_or_else(ApiError::missing_auth_header)?;
+        let id = uuid::Uuid::parse_str(agent_id)
+            .map_err(|_| ApiError::bad_request("Invalid agent ID format"))?;
+        Some(
+            app_state
+                .agent_service
+                .get_instance(id, user.user_id)
+                .await
+                .map_err(|_| ApiError::internal_server_error("Failed to fetch agent instance"))?
+                .ok_or_else(|| ApiError::not_found("Agent instance not found"))?,
+        )
+    } else {
+        None
+    };
     // Exclude agent parameter from cloud-api query since it's not relevant there
     let mut cloud_api_params = params.clone();
     cloud_api_params.agent = None;
@@ -86,7 +111,7 @@ pub async fn get_attestation_report(
         .map_err(|e| {
             tracing::error!(
                 "Failed to fetch attestation report from proxy_service: {}",
-                e
+                error_type(&e)
             );
             ApiError::bad_gateway(format!("Failed to fetch attestation report: {}", e))
         })?;
@@ -109,7 +134,10 @@ pub async fn get_attestation_report(
         .try_collect::<Vec<_>>()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to read response body from proxy_service: {}", e);
+            tracing::error!(
+                "Failed to read response body from proxy_service: {}",
+                error_type(&e)
+            );
             ApiError::internal_server_error(format!("Failed to read response body: {}", e))
         })?
         .into_iter()
@@ -120,7 +148,7 @@ pub async fn get_attestation_report(
     let proxy_report: AttestationReport = serde_json::from_slice(&body_bytes).map_err(|e| {
         tracing::error!(
             "Failed to parse attestation report from proxy_service: {}",
-            e
+            error_type(&e)
         );
         ApiError::internal_server_error(format!("Failed to parse attestation report: {}", e))
     })?;
@@ -131,7 +159,7 @@ pub async fn get_attestation_report(
 
     // Parse nonce from cloud API gateway attestation to keep consistent
     let nonce_bytes = hex::decode(&request_nonce).map_err(|e| {
-        tracing::error!("Failed to decode nonce hex string: {}", e);
+        tracing::error!("Failed to decode nonce hex string: {}", error_type(&e));
         ApiError::internal_server_error(format!("Invalid nonce format: {e}"))
     })?;
 
@@ -156,7 +184,7 @@ pub async fn get_attestation_report(
         let info = client.info().await.map_err(|e| {
             tracing::error!(
                 "Failed to get chat API attestation info, are you running in a CVM?: {:?}",
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to get chat API attestation info")
         })?;
@@ -164,7 +192,7 @@ pub async fn get_attestation_report(
         let cpu_quote = client.get_quote(report_data).await.map_err(|e| {
             tracing::error!(
                 "Failed to get chat API attestation, are you running in a CVM?: {:?}",
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to get chat API attestation")
         })?;
@@ -187,12 +215,12 @@ pub async fn get_attestation_report(
 
     let model_attestations = proxy_report.model_attestations;
 
-    // Fetch agent attestations if agent parameter is provided (no user auth required)
-    let agent_attestations = if let Some(agent_id) = &params.agent {
-        match fetch_agent_attestations(&app_state, agent_id, &request_nonce).await {
+    // Fetch only the instance authorized above. Upstream failures remain optional.
+    let agent_attestations = if let Some(instance) = &agent_instance {
+        match fetch_agent_attestations(&app_state, instance, &request_nonce).await {
             Ok(attestations) => Some(attestations),
             Err(e) => {
-                tracing::warn!("Failed to fetch agent attestations: {:?}", e);
+                tracing::warn!("Failed to fetch agent attestations: {:?}", error_type(&e));
                 // Don't fail the entire request if agent attestation fetch fails
                 None
             }
@@ -279,11 +307,11 @@ fn validate_instance_name(name: &str) -> Result<(), ApiError> {
 /// Build full URL for agent manager request (handles base URL with/without trailing slash)
 fn build_manager_url(base_url: &str, path: &str) -> Result<String, ApiError> {
     let base = url::Url::parse(base_url).map_err(|e| {
-        tracing::error!("Invalid agent manager URL {}: {}", base_url, e);
+        tracing::error!(error_type = error_type(&e), "Invalid agent manager URL");
         ApiError::internal_server_error("Invalid agent manager URL")
     })?;
     let full = base.join(path).map_err(|e| {
-        tracing::error!("Failed to build manager URL: {}", e);
+        tracing::error!("Failed to build manager URL: {}", error_type(&e));
         ApiError::internal_server_error("Failed to build manager URL")
     })?;
     Ok(full.to_string())
@@ -307,7 +335,7 @@ async fn handle_manager_response(
         )));
     }
     response.bytes().await.map_err(|e| {
-        tracing::error!("Failed to read {} response: {}", context, e);
+        tracing::error!("Failed to read {} response: {}", context, error_type(&e));
         ApiError::internal_server_error(format!("Failed to read {} response", context))
     })
 }
@@ -319,40 +347,18 @@ fn manager_attestation_client() -> Result<Client, ApiError> {
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| {
-            tracing::error!("Failed to create HTTP client: {}", e);
+            tracing::error!("Failed to create HTTP client: {}", error_type(&e));
             ApiError::internal_server_error("Failed to create HTTP client")
         })
 }
 
 async fn fetch_agent_attestations(
     app_state: &AppState,
-    agent_id: &str,
+    agent_instance: &AgentInstance,
     request_nonce: &str,
 ) -> Result<Vec<crate::models::AgentAttestation>, ApiError> {
-    use uuid::Uuid;
-
-    // Security: Validate nonce to prevent panic/DoS from malformed input
     validate_nonce(request_nonce)?;
-
-    // Parse the agent_id as UUID
-    let agent_uuid = Uuid::parse_str(agent_id).map_err(|e| {
-        tracing::error!("Invalid agent ID format: {}", e);
-        ApiError::bad_request(format!("Invalid agent ID format: {}", e))
-    })?;
-
-    // Fetch the agent instance from database (no user_id check - attestation is public)
-    let agent_instance = app_state
-        .agent_repository
-        .get_instance(agent_uuid)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch agent instance from database: {}", e);
-            ApiError::internal_server_error("Failed to fetch agent instance")
-        })?
-        .ok_or_else(|| {
-            tracing::warn!("Agent instance not found: {}", agent_id);
-            ApiError::not_found("Agent instance not found")
-        })?;
+    let agent_id = agent_instance.id.to_string();
 
     // Security: Validate instance name to prevent path traversal attacks
     validate_instance_name(&agent_instance.name)?;
@@ -411,9 +417,8 @@ async fn fetch_agent_attestations(
 
     let attestation_response = attestation_response.map_err(|e| {
         tracing::error!(
-            "Failed to fetch agent attestation from manager {}: {}",
-            manager_base_url,
-            e
+            error_type = error_type(&e),
+            "Failed to fetch agent attestation from manager"
         );
         ApiError::bad_gateway(format!("Failed to fetch agent attestation: {}", e))
     })?;
@@ -423,15 +428,17 @@ async fn fetch_agent_attestations(
 
     let attestation_data: AgentAttestationResponse = serde_json::from_slice(&attestation_bytes)
         .map_err(|e| {
-            tracing::error!("Failed to parse agent attestation response: {}", e);
+            tracing::error!(
+                "Failed to parse agent attestation response: {}",
+                error_type(&e)
+            );
             ApiError::internal_server_error("Failed to parse agent attestation")
         })?;
 
     let instance_response = instance_response.map_err(|e| {
         tracing::error!(
-            "Failed to fetch instance attestation from manager {}: {}",
-            manager_base_url,
-            e
+            error_type = error_type(&e),
+            "Failed to fetch instance attestation from manager"
         );
         ApiError::bad_gateway(format!("Failed to fetch instance attestation: {}", e))
     })?;
@@ -440,7 +447,10 @@ async fn fetch_agent_attestations(
 
     let instance_data: AgentInstanceAttestationResponse = serde_json::from_slice(&instance_bytes)
         .map_err(|e| {
-        tracing::error!("Failed to parse instance attestation response: {}", e);
+        tracing::error!(
+            "Failed to parse instance attestation response: {}",
+            error_type(&e)
+        );
         ApiError::internal_server_error("Failed to parse instance attestation")
     })?;
 
@@ -460,8 +470,29 @@ async fn fetch_agent_attestations(
 }
 
 /// Create the attestation router
-pub fn create_attestation_router() -> Router<AppState> {
-    Router::new().route("/v1/attestation/report", get(get_attestation_report))
+pub fn create_attestation_router(auth_state: AuthState) -> Router<AppState> {
+    Router::new()
+        .route("/v1/attestation/report", get(get_attestation_report))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            require_agent_auth,
+        ))
+        .layer(axum::middleware::map_response(
+            super::api::force_no_store_response,
+        ))
+}
+
+async fn require_agent_auth(
+    State(state): State<AuthState>,
+    Query(params): Query<AttestationQuery>,
+    request: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    if params.agent.is_some() {
+        crate::middleware::auth_middleware(State(state), request, next).await
+    } else {
+        Ok(next.run(request).await)
+    }
 }
 
 #[cfg(test)]

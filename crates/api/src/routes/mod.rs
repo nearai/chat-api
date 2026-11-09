@@ -77,8 +77,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
             crate::middleware::auth_middleware,
         ));
 
-    // Attestation routes (public, no auth required)
-    let attestation_routes = attestation::create_attestation_router();
+    // Agent attestations require user auth; gateway/model reports remain public.
+    let attestation_routes = attestation::create_attestation_router(auth_state.clone());
 
     // Admin routes (requires admin authentication) - includes agent admin endpoints
     let admin_routes = admin::create_admin_router().layer(from_fn_with_state(

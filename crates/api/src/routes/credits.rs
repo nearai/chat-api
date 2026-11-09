@@ -6,6 +6,7 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use services::logging::error_type;
 use services::subscription::ports::{
     CreateCreditPurchaseOutcome, CreditsSummary, SubscriptionError,
 };
@@ -103,7 +104,10 @@ pub async fn get_credits(
                 ApiError::service_unavailable("Credit purchase is not configured")
             }
             SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error getting credits");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Database error getting credits"
+                );
                 ApiError::internal_server_error("Failed to get credits")
             }
             _ => ApiError::internal_server_error("Failed to get credits"),
@@ -165,11 +169,17 @@ pub async fn create_credit_checkout(
             }
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
             SubscriptionError::StripeError(msg) => {
-                tracing::error!(error = ?msg, "Stripe error creating credit checkout");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Stripe error creating credit checkout"
+                );
                 ApiError::internal_server_error("Failed to create checkout")
             }
             SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error creating checkout");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Database error creating checkout"
+                );
                 ApiError::internal_server_error("Failed to create checkout")
             }
             _ => ApiError::internal_server_error("Failed to create checkout"),
@@ -221,13 +231,19 @@ pub async fn confirm_credit_purchase(
             }
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
             SubscriptionError::NearRpcError(msg) => {
-                tracing::error!(error = ?msg, "NEAR RPC error confirming credit purchase");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "NEAR RPC error confirming credit purchase"
+                );
                 ApiError::service_unavailable(
                     "Failed to reach NEAR RPC to verify House-of-Stake purchase",
                 )
             }
             SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error confirming credit purchase");
+                tracing::error!(
+                    error_type = error_type(&msg),
+                    "Database error confirming credit purchase"
+                );
                 ApiError::internal_server_error("Failed to confirm credit purchase")
             }
             _ => ApiError::internal_server_error("Failed to confirm credit purchase"),

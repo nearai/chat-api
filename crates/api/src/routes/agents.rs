@@ -9,6 +9,7 @@ use axum::{
 };
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
+use services::logging::error_type;
 use uuid::Uuid;
 
 /// Request body for user creating their own instance.
@@ -42,7 +43,7 @@ fn add_set_cookie_header(
             Err(error) => {
                 tracing::warn!(
                     cookie_length = cookie.len(),
-                    error = %error,
+                    error_type = error_type(&error),
                     "Failed to parse Set-Cookie header value; dropping invalid cookie header"
                 );
             }
@@ -64,7 +65,7 @@ async fn get_instance_limit(
             tracing::error!(
                 "Failed to fetch subscriptions: user_id={}, error={}",
                 user_id,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to check subscription")
         })?;
@@ -77,7 +78,7 @@ async fn get_instance_limit(
             tracing::error!(
                 "Failed to fetch system configs: user_id={}, error={}",
                 user_id,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to check plan limits")
         })?;
@@ -100,7 +101,7 @@ async fn get_instance_limit(
             tracing::error!(
                 "Failed to count instances: user_id={}, error={}",
                 user_id,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to check instance count")
         })?;
@@ -200,7 +201,7 @@ pub async fn create_instance(
             tracing::warn!(
                 "Failed to set up gateway session during instance creation: user_id={}, error={}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             None
         });
@@ -227,7 +228,10 @@ pub async fn create_instance(
             )
             .await
             .map_err(|e| {
-                tracing::error!("Failed to start passkey instance creation stream: {}", e);
+                tracing::error!(
+                    "Failed to start passkey instance creation stream: {}",
+                    error_type(&e)
+                );
                 ApiError::internal_server_error("Failed to start instance creation")
             })?;
 
@@ -247,7 +251,7 @@ pub async fn create_instance(
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Error in instance creation stream: {}", e);
+                        tracing::error!("Error in instance creation stream: {}", error_type(&e));
                         let error_json =
                             serde_json::json!({"error": "Instance creation failed"}).to_string();
                         Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
@@ -296,7 +300,10 @@ pub async fn create_instance(
             )
             .await
             .map_err(|e| {
-                tracing::error!("Failed to start passkey instance creation stream: {}", e);
+                tracing::error!(
+                    "Failed to start passkey instance creation stream: {}",
+                    error_type(&e)
+                );
                 ApiError::internal_server_error("Failed to start instance creation")
             })?;
 
@@ -312,7 +319,7 @@ pub async fn create_instance(
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Error during instance creation: {}", e);
+                    tracing::error!("Error during instance creation: {}", error_type(&e));
                     return Err(ApiError::internal_server_error("Instance creation failed"));
                 }
             }
@@ -396,7 +403,7 @@ pub async fn list_instances(
             tracing::error!(
                 "Failed to list instances: user_id={}, error={}",
                 user.user_id,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to list instances")
         })?;
@@ -477,7 +484,7 @@ pub async fn get_instance(
             tracing::error!(
                 "Failed to get instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to get instance")
         })?
@@ -559,7 +566,7 @@ pub async fn create_api_key(
                 tracing::error!(
                     "Failed to create API key: instance_id={}, error={}",
                     instance_uuid,
-                    err
+                    error_type(&err)
                 );
                 ApiError::internal_server_error("Failed to create API key")
             }
@@ -615,7 +622,7 @@ pub async fn list_api_keys(
             tracing::error!(
                 "Failed to list API keys: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to list API keys")
         })?;
@@ -666,7 +673,7 @@ pub async fn revoke_api_key(
             tracing::error!(
                 "Failed to revoke API key: api_key_id={}, error={}",
                 api_key_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to revoke API key")
         })?;
@@ -742,7 +749,7 @@ pub async fn get_instance_usage(
             tracing::error!(
                 "Failed to get usage: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to get usage")
         })?;
@@ -799,7 +806,7 @@ pub async fn get_instance_balance(
             tracing::error!(
                 "Failed to get balance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to get balance")
         })?
@@ -809,7 +816,7 @@ pub async fn get_instance_balance(
         tracing::error!(
             "Failed to resolve billing period: user_id={}, error={}",
             user.user_id,
-            e
+            error_type(&e)
         );
         ApiError::internal_server_error("Failed to get balance")
     })?;
@@ -826,7 +833,7 @@ pub async fn get_instance_balance(
             tracing::error!(
                 "Failed to aggregate period usage: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to get balance")
         })?;
@@ -906,7 +913,7 @@ pub async fn delete_instance(
             tracing::error!(
                 "Failed to fetch instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to fetch instance")
         })?
@@ -924,7 +931,7 @@ pub async fn delete_instance(
             tracing::error!(
                 "Failed to delete instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to delete instance")
         })?;
@@ -971,7 +978,7 @@ pub async fn start_instance(
             tracing::error!(
                 "Failed to fetch instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to fetch instance")
         })?
@@ -1009,7 +1016,7 @@ pub async fn start_instance(
             tracing::error!(
                 "Failed to start instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to start instance")
         })?;
@@ -1059,7 +1066,7 @@ pub async fn stop_instance(
             tracing::error!(
                 "Failed to fetch instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to fetch instance")
         })?
@@ -1078,7 +1085,7 @@ pub async fn stop_instance(
             tracing::error!(
                 "Failed to stop instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to stop instance")
         })?;
@@ -1128,7 +1135,7 @@ pub async fn restart_instance(
             tracing::error!(
                 "Failed to fetch instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to fetch instance")
         })?
@@ -1166,7 +1173,7 @@ pub async fn restart_instance(
             tracing::error!(
                 "Failed to restart instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to restart instance")
         })?;
@@ -1216,7 +1223,7 @@ pub async fn upgrade_instance(
             tracing::error!(
                 "Failed to fetch instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to fetch instance")
         })?
@@ -1234,7 +1241,7 @@ pub async fn upgrade_instance(
             tracing::error!(
                 "Failed to start upgrade stream: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to upgrade instance")
         })?;
@@ -1250,7 +1257,7 @@ pub async fn upgrade_instance(
                 Ok::<_, anyhow::Error>(bytes)
             }
             Err(e) => {
-                tracing::error!("Error in upgrade stream: {}", e);
+                tracing::error!("Error in upgrade stream: {}", error_type(&e));
                 let error_json = serde_json::json!({
                     "error": "Upgrade failed",
                     "code": "UPGRADE_STREAM_ERROR"
@@ -1312,7 +1319,7 @@ pub async fn check_upgrade_available(
             tracing::error!(
                 "Failed to fetch instance: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to fetch instance")
         })?
@@ -1330,7 +1337,7 @@ pub async fn check_upgrade_available(
             tracing::error!(
                 "Failed to check upgrade availability: instance_id={}, error={}",
                 instance_uuid,
-                e
+                error_type(&e)
             );
             ApiError::internal_server_error("Failed to check upgrade availability")
         })?;

@@ -1,3 +1,4 @@
+use crate::logging::error_type;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use near_kit::{
@@ -119,7 +120,10 @@ impl NearAuthService {
 
     async fn cleanup_nonces(&self) {
         if let Err(err) = self.nonce_repository.cleanup_expired_nonces().await {
-            tracing::warn!("Failed to cleanup expired NEAR nonces: {}", err);
+            tracing::warn!(
+                "Failed to cleanup expired NEAR nonces: {}",
+                error_type(&err)
+            );
         }
     }
 
@@ -279,7 +283,10 @@ async fn verify_wallet_control(
         ),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Wallet verification timed out"))?
+    .map_err(|_| {
+        tracing::warn!(is_timeout = true, "NEP-413 verifier request timed out");
+        anyhow::anyhow!("Wallet verification timed out")
+    })?
     .map_err(|error| {
         tracing::warn!(error_category = ?std::mem::discriminant(&error), "NEP-413 verifier error");
         anyhow::anyhow!("Wallet verification unavailable")

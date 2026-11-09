@@ -83,10 +83,7 @@ impl SessionRepository for PostgresSessionRepository {
         &self,
         token_hash: String,
     ) -> anyhow::Result<Option<UserSession>> {
-        tracing::debug!(
-            "Looking up session by token_hash: {}...",
-            &token_hash.chars().take(16).collect::<String>()
-        );
+        tracing::debug!("Looking up session by token hash");
 
         let client = self.pool.get().await?;
 
@@ -106,7 +103,14 @@ impl SessionRepository for PostgresSessionRepository {
                  WHERE a.token_hash = $1",
                 &[&token_hash, &config::enforce_short_sessions()],
             )
-            .await?;
+            .await
+            .inspect_err(|e| {
+                tracing::error!(
+                    sqlstate = e.code().map(|code| code.code()),
+                    is_closed = e.is_closed(),
+                    "Session lookup query failed"
+                );
+            })?;
 
         let result = row.map(|r| UserSession {
             session_id: r.get(0),

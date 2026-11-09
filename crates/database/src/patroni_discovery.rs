@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Deserializer, Serialize};
+use services::logging::error_type;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -71,7 +72,10 @@ where
                     .get("name")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("<unknown>");
-                warn!("Skipping not-yet-ready cluster member {name}: {e}");
+                warn!(
+                    "Skipping not-yet-ready cluster member {name}: {e_type}",
+                    e_type = error_type(&e)
+                );
             }
         }
     }
@@ -140,12 +144,11 @@ impl PatroniDiscovery {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "No body".to_string());
-            error!("Failed to get cluster info: {} - {}", status, body);
-            return Err(anyhow!("HTTP {status}: {body}"));
+            error!(
+                %status,
+                "Failed to get cluster info"
+            );
+            return Err(anyhow!("Patroni API returned HTTP {status}"));
         }
 
         let cluster_info: ClusterInfo = response
@@ -272,7 +275,10 @@ impl PatroniDiscovery {
                         debug!("Cluster state refreshed successfully");
                     }
                     Err(e) => {
-                        error!("Failed to refresh cluster state: {:?}", e);
+                        error!(
+                            error_type = error_type(&e),
+                            "Failed to refresh cluster state"
+                        );
                     }
                 }
             }

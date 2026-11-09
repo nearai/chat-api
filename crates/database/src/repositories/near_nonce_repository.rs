@@ -16,7 +16,7 @@ impl PostgresNearNonceRepository {
 #[async_trait]
 impl NearNonceRepository for PostgresNearNonceRepository {
     async fn consume_nonce(&self, nonce_hex: &str) -> anyhow::Result<bool> {
-        tracing::debug!("Repository: Attempting to consume nonce: {}", nonce_hex);
+        tracing::debug!("Repository: Attempting to consume nonce");
 
         let client = self.pool.get().await?;
 
@@ -32,12 +32,9 @@ impl NearNonceRepository for PostgresNearNonceRepository {
         let consumed = result > 0;
 
         if consumed {
-            tracing::debug!("Repository: Nonce consumed successfully: {}", nonce_hex);
+            tracing::debug!("Repository: Nonce consumed successfully");
         } else {
-            tracing::warn!(
-                "Repository: Nonce already used (replay attempt): {}",
-                nonce_hex
-            );
+            tracing::warn!("Repository: Nonce already used (replay attempt)");
         }
 
         Ok(consumed)

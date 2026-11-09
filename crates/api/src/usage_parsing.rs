@@ -11,7 +11,8 @@
 //! input+output when missing). `model` is required.
 
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, StreamExt};
+use services::logging::error_type;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -182,16 +183,99 @@ pub fn parse_usage_from_response_completed_sse_line(line: &str) -> Option<Parsed
     parse_response_usage_from_json(response)
 }
 
+// Keep accounting independent of the downstream response body's lifetime.
+// Only one network chunk is queued; after disconnect, discard content while
+// waiting for upstream usage. Bound that work if the provider never finishes.
+const DISCONNECTED_USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+pub fn forward_usage_stream<S>(
+    stream: S,
+    guard: Option<crate::middleware::rate_limit::RateLimitGuard>,
+) -> tokio_stream::wrappers::ReceiverStream<S::Item>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send + 'static,
+{
+    forward_usage_stream_with_timeout(stream, DISCONNECTED_USAGE_TIMEOUT, guard)
+}
+
+pub(crate) fn forward_usage_stream_with_timeout<S>(
+    mut stream: S,
+    timeout: std::time::Duration,
+    guard: Option<crate::middleware::rate_limit::RateLimitGuard>,
+) -> tokio_stream::wrappers::ReceiverStream<S::Item>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send + 'static,
+{
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        // Keep the existing per-user slot through EOF, error and disconnect drain.
+        let _guard = guard;
+        loop {
+            let item = tokio::select! {
+                _ = sender.closed() => break,
+                item = stream.next() => item,
+            };
+            let Some(item) = item else {
+                return;
+            };
+            let failed = item.is_err();
+            let sent = sender.send(item).await.is_ok();
+            if failed {
+                return;
+            }
+            if !sent {
+                break;
+            }
+        }
+        // The tracking stream finalizes observed usage on EOF, error or Drop.
+        if tokio::time::timeout(timeout, async {
+            while let Some(item) = stream.next().await {
+                if item.is_err() {
+                    break;
+                }
+            }
+        })
+        .await
+        .is_err()
+        {
+            tracing::warn!("Timed out collecting upstream usage after client disconnect");
+        }
+    });
+    tokio_stream::wrappers::ReceiverStream::new(receiver)
+}
+
+fn parse_buffered_usage(
+    buffer: &mut Vec<u8>,
+    usage: &mut Option<ParsedUsage>,
+    parse: fn(&str) -> Option<ParsedUsage>,
+    flush: bool,
+) {
+    let end = if flush {
+        buffer.len()
+    } else {
+        buffer
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |pos| pos + 1)
+    };
+    for line in buffer[..end].split(|byte| *byte == b'\n') {
+        if let Some(parsed) = std::str::from_utf8(line).ok().and_then(parse) {
+            *usage = Some(parsed);
+        }
+    }
+    buffer.drain(..end);
+}
+
 // ---------- Stream wrappers (usage tracking) ----------
 
-/// Stream wrapper for **chat/completions** SSE: parses top-level usage per chunk and accumulates; records on stream end.
+/// Stream wrapper for **chat/completions** SSE: parses top-level usage per chunk and accumulates; records once on stream end or drop.
 ///
 /// Note: SSE protocol uses double newlines (\n\n) to separate events. However, OpenAI's streaming API
 /// sends one complete JSON object per `data:` line, so we process line-by-line. After processing,
 /// we keep any incomplete line (one without a trailing newline) for the next chunk.
 pub struct UsageTrackingStreamChatCompletions<S> {
     inner: S,
-    buffer: String,
+    buffer: Vec<u8>,
     usage: Option<ParsedUsage>,
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
     subscription_service: Arc<dyn services::subscription::ports::SubscriptionService>,
@@ -214,7 +298,7 @@ where
     ) -> Self {
         Self {
             inner,
-            buffer: String::new(),
+            buffer: Vec::new(),
             usage: None,
             user_usage,
             subscription_service,
@@ -232,6 +316,36 @@ where
     }
 }
 
+impl<S> UsageTrackingStreamChatCompletions<S> {
+    fn finish(&mut self) {
+        parse_buffered_usage(
+            &mut self.buffer,
+            &mut self.usage,
+            parse_usage_from_chat_completion_sse_line,
+            true,
+        );
+        record_usage_on_stream_end(
+            self.usage.take(),
+            StreamUsageContext {
+                user_usage: self.user_usage.clone(),
+                subscription_service: self.subscription_service.clone(),
+                pricing_cache: self.pricing_cache.clone(),
+                user_id: self.user_id,
+                stream_name: "UsageTrackingStreamChatCompletions",
+                instance_id: self.instance_id.take(),
+                api_key_id: self.api_key_id.take(),
+                request_type: "chat_completion".to_string(),
+            },
+        );
+    }
+}
+
+impl<S> Drop for UsageTrackingStreamChatCompletions<S> {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 impl<S> Stream for UsageTrackingStreamChatCompletions<S>
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send,
@@ -242,36 +356,17 @@ where
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
-                if let Ok(text) = std::str::from_utf8(&bytes) {
-                    this.buffer.push_str(text);
-                    for line in this.buffer.lines() {
-                        if let Some(u) = parse_usage_from_chat_completion_sse_line(line) {
-                            match &mut this.usage {
-                                Some(acc) => acc.merge(&u),
-                                None => this.usage = Some(u),
-                            }
-                        }
-                    }
-                    if let Some(last_newline) = this.buffer.rfind('\n') {
-                        this.buffer.drain(..=last_newline);
-                    }
-                }
+                this.buffer.extend_from_slice(&bytes);
+                parse_buffered_usage(
+                    &mut this.buffer,
+                    &mut this.usage,
+                    parse_usage_from_chat_completion_sse_line,
+                    false,
+                );
                 Poll::Ready(Some(Ok(bytes)))
             }
             Poll::Ready(None) => {
-                record_usage_on_stream_end(
-                    this.usage.take(),
-                    StreamUsageContext {
-                        user_usage: this.user_usage.clone(),
-                        subscription_service: this.subscription_service.clone(),
-                        pricing_cache: this.pricing_cache.clone(),
-                        user_id: this.user_id,
-                        stream_name: "UsageTrackingStreamChatCompletions",
-                        instance_id: this.instance_id.take(),
-                        api_key_id: this.api_key_id.take(),
-                        request_type: "chat_completion".to_string(),
-                    },
-                );
+                this.finish();
                 Poll::Ready(None)
             }
             other => other,
@@ -279,14 +374,14 @@ where
     }
 }
 
-/// Stream wrapper for **/v1/responses** SSE: parses only `type: response.completed` and takes that single usage; records on stream end.
+/// Stream wrapper for **/v1/responses** SSE: parses only `type: response.completed` and takes that single usage; records once on stream end or drop.
 ///
 /// Note: SSE protocol uses double newlines (\n\n) to separate events. However, this API
 /// sends one complete JSON object per `data:` line, so we process line-by-line. After processing,
 /// we keep any incomplete line (one without a trailing newline) for the next chunk.
 pub struct UsageTrackingStreamResponseCompleted<S> {
     inner: S,
-    buffer: String,
+    buffer: Vec<u8>,
     usage: Option<ParsedUsage>,
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
     subscription_service: Arc<dyn services::subscription::ports::SubscriptionService>,
@@ -309,7 +404,7 @@ where
     ) -> Self {
         Self {
             inner,
-            buffer: String::new(),
+            buffer: Vec::new(),
             usage: None,
             user_usage,
             subscription_service,
@@ -327,6 +422,36 @@ where
     }
 }
 
+impl<S> UsageTrackingStreamResponseCompleted<S> {
+    fn finish(&mut self) {
+        parse_buffered_usage(
+            &mut self.buffer,
+            &mut self.usage,
+            parse_usage_from_response_completed_sse_line,
+            true,
+        );
+        record_usage_on_stream_end(
+            self.usage.take(),
+            StreamUsageContext {
+                user_usage: self.user_usage.clone(),
+                subscription_service: self.subscription_service.clone(),
+                pricing_cache: self.pricing_cache.clone(),
+                user_id: self.user_id,
+                stream_name: "UsageTrackingStreamResponseCompleted",
+                instance_id: self.instance_id.take(),
+                api_key_id: self.api_key_id.take(),
+                request_type: "response".to_string(),
+            },
+        );
+    }
+}
+
+impl<S> Drop for UsageTrackingStreamResponseCompleted<S> {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 impl<S> Stream for UsageTrackingStreamResponseCompleted<S>
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send,
@@ -337,33 +462,17 @@ where
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
-                if let Ok(text) = std::str::from_utf8(&bytes) {
-                    this.buffer.push_str(text);
-                    for line in this.buffer.lines() {
-                        if let Some(usage) = parse_usage_from_response_completed_sse_line(line) {
-                            this.usage = Some(usage);
-                        }
-                    }
-                    if let Some(last_newline) = this.buffer.rfind('\n') {
-                        this.buffer.drain(..=last_newline);
-                    }
-                }
+                this.buffer.extend_from_slice(&bytes);
+                parse_buffered_usage(
+                    &mut this.buffer,
+                    &mut this.usage,
+                    parse_usage_from_response_completed_sse_line,
+                    false,
+                );
                 Poll::Ready(Some(Ok(bytes)))
             }
             Poll::Ready(None) => {
-                record_usage_on_stream_end(
-                    this.usage.take(),
-                    StreamUsageContext {
-                        user_usage: this.user_usage.clone(),
-                        subscription_service: this.subscription_service.clone(),
-                        pricing_cache: this.pricing_cache.clone(),
-                        user_id: this.user_id,
-                        stream_name: "UsageTrackingStreamResponseCompleted",
-                        instance_id: this.instance_id.take(),
-                        api_key_id: this.api_key_id.take(),
-                        request_type: "response".to_string(),
-                    },
-                );
+                this.finish();
                 Poll::Ready(None)
             }
             other => other,
@@ -444,7 +553,7 @@ fn record_usage_on_stream_end(usage: Option<ParsedUsage>, ctx: StreamUsageContex
                         .await
                     {
                         tracing::warn!(
-                            error = ?e,
+                            error_type = error_type(&e),
                             "Failed to reconcile purchased credits after stream usage"
                         );
                     }
@@ -454,7 +563,7 @@ fn record_usage_on_stream_end(usage: Option<ParsedUsage>, ctx: StreamUsageContex
                     tracing::warn!(
                         "Failed to record usage from stream for user_id={}: {}",
                         ctx.user_id,
-                        e
+                        error_type(&e)
                     );
                 }
             });
@@ -612,5 +721,39 @@ mod tests {
         assert_eq!(acc.total_tokens, 3);
         assert_eq!(acc.cache_read_tokens, 1);
         assert_eq!(acc.model, "new-model");
+    }
+}
+
+#[cfg(test)]
+mod disconnect_tests {
+    use super::*;
+    // A stalled upstream must be released after the disconnect deadline.
+    struct PendingWithDrop(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Stream for PendingWithDrop {
+        type Item = Result<Bytes, reqwest::Error>;
+        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+    impl Drop for PendingWithDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+    #[tokio::test]
+    async fn disconnect_timeout_releases_stalled_upstream() {
+        let (sender, dropped) = tokio::sync::oneshot::channel();
+        let receiver = forward_usage_stream_with_timeout(
+            PendingWithDrop(Some(sender)),
+            std::time::Duration::from_millis(10),
+            None,
+        );
+        drop(receiver);
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

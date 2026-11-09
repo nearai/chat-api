@@ -127,6 +127,7 @@ fn other_tool_call() -> serde_json::Value {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_requires_authentication() {
     let mock_upstream = MockServer::start().await;
 
@@ -136,6 +137,7 @@ async fn web_search_requires_authentication() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let response = server
         .post("/mcp")
@@ -146,6 +148,7 @@ async fn web_search_requires_authentication() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_records_usage_only_on_success() {
     let mock_upstream = MockServer::start().await;
 
@@ -194,6 +197,7 @@ async fn web_search_records_usage_only_on_success() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let email = format!(
         "test_web_search_success_{}@example.com",
@@ -252,6 +256,7 @@ async fn web_search_records_usage_only_on_success() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_does_not_record_usage_when_is_error_flag_is_missing() {
     let mock_upstream = MockServer::start().await;
 
@@ -288,6 +293,7 @@ async fn web_search_does_not_record_usage_when_is_error_flag_is_missing() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let email = format!(
         "test_web_search_missing_flag_{}@example.com",
@@ -317,6 +323,7 @@ async fn web_search_does_not_record_usage_when_is_error_flag_is_missing() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_does_not_record_usage_for_failed_agent_request() {
     let mock_upstream = MockServer::start().await;
 
@@ -343,6 +350,7 @@ async fn web_search_does_not_record_usage_for_failed_agent_request() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let failed_agent_email = format!(
         "test_web_search_failed_agent_{}@example.com",
@@ -386,6 +394,7 @@ async fn web_search_does_not_record_usage_for_failed_agent_request() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn non_web_search_mcp_call_does_not_record_usage() {
     let mock_upstream = MockServer::start().await;
 
@@ -418,6 +427,7 @@ async fn non_web_search_mcp_call_does_not_record_usage() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let email = format!(
         "test_mcp_other_tool_{}@example.com",
@@ -447,6 +457,7 @@ async fn non_web_search_mcp_call_does_not_record_usage() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_records_usage_for_successful_agent_request() {
     let mock_upstream = MockServer::start().await;
 
@@ -495,6 +506,7 @@ async fn web_search_records_usage_for_successful_agent_request() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let success_agent_email = format!(
         "test_web_search_success_agent_{}@example.com",
@@ -601,6 +613,7 @@ async fn web_search_records_usage_for_successful_agent_request() {
 }
 
 #[tokio::test]
+#[serial_test::serial(subscription_tests)]
 async fn web_search_supports_cloud_api_base_url_with_v1_suffix() {
     let mock_upstream = MockServer::start().await;
 
@@ -650,6 +663,7 @@ async fn web_search_supports_cloud_api_base_url_with_v1_suffix() {
         ..Default::default()
     })
     .await;
+    common::clear_subscription_plans(&server).await;
 
     let email = format!(
         "test_web_search_v1_base_url_{}@example.com",
@@ -681,4 +695,151 @@ async fn web_search_supports_cloud_api_base_url_with_v1_suffix() {
 
     let count = wait_for_web_search_usage_count(&db, user.id, 1).await;
     assert_eq!(count, 1, "web search should record usage with /v1 base URL");
+}
+
+#[tokio::test]
+#[serial_test::serial(subscription_tests)]
+async fn mcp_rejects_unsubscribed_sessions_and_agent_keys_before_forwarding() {
+    let upstream = MockServer::start().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        cloud_api_base_url: upstream.uri(),
+        ..Default::default()
+    })
+    .await;
+    common::clear_subscription_plans(&server).await;
+    let email = format!("mcp-plan-{}@example.com", Uuid::new_v4());
+    let (_, _, key) = create_agent_api_key(&server, &db, &email).await;
+    let token = mock_login(&server, &email).await;
+    common::set_subscription_plans(
+        &server,
+        json!({
+            "basic": {"providers": {"stripe": {"price_id": "price_mcp"}},
+                      "agent_instances": {"max": 1}, "monthly_credits": {"max": 1000000}}
+        }),
+    )
+    .await;
+    // Use a fresh service instance after configuring the catalog.
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        cloud_api_base_url: upstream.uri(),
+        ..Default::default()
+    })
+    .await;
+    for credential in [token, key] {
+        let response = server
+            .post("/mcp")
+            .add_header(http::header::AUTHORIZATION, format!("Bearer {credential}"))
+            .json(&web_search_tool_call("blocked"))
+            .await;
+        assert_eq!(response.status_code(), 403);
+    }
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    common::clear_subscription_plans(&server).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(subscription_tests)]
+async fn mcp_rejects_banned_users_before_forwarding() {
+    let upstream = MockServer::start().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        cloud_api_base_url: upstream.uri(),
+        ..Default::default()
+    })
+    .await;
+    common::clear_subscription_plans(&server).await;
+    let email = format!("mcp-ban-{}@example.com", Uuid::new_v4());
+    let (user_id, _, key) = create_agent_api_key(&server, &db, &email).await;
+    let token = mock_login(&server, &email).await;
+    db.user_repository()
+        .create_user_ban(
+            user_id,
+            services::user::ports::BanType::NearBalanceLow,
+            Some("test ban".into()),
+            Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        )
+        .await
+        .unwrap();
+    for credential in [token, key] {
+        let response = server
+            .post("/mcp")
+            .add_header(http::header::AUTHORIZATION, format!("Bearer {credential}"))
+            .json(&web_search_tool_call("blocked"))
+            .await;
+        assert_eq!(response.status_code(), 403);
+    }
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+#[serial_test::serial(subscription_tests)]
+async fn mcp_enforces_request_rate_limit() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": {}})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let mut limit = common::restrictive_rate_limit_config();
+    limit.window_duration = chrono::Duration::minutes(1);
+    let (server, _, state) = common::create_test_server_with_state(TestServerConfig {
+        cloud_api_base_url: upstream.uri(),
+        rate_limit_config: Some(limit.clone()),
+        ..Default::default()
+    })
+    .await;
+    common::clear_subscription_plans(&server).await;
+    state.rate_limit_state.update_config(limit).await;
+    let token = mock_login(&server, &format!("mcp-rate-{}@example.com", Uuid::new_v4())).await;
+    for expected in [200, 429] {
+        let response = server
+            .post("/mcp")
+            .add_header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .json(&web_search_tool_call("test"))
+            .await;
+        assert_eq!(response.status_code(), expected);
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(subscription_tests)]
+async fn mcp_rejects_low_near_balance_on_first_request() {
+    let upstream = MockServer::start().await;
+    let rpc = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"amount": "0", "locked": "0", "storage_usage": 0,
+                "code_hash": "11111111111111111111111111111111", "storage_paid_at": 0,
+                "block_height": 1, "block_hash": "11111111111111111111111111111111"}
+        })))
+        .expect(1)
+        .mount(&rpc)
+        .await;
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        cloud_api_base_url: upstream.uri(),
+        near_rpc_url: Some(rpc.uri()),
+        near_staking_contract_id: Some(String::new()),
+        ..Default::default()
+    })
+    .await;
+    common::clear_subscription_plans(&server).await;
+    let login = server
+        .post("/v1/auth/mock-login")
+        .json(&json!({
+            "email": format!("mcp-{}.near@near", Uuid::new_v4().simple()),
+            "oauth_provider": "near"
+        }))
+        .await;
+    assert_eq!(login.status_code(), 200);
+    let token = login.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let response = server
+        .post("/mcp")
+        .add_header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .json(&web_search_tool_call("blocked"))
+        .await;
+    assert_eq!(response.status_code(), 403);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
 }
