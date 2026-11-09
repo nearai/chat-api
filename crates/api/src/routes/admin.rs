@@ -1292,7 +1292,9 @@ pub async fn delete_model(
 /// Revoke VPC credentials
 ///
 /// Deletes the stored `vpc_api_key` from database and clears the in-memory VPC cache so the
-/// next proxied request will request a new API key from the VPC.
+/// next request uses the static fallback when VPC login is disabled, or requests
+/// a new key when VPC login is configured. Other API/worker processes must be
+/// restarted or invalidated separately; this does not revoke the upstream key.
 #[utoipa::path(
     post,
     path = "/v1/admin/vpc/revoke",

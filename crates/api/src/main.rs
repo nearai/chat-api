@@ -218,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let static_api_key = if vpc_auth_config.is_none() {
-        tracing::info!("Using API key from environment");
+        tracing::info!("Using cached Cloud API credentials with environment-key fallback");
         Some(config.openai.api_key.clone())
     } else {
         None

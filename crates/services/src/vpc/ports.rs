@@ -42,15 +42,17 @@ pub struct VpcAuthConfig {
 /// Service for managing VPC credentials
 #[async_trait]
 pub trait VpcCredentialsService: Send + Sync {
-    /// Get VPC credentials, re-authenticating and requesting new credentials if necessary
-    /// Returns None if VPC is not configured
+    /// Get cached credentials, using VPC login on a miss only when configured.
+    /// Returns None for a cache miss without VPC login; static keys have no
+    /// associated organization metadata here.
     async fn get_credentials(&self) -> anyhow::Result<Option<VpcCredentials>>;
 
-    /// Get the current API key (either static or from VPC auth)
+    /// Get the cached API key, or the static key on a miss without VPC login.
     async fn get_api_key(&self) -> anyhow::Result<String>;
 
     /// Revoke the stored API key (DB and in-memory cache)
-    /// This will request a new API key from the VPC on the next request.
+    /// The next request uses static fallback when VPC login is disabled.
+    /// Other processes must separately clear/reload their in-memory caches.
     async fn revoke_credentials(&self) -> anyhow::Result<()>;
 
     /// Check if VPC is configured
