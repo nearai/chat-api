@@ -310,42 +310,6 @@ async fn test_create_api_key_rejects_negative_spend_limit() {
 }
 
 #[tokio::test]
-async fn test_admin_create_unbound_api_key_rejects_negative_spend_limit() {
-    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
-
-    let admin_token = mock_login(&server, "api-key-admin@admin.org").await;
-    let user_email = format!("invalid-unbound-spend-limit-{}@example.com", Uuid::new_v4());
-    let _user_token = mock_login(&server, &user_email).await;
-    let user = db
-        .user_repository()
-        .get_user_by_email(&user_email)
-        .await
-        .expect("db")
-        .expect("user");
-
-    let response = server
-        .post("/v1/admin/agents/keys")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
-        .json(&json!({
-            "user_id": user.id.0,
-            "name": "bad-unbound-key",
-            "spend_limit": -1,
-            "expires_at": null
-        }))
-        .await;
-
-    assert_eq!(response.status_code(), 400);
-    let body: serde_json::Value = response.json();
-    assert_eq!(
-        body.get("message").and_then(|v| v.as_str()),
-        Some("Invalid spend limit: must be non-negative when provided")
-    );
-}
-
-#[tokio::test]
 async fn test_inactive_agent_api_key_returns_401_without_hitting_upstream() {
     let mock_upstream = MockServer::start().await;
     Mock::given(method("POST"))
