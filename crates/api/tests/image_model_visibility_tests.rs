@@ -1,6 +1,8 @@
 mod common;
 
-use common::{clear_subscription_plans, create_test_server_and_db, mock_login, TestServerConfig};
+use common::{
+    clear_subscription_plans, create_test_server_with_state, mock_login, TestServerConfig,
+};
 use serde_json::json;
 use uuid::Uuid;
 use wiremock::{
@@ -20,7 +22,7 @@ async fn image_routes_reject_hidden_models_before_forwarding_and_preserve_public
             .mount(&upstream)
             .await;
     }
-    let (server, _) = create_test_server_and_db(TestServerConfig {
+    let (server, _, state) = create_test_server_with_state(TestServerConfig {
         proxy_base_url: Some(format!("{}/v1", upstream.uri())),
         cloud_api_base_url: upstream.uri(),
         ..Default::default()
@@ -72,4 +74,28 @@ async fn image_routes_reject_hidden_models_before_forwarding_and_preserve_public
             }
         }
     }
+    for endpoint in ["generations", "edits"] {
+        let model = "x".repeat(257);
+        let request = server
+            .post(&format!("/v1/images/{endpoint}"))
+            .add_header("authorization", format!("Bearer {admin}"));
+        let response = if endpoint == "generations" {
+            request
+                .json(&json!({"model": model, "prompt": "test image"}))
+                .await
+        } else {
+            let boundary = "longModelBoundary";
+            let body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"input.png\"\r\nContent-Type: image/png\r\n\r\ntest-image\r\n--{boundary}--\r\n");
+            request
+                .add_header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .bytes(bytes::Bytes::from(body))
+                .await
+        };
+        response.assert_status_bad_request();
+        assert!(!state.model_settings_cache.read().await.contains_key(&model));
+    }
+    upstream.verify().await;
 }
