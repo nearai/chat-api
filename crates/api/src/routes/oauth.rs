@@ -1653,6 +1653,7 @@ pub fn create_oauth_router(trusted_proxy_count: usize) -> Router<AppState> {
     let initiation_routes = Router::new()
         .route("/google", get(google_login))
         .route("/github", get(github_login))
+        .route("/near", post(near_auth))
         .layer(axum::middleware::from_fn_with_state(
             super::oauth_rate_limit::OAuthInitiationLimit::new(trusted_proxy_count),
             super::oauth_rate_limit::limit_oauth_initiation,
@@ -1669,8 +1670,6 @@ pub fn create_oauth_router(trusted_proxy_count: usize) -> Router<AppState> {
         .merge(initiation_routes)
         .route("/email/request-code", post(request_email_code))
         .route("/email/verify-code", post(verify_email_code))
-        // NEAR wallet authentication
-        .route("/near", post(near_auth))
         // Unified callback route for all providers
         .route("/callback", get(oauth_callback))
         .merge(exchange_route);
