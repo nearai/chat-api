@@ -198,6 +198,15 @@ OpenAPI docs available at `/docs`.
 - `/v1/users/*` - User management
 - `/v1/admin/*` - Admin operations
 
+**Agent credentials**: Admin sessions can call
+`PATCH /v1/admin/agents/instances/{id}/credentials` with
+`{"instance_token":"<new-token>"}`, where `{id}` is the database instance UUID.
+The endpoint encrypts the token before storage and returns `204 No Content`.
+It rejects blank tokens and extra fields, and returns `404` for missing or deleted
+instances. This updates only chat-api's stored token; it does not rotate the token
+in the running agent or change per-user provisioning credentials. The general
+`PATCH /v1/admin/agents/instances/{id}` endpoint remains removed.
+
 **API retirement**: `/v1/conversations`, `/v1/files`, `/v1/share-groups`, and `/v1/shared-with-me`, including their descendants, return `410 Gone` for all resource requests. CORS preflights retain their standard handling. The notice is available without authentication and has `Cache-Control: no-store`. These APIs are no longer listed in OpenAPI.
 
 **Account-deletion exception**: `DELETE /v1/users/me` remains available. Its existing asynchronous worker continues Cloud Conversation/File cleanup through Cloud API's retained, API-key/workspace-scoped resource DELETE endpoints before it performs local finalization; this flow is outside the retired session-proxy write surface.

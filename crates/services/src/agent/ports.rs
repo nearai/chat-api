@@ -372,18 +372,13 @@ pub trait AgentRepository: Send + Sync {
         i64,
     )>;
 
-    /// Admin update instance fields for migration (agent_api_base_url, instance_url, instance_token,
-    /// dashboard_url, name).
-    /// Only updates fields that are Some. The repository encrypts instance_token before storage.
-    async fn admin_update_instance(
+    /// Replace only an instance's token, encrypting it without reading the old credential.
+    /// Returns false when the instance is missing or deleted.
+    async fn update_instance_token(
         &self,
         instance_id: Uuid,
-        agent_api_base_url: Option<String>,
-        instance_url: Option<String>,
-        instance_token: Option<String>,
-        dashboard_url: Option<String>,
-        name: Option<String>,
-    ) -> anyhow::Result<AgentInstance>;
+        instance_token: &str,
+    ) -> anyhow::Result<bool>;
 }
 
 /// Service trait for agent business logic

@@ -1580,6 +1580,110 @@ pub async fn admin_list_all_instances(
     }))
 }
 
+/// Credentials that an administrator can replace in chat-api's instance record.
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateInstanceCredentialsRequest {
+    /// New plaintext instance token. Encrypted before storage; never returned.
+    #[schema(write_only = true, min_length = 1)]
+    pub instance_token: String,
+}
+
+/// Replace the stored instance token without changing metadata or contacting the agent.
+/// This does not rotate the token in the running agent or update per-user provisioning credentials.
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/agents/instances/{id}/credentials",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Database instance UUID")
+    ),
+    request_body = UpdateInstanceCredentialsRequest,
+    responses(
+        (
+            status = 204,
+            description = "Instance credentials updated; no credentials returned",
+        ),
+        (
+            status = 400,
+            description = "Invalid instance ID or credentials payload",
+            body = crate::error::ApiErrorResponse,
+        ),
+        (
+            status = 401,
+            description = "Unauthorized",
+            body = crate::error::ApiErrorResponse,
+        ),
+        (
+            status = 403,
+            description = "Forbidden - admin only",
+            body = crate::error::ApiErrorResponse,
+        ),
+        (
+            status = 404,
+            description = "Instance not found or deleted",
+            body = crate::error::ApiErrorResponse,
+        ),
+        (
+            status = 500,
+            description = "Failed to update instance credentials",
+            body = crate::error::ApiErrorResponse,
+        )
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_update_instance_credentials(
+    State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+    payload: Result<
+        Json<serde_json::Map<String, serde_json::Value>>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Result<StatusCode, ApiError> {
+    let instance_id = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    // Require an object: serde also accepts arrays when deserializing a struct.
+    // Deserialization errors can echo submitted values, so return a fixed message.
+    let invalid_payload =
+        || ApiError::bad_request("Expected a JSON object containing only a string instance_token");
+    let Json(payload) = payload.map_err(|_| invalid_payload())?;
+    let request: UpdateInstanceCredentialsRequest =
+        serde_json::from_value(serde_json::Value::Object(payload))
+            .map_err(|_| invalid_payload())?;
+
+    if request.instance_token.trim().is_empty() {
+        return Err(ApiError::bad_request("instance_token must not be blank"));
+    }
+
+    let updated = app_state
+        .agent_repository
+        .update_instance_token(instance_id, &request.instance_token)
+        .await
+        .map_err(|_| {
+            // Database errors can contain submitted data. Log identifiers only.
+            tracing::error!(
+                %instance_id,
+                admin_user_id = %admin.user_id,
+                "Failed to update instance credentials"
+            );
+            ApiError::internal_server_error("Failed to update instance credentials")
+        })?;
+
+    if !updated {
+        return Err(ApiError::not_found("Instance not found"));
+    }
+
+    tracing::info!(
+        %instance_id,
+        admin_user_id = %admin.user_id,
+        "Admin updated instance credentials"
+    );
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Admin endpoint: Delete an agent instance
 #[utoipa::path(
     delete,
@@ -3198,6 +3302,10 @@ pub fn create_admin_router() -> Router<AppState> {
                 .route("/instances", get(admin_list_all_instances))
                 .route("/instances/sync-status", post(admin_sync_agent_status))
                 .route("/instances/{id}", delete(admin_delete_instance))
+                .route(
+                    "/instances/{id}/credentials",
+                    patch(admin_update_instance_credentials),
+                )
                 .route("/instances/{id}/start", post(admin_start_instance))
                 .route("/instances/{id}/stop", post(admin_stop_instance))
                 .route("/instances/{id}/restart", post(admin_restart_instance))

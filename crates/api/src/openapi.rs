@@ -77,6 +77,7 @@ use utoipa::OpenApi;
         crate::routes::agents::get_instance,
         crate::routes::admin::admin_list_all_instances,
         crate::routes::admin::admin_delete_instance,
+        crate::routes::admin::admin_update_instance_credentials,
         crate::routes::admin::admin_start_instance,
         crate::routes::admin::admin_stop_instance,
         crate::routes::admin::admin_restart_instance,
@@ -180,6 +181,7 @@ use utoipa::OpenApi;
         // Agent models
         crate::models::InstanceResponse,
         crate::routes::agents::CreateInstanceRequest,
+        crate::routes::admin::UpdateInstanceCredentialsRequest,
         crate::models::CreateApiKeyRequest,
         crate::models::CreateApiKeyResponse,
         crate::models::ApiKeyResponse,
