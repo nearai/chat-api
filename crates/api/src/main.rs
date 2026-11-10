@@ -21,7 +21,6 @@ use services::{
     system_configs::ports::SystemConfigsService,
     user::UserServiceImpl,
     user::UserSettingsServiceImpl,
-    vpc::initialize_cloud_api_credentials,
 };
 use std::sync::Arc;
 
@@ -97,6 +96,14 @@ async fn run() -> anyhow::Result<()> {
 
     // Initialize tracing based on configuration
     api::init_tracing_from_config(&config.logging);
+
+    // API and worker use only the configured static upstream credential.
+    let mut proxy_service = OpenAIProxy::new(config.openai.api_key.clone())?;
+    if let Some(base_url) = config.openai.base_url.clone() {
+        proxy_service = proxy_service.with_base_url(base_url);
+    }
+    let proxy_service = Arc::new(proxy_service);
+
     log_lukka_aml_policy_config(&config.lukka_aml)?;
 
     let frontend_callback_allowed_origins = api::routes::oauth::frontend_callback_allowed_origins();
@@ -157,7 +164,6 @@ async fn run() -> anyhow::Result<()> {
     let conversation_share_repo = db.conversation_share_repository();
     let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
-    let app_config_repo = db.app_config_repository();
     let near_nonce_repo = db.near_nonce_repository();
     let analytics_repo = db.analytics_repository();
     let system_configs_repo = db.system_configs_repository();
@@ -203,21 +209,6 @@ async fn run() -> anyhow::Result<()> {
     let user_settings_service = Arc::new(UserSettingsServiceImpl::new(user_settings_repo));
 
     let model_service = Arc::new(ModelServiceImpl::new(model_repo));
-
-    // Reuse persisted Cloud API credentials; the environment key is the
-    // fallback for an empty cache. No VPC secret or login is consulted.
-    let vpc_credentials_service = initialize_cloud_api_credentials(
-        app_config_repo.clone() as Arc<dyn services::vpc::VpcCredentialsRepository>,
-        Some(config.openai.api_key.clone()),
-    )
-    .await?;
-
-    // Initialize OpenAI proxy service
-    let mut proxy_service = OpenAIProxy::new(vpc_credentials_service.clone());
-    if let Some(base_url) = config.openai.base_url.clone() {
-        proxy_service = proxy_service.with_base_url(base_url);
-    }
-    let proxy_service = Arc::new(proxy_service);
 
     // Initialize conversation service
     let conversation_service = Arc::new(ConversationServiceImpl::new(
@@ -429,7 +420,7 @@ async fn run() -> anyhow::Result<()> {
         admin_domains: Arc::new(config.admin.admin_domains),
         admin_emails: Arc::new(config.admin.admin_emails),
         user_repository: user_repo.clone(),
-        vpc_credentials_service,
+        cloud_api_api_key: config.openai.api_key.clone(),
         stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
         http_client,

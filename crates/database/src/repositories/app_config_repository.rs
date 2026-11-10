@@ -1,6 +1,4 @@
 use crate::pool::DbPool;
-use async_trait::async_trait;
-use services::vpc::VpcCredentialsRepository;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -100,18 +98,5 @@ impl PostgresAppConfigRepository {
             .execute("DELETE FROM app_config WHERE key = $1", &[&key])
             .await?;
         Ok(())
-    }
-}
-
-#[async_trait]
-impl VpcCredentialsRepository for PostgresAppConfigRepository {
-    async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
-        PostgresAppConfigRepository::get(self, key).await
-    }
-    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
-        PostgresAppConfigRepository::set(self, key, value).await
-    }
-    async fn delete(&self, key: &str) -> anyhow::Result<()> {
-        PostgresAppConfigRepository::delete(self, key).await
     }
 }

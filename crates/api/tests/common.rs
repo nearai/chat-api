@@ -13,8 +13,6 @@ use services::metrics::MockMetricsService;
 use services::subscription::ports::{StripeClientPort, SubscriptionService};
 use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
-use services::vpc::test_helpers::MockVpcCredentialsService;
-use services::vpc::VpcCredentials;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
@@ -35,7 +33,7 @@ pub struct TestServerConfig {
     pub agent_managers: Option<Vec<config::AgentManager>>,
     pub database_name: Option<String>,
     pub field_encryption: Option<services::db_pool::FieldEncryptionConfig>,
-    pub vpc_credentials: Option<VpcCredentials>,
+    pub cloud_api_api_key: Option<String>,
     pub cloud_api_base_url: String,
     /// Override for the LLM proxy's upstream base URL (e.g. WireMock for tests).
     /// When set, proxy forwards to this URL instead of config.openai.base_url.
@@ -146,7 +144,6 @@ const DEFAULT_TEST_ADMIN_EMAILS: &[&str] = &[
     "test_admin_model_update@admin.org",
     "test_admin_pagination@admin.org",
     "test_admin_rate_limit@admin.org",
-    "test_admin_revoke@admin.org",
     "test_admin_set_success@admin.org",
     "test_admin_stripe@admin.org",
     "test_admin_stripe_persist@admin.org",
@@ -182,7 +179,7 @@ pub fn restrictive_rate_limit_config() -> RateLimitConfig {
     }
 }
 
-/// Create a test server with all services initialized (VPC not configured)
+/// Create a test server with all services initialized and a static test API key.
 pub async fn create_test_server() -> TestServer {
     create_test_server_with_config(TestServerConfig::default()).await
 }
@@ -433,16 +430,12 @@ pub async fn create_test_server_with_state(
             },
         ));
 
-    // Create VPC credentials service based on provided credentials
-    let vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService> =
-        match test_config.vpc_credentials {
-            Some(creds) => Arc::new(MockVpcCredentialsService::with_credentials(creds)),
-            None => Arc::new(MockVpcCredentialsService::not_configured()),
-        };
+    let cloud_api_api_key = test_config
+        .cloud_api_api_key
+        .unwrap_or_else(|| "mock-api-key".into());
 
-    // Initialize OpenAI proxy service
     let mut proxy_service =
-        services::response::service::OpenAIProxy::new(vpc_credentials_service.clone());
+        services::response::service::OpenAIProxy::new(cloud_api_api_key.clone()).unwrap();
     let proxy_base_url = test_config
         .proxy_base_url
         .clone()
@@ -545,7 +538,7 @@ pub async fn create_test_server_with_state(
         system_configs_service,
         subscription_service,
         session_repository: session_repo,
-        vpc_credentials_service,
+        cloud_api_api_key,
         user_repository: user_repo,
         proxy_service,
         conversation_service,

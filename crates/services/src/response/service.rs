@@ -1,26 +1,32 @@
 use crate::logging::error_type;
-use crate::vpc::VpcCredentialsService;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::{HeaderMap, Method};
-use std::sync::Arc;
 
 use super::ports::{OpenAIProxyService, ProxyError, ProxyResponse};
 
 /// Generic proxy service that forwards any request to OpenAI's API
 pub struct OpenAIProxy {
-    vpc_service: Arc<dyn VpcCredentialsService>,
+    api_key: String,
     base_url: String,
     http_client: reqwest::Client,
 }
 
 impl OpenAIProxy {
-    pub fn new(vpc_service: Arc<dyn VpcCredentialsService>) -> Self {
-        Self {
-            vpc_service,
+    /// Use the configured static key for every request, without a database lookup.
+    pub fn new(api_key: String) -> anyhow::Result<Self> {
+        if api_key.trim().is_empty() {
+            tracing::error!(
+                "OPENAI_API_KEY or OPENAI_API_KEY_FILE must contain a nonblank API key"
+            );
+            anyhow::bail!("OPENAI_API_KEY or OPENAI_API_KEY_FILE must contain a nonblank API key");
+        }
+
+        Ok(Self {
+            api_key,
             base_url: "https://api.openai.com/v1".to_string(),
             http_client: reqwest::Client::new(),
-        }
+        })
     }
 
     pub fn with_base_url(mut self, base_url: String) -> Self {
@@ -97,12 +103,6 @@ impl OpenAIProxyService for OpenAIProxy {
     ) -> Result<ProxyResponse, ProxyError> {
         let clean_path = validate_proxy_path(path)?;
 
-        // Get API key
-        let api_key = self.vpc_service.get_api_key().await.map_err(|e| {
-            tracing::error!("Failed to get API key: {}", error_type(&e));
-            ProxyError::ApiError("Failed to get API key".to_string())
-        })?;
-
         let url = format!("{}/{}", self.base_url.trim_end_matches('/'), clean_path);
 
         tracing::info!(
@@ -117,7 +117,7 @@ impl OpenAIProxyService for OpenAIProxy {
         let mut request_builder = self
             .http_client
             .request(method.clone(), &url)
-            .header("Authorization", format!("Bearer {}", api_key));
+            .bearer_auth(&self.api_key);
 
         // Forward all headers from the client (except Authorization which we set above)
         headers.remove("authorization");
@@ -188,20 +188,62 @@ impl OpenAIProxyService for OpenAIProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vpc::test_helpers::MockVpcCredentialsService;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn rejects_missing_or_blank_static_key() {
+        for key in ["", " ", "\n\t"] {
+            let error = OpenAIProxy::new(key.into()).err().expect("key is required");
+
+            assert_eq!(
+                error.to_string(),
+                "OPENAI_API_KEY or OPENAI_API_KEY_FILE must contain a nonblank API key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn uses_static_key_and_does_not_retry_rejected_requests() {
+        for status in [200, 401] {
+            let upstream = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .and(header("authorization", "Bearer configured-static-key"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&upstream)
+                .await;
+
+            let proxy = OpenAIProxy::new("configured-static-key".into())
+                .unwrap()
+                .with_base_url(format!("{}/v1", upstream.uri()));
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", "Bearer client-session".parse().unwrap());
+
+            let response = proxy
+                .forward_request(Method::POST, "chat/completions", headers, None)
+                .await
+                .unwrap();
+
+            assert_eq!(response.status, status);
+            assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+        }
+    }
 
     #[tokio::test]
     async fn test_service_creation() {
-        let vpc_service = Arc::new(MockVpcCredentialsService::not_configured());
-        let service = OpenAIProxy::new(vpc_service);
+        let service = OpenAIProxy::new("static-api-key".into()).unwrap();
+
         assert_eq!(service.base_url, "https://api.openai.com/v1");
     }
 
     #[tokio::test]
     async fn test_service_with_custom_base_url() {
-        let vpc_service = Arc::new(MockVpcCredentialsService::not_configured());
-        let service =
-            OpenAIProxy::new(vpc_service).with_base_url("https://custom.api.com/v1".to_string());
+        let service = OpenAIProxy::new("static-api-key".into())
+            .unwrap()
+            .with_base_url("https://custom.api.com/v1".to_string());
+
         assert_eq!(service.base_url, "https://custom.api.com/v1");
     }
 

@@ -68,7 +68,8 @@ pub struct AppState {
     pub frontend_callback_allowed_origins: Option<Arc<Vec<String>>>,
     pub admin_domains: Arc<Vec<String>>,
     pub admin_emails: Arc<Vec<String>>,
-    pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,
+    /// Static upstream key, validated during proxy initialization.
+    pub cloud_api_api_key: String,
     /// Whether Stripe test clock feature is enabled
     pub stripe_test_clock_enabled: bool,
     /// Base URL for Cloud API calls. Accepts either the API root URL or an

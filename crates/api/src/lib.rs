@@ -120,10 +120,7 @@ fn random_key() -> [u8; 32] {
 #[cfg(test)]
 mod logging_privacy_tests {
     use super::*;
-    use services::{
-        response::{ports::OpenAIProxyService, service::OpenAIProxy},
-        vpc::test_helpers::MockVpcCredentialsService,
-    };
+    use services::response::{ports::OpenAIProxyService, service::OpenAIProxy};
     use std::{
         io,
         sync::{Arc, Mutex},
@@ -192,7 +189,8 @@ mod logging_privacy_tests {
     #[tokio::test]
     async fn proxy_and_internal_errors_do_not_log_urls_or_error_payloads() {
         let logs = CapturedLogs::default();
-        let proxy = OpenAIProxy::new(Arc::new(MockVpcCredentialsService::not_configured()))
+        let proxy = OpenAIProxy::new("static-api-key".into())
+            .unwrap()
             .with_base_url("http://[invalid-host".to_string());
         let error = anyhow::anyhow!("access_token=OAUTH_RESPONSE_SENTINEL")
             .context("https://dashboard.example/?token=DASHBOARD_TOKEN_SENTINEL");
