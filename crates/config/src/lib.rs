@@ -229,7 +229,7 @@ pub struct OpenAIConfig {
 impl Default for OpenAIConfig {
     fn default() -> Self {
         Self {
-            // API key can be set directly, from file, or via VPC auth (handled at startup)
+            // A static API key is required; the file source takes precedence.
             api_key: if let Ok(path) = std::env::var("OPENAI_API_KEY_FILE") {
                 std::fs::read_to_string(&path)
                     .map(|p| p.trim().to_string())

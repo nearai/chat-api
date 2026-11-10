@@ -3366,24 +3366,6 @@ async fn proxy_mcp(
 
     let url = crate::cloud_api::mcp_url(&state.cloud_api_base_url);
 
-    let api_key = state
-        .vpc_credentials_service
-        .get_api_key()
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to get VPC API key for MCP proxy: {}",
-                error_type(&e)
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: "Cloud API credentials unavailable".to_string(),
-                }),
-            )
-                .into_response()
-        })?;
-
     let mut forward_headers = headers.clone();
     forward_headers.remove("authorization");
     forward_headers.remove("host");
@@ -3395,7 +3377,7 @@ async fn proxy_mcp(
     let mut request_builder = state
         .http_client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
+        .bearer_auth(&state.cloud_api_api_key)
         .body(body_bytes);
 
     for (key, value) in forward_headers.iter() {

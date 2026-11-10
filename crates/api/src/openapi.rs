@@ -54,7 +54,6 @@ use utoipa::OpenApi;
         crate::routes::admin::list_models,
         crate::routes::admin::batch_upsert_models,
         crate::routes::admin::delete_model,
-        crate::routes::admin::revoke_vpc_credentials,
         crate::routes::admin::upsert_system_configs,
         crate::routes::admin::get_system_configs_admin,
         crate::routes::admin::get_usage_by_user_id,

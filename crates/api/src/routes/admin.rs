@@ -1309,43 +1309,6 @@ pub async fn delete_model(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Revoke VPC credentials
-///
-/// Deletes the stored `vpc_api_key` from database and clears the in-memory VPC cache so the
-/// next request uses the static fallback on an empty persisted cache.
-/// Other API/worker processes must be restarted or invalidated separately;
-/// this does not revoke the upstream key.
-#[utoipa::path(
-    post,
-    path = "/v1/admin/vpc/revoke",
-    tag = "Admin",
-    responses(
-        (status = 204, description = "VPC credentials revoked"),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
-    ),
-    security(
-        ("session_token" = [])
-    )
-)]
-pub async fn revoke_vpc_credentials(
-    State(app_state): State<AppState>,
-) -> Result<StatusCode, ApiError> {
-    tracing::info!("Admin revoked VPC credentials");
-
-    app_state
-        .vpc_credentials_service
-        .revoke_credentials()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to revoke VPC credentials: {}", error_type(&e));
-            ApiError::internal_server_error("Failed to revoke VPC credentials")
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
 /// Create or update system configs
 ///
 /// Creates new system configs or updates existing ones. All fields in the request are optional.
@@ -3266,7 +3229,6 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/subscriptions", get(admin_list_subscriptions))
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
-        .route("/vpc/revoke", post(revoke_vpc_credentials))
         .route("/credits", post(admin_grant_credits))
         .route("/credits/history", get(admin_credit_history))
         .route("/aml/reports", get(admin_list_aml_reports))

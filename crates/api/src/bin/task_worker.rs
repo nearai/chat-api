@@ -10,7 +10,6 @@ use services::tasks::{
     AccountDeletionTaskPayload, CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor,
 };
 use services::user::ports::{AccountDeletionError, AccountDeletionStatus, UserRepository};
-use services::vpc::initialize_cloud_api_credentials;
 use services::{agent::ports::AgentService, UserId};
 use std::sync::Arc;
 
@@ -483,6 +482,12 @@ async fn run() -> anyhow::Result<()> {
 
     api::init_tracing_from_config(&config.logging);
 
+    // API and worker use only the configured static upstream credential.
+    let mut proxy_service = OpenAIProxy::new(config.openai.api_key.clone())?;
+    if let Some(base_url) = config.openai.base_url.clone() {
+        proxy_service = proxy_service.with_base_url(base_url);
+    }
+
     if !tasks.enabled {
         return Err(anyhow!(
             "task worker is disabled: set TASKS_ENABLED=true to run"
@@ -521,18 +526,6 @@ async fn run() -> anyhow::Result<()> {
         config.agent.channel_relay_url.clone(),
     ));
 
-    // Reuse persisted Cloud API credentials; the environment key is the
-    // fallback for an empty cache. No VPC secret or login is consulted.
-    let vpc_credentials_service = initialize_cloud_api_credentials(
-        db.app_config_repository() as Arc<dyn services::vpc::VpcCredentialsRepository>,
-        Some(config.openai.api_key.clone()),
-    )
-    .await?;
-
-    let mut proxy_service = OpenAIProxy::new(vpc_credentials_service);
-    if let Some(base_url) = config.openai.base_url.clone() {
-        proxy_service = proxy_service.with_base_url(base_url);
-    }
     let conversation_service = Arc::new(
         services::conversation::service::ConversationServiceImpl::new(
             db.conversation_repository(),
