@@ -372,7 +372,8 @@ pub trait AgentRepository: Send + Sync {
         i64,
     )>;
 
-    /// Replace only an instance's token, encrypting it without reading the old credential.
+    /// Atomically replace an instance's token and existing token query parameters in its URLs.
+    /// Encrypt updated credentials without reading the old instance token.
     /// Returns false when the instance is missing or deleted.
     async fn update_instance_token(
         &self,
