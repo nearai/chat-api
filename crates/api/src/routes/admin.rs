@@ -1552,7 +1552,8 @@ pub struct UpdateInstanceCredentialsRequest {
     pub instance_token: String,
 }
 
-/// Replace the stored instance token without changing metadata or contacting the agent.
+/// Replace the stored instance token and existing token query parameters in its URLs atomically.
+/// URLs without a token query parameter are left unchanged.
 /// This does not rotate the token in the running agent or update per-user provisioning credentials.
 #[utoipa::path(
     patch,

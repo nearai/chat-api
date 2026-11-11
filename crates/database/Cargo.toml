@@ -42,6 +42,7 @@ uuid = { version = "1.5", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 anyhow = "1.0"
+url = "2.5"
 
 config = { path = "../config" }
 services = { path = "../services" }

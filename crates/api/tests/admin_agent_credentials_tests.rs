@@ -27,6 +27,19 @@ struct Fixture {
 
 impl Fixture {
     async fn new(field_encryption: bool) -> Self {
+        Self::with_urls(
+            field_encryption,
+            Some("https://agent.example.com"),
+            Some("https://agent.example.com/dashboard"),
+        )
+        .await
+    }
+
+    async fn with_urls(
+        field_encryption: bool,
+        instance_url: Option<&str>,
+        dashboard_url: Option<&str>,
+    ) -> Self {
         let (server, db) = create_test_server_and_db(TestServerConfig {
             admin_emails: Some(vec![ADMIN_EMAIL.into()]),
             database_encryption_write_enabled: Some(field_encryption),
@@ -53,9 +66,9 @@ impl Fixture {
                 instance_id: Uuid::new_v4().to_string(),
                 name: "credentials-update".into(),
                 public_ssh_key: Some("ssh-ed25519 test-public-key".into()),
-                instance_url: Some("https://agent.example.com".into()),
+                instance_url: instance_url.map(str::to_owned),
                 instance_token: Some("old-instance-token".into()),
-                dashboard_url: Some("https://agent.example.com/dashboard".into()),
+                dashboard_url: dashboard_url.map(str::to_owned),
                 agent_api_base_url: Some("https://manager.example.com".into()),
                 service_type: Some("ironclaw".into()),
             })
@@ -118,7 +131,7 @@ impl Fixture {
 
 #[tokio::test]
 #[serial]
-async fn admin_replaces_only_the_token_in_both_encryption_modes() {
+async fn admin_preserves_urls_without_token_parameters_in_both_encryption_modes() {
     for field_encryption in [false, true] {
         let fixture = Fixture::new(field_encryption).await;
         let mut before = fixture.stored().await;
@@ -174,6 +187,199 @@ async fn admin_replaces_only_the_token_in_both_encryption_modes() {
 
         fixture.cleanup().await;
         other.cleanup().await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn admin_rotates_all_token_copies_in_both_encryption_modes() {
+    for field_encryption in [false, true] {
+        let fixture = Fixture::with_urls(
+            field_encryption,
+            Some("https://agent.example.com/?relay=a%20b&token=stale-relay-token#relay"),
+            Some("https://agent.example.com/dashboard?token=stale-dashboard-token&view=chat#home"),
+        )
+        .await;
+        let mut before = fixture.stored().await;
+        let token = "replacement+token/&=?# %";
+        let expected_instance_url = "https://agent.example.com/?relay=a%20b&token=replacement%2Btoken%2F%26%3D%3F%23+%25#relay";
+        let expected_dashboard_url = "https://agent.example.com/dashboard?token=replacement%2Btoken%2F%26%3D%3F%23+%25&view=chat#home";
+
+        let response = fixture.patch(json!({ "instance_token": token })).await;
+
+        assert_eq!(response.status_code(), 204);
+        assert!(response.text().is_empty());
+
+        let instance = fixture
+            .db
+            .agent_repository()
+            .get_instance(fixture.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(instance.instance_token.as_deref(), Some(token));
+        assert_eq!(
+            instance.instance_url.as_deref(),
+            Some(expected_instance_url)
+        );
+        assert_eq!(
+            instance.dashboard_url.as_deref(),
+            Some(expected_dashboard_url)
+        );
+
+        let listing = fixture
+            .server
+            .get("/v1/agents/instances")
+            .add_header(
+                HeaderName::from_static("authorization"),
+                fixture.owner_auth.clone(),
+            )
+            .await;
+
+        assert_eq!(listing.status_code(), 200);
+        assert_eq!(
+            listing.json::<Value>()["items"][0]["dashboard_url"],
+            expected_dashboard_url
+        );
+
+        let mut after = fixture.stored().await;
+
+        for column in ["instance_url", "dashboard_url"] {
+            assert_eq!(
+                agent_secrets::is_field_envelope(after[column].as_str().unwrap()),
+                field_encryption
+            );
+        }
+
+        for row in [&mut before, &mut after] {
+            for column in [
+                "instance_token",
+                "instance_url",
+                "dashboard_url",
+                "updated_at",
+            ] {
+                row.as_object_mut().unwrap().remove(column);
+            }
+        }
+
+        assert_eq!(
+            before, after,
+            "Unrelated instance metadata must remain unchanged"
+        );
+
+        fixture.cleanup().await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn admin_rotates_each_url_independently() {
+    for (instance_url, dashboard_url) in [
+        (
+            "https://agent.example.com/?token=old",
+            "https://agent.example.com/dashboard",
+        ),
+        (
+            "https://agent.example.com/",
+            "https://agent.example.com/dashboard?token=old",
+        ),
+    ] {
+        let fixture = Fixture::with_urls(true, Some(instance_url), Some(dashboard_url)).await;
+        let before = fixture.stored().await;
+
+        let response = fixture.patch(json!({ "instance_token": "new" })).await;
+
+        assert_eq!(response.status_code(), 204);
+
+        let instance = fixture
+            .db
+            .agent_repository()
+            .get_instance(fixture.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let after = fixture.stored().await;
+
+        assert_eq!(
+            instance.instance_url.unwrap(),
+            instance_url.replace("token=old", "token=new")
+        );
+        assert_eq!(
+            instance.dashboard_url.unwrap(),
+            dashboard_url.replace("token=old", "token=new")
+        );
+
+        for (column, original) in [
+            ("instance_url", instance_url),
+            ("dashboard_url", dashboard_url),
+        ] {
+            if !original.contains("token=") {
+                assert_eq!(before[column], after[column]);
+            }
+        }
+
+        fixture.cleanup().await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn admin_preserves_missing_urls() {
+    let fixture = Fixture::with_urls(true, None, None).await;
+
+    let response = fixture
+        .patch(json!({ "instance_token": "replacement-token" }))
+        .await;
+
+    assert_eq!(response.status_code(), 204);
+
+    let stored = fixture.stored().await;
+
+    assert!(stored["instance_url"].is_null());
+    assert!(stored["dashboard_url"].is_null());
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn unreadable_url_leaves_all_credentials_unchanged() {
+    for column in ["instance_url", "dashboard_url"] {
+        let fixture = Fixture::with_urls(
+            true,
+            Some("https://agent.example.com/?token=old"),
+            Some("https://agent.example.com/dashboard?token=old"),
+        )
+        .await;
+        let stored = fixture.stored().await;
+        // Field envelopes are bound to their column, so swapping them fails decryption.
+        fixture
+            .db
+            .pool()
+            .get()
+            .await
+            .unwrap()
+            .execute(
+                &format!("UPDATE agent_instances SET {column} = $1 WHERE id = $2"),
+                &[
+                    &stored["instance_token"].as_str().unwrap(),
+                    &fixture.instance_id,
+                ],
+            )
+            .await
+            .unwrap();
+        let before = fixture.stored().await;
+
+        let response = fixture
+            .patch(json!({ "instance_token": "must-not-be-stored" }))
+            .await;
+
+        assert_eq!(response.status_code(), 500);
+        assert!(!response.text().contains("must-not-be-stored"));
+        assert_eq!(fixture.stored().await, before);
+
+        fixture.cleanup().await;
     }
 }
 

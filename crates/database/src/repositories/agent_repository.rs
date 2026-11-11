@@ -14,6 +14,45 @@ pub struct PostgresAgentRepository {
     pool: DbPool,
 }
 
+/// Replace existing token query parameters without rewriting other URL components.
+/// `None` means the stored URL can be left untouched, including its ciphertext.
+fn replace_url_token(value: &str, token: &str) -> Option<String> {
+    let (before_fragment, fragment) = value.split_once('#').unwrap_or((value, ""));
+    let (base, query) = before_fragment.split_once('?')?;
+    let replacement = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("token", token)
+        .finish();
+    let mut changed = false;
+    let query = query
+        .split('&')
+        .map(|pair| {
+            let is_token = url::form_urlencoded::parse(pair.as_bytes())
+                .next()
+                .is_some_and(|(key, _)| key == "token");
+
+            if is_token {
+                changed = true;
+                replacement.as_str()
+            } else {
+                pair
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
+    if !changed {
+        return None;
+    }
+
+    let mut updated = format!("{base}?{query}");
+    if value.contains('#') {
+        updated.push('#');
+        updated.push_str(fragment);
+    }
+
+    Some(updated)
+}
+
 impl PostgresAgentRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
@@ -1314,17 +1353,95 @@ impl AgentRepository for PostgresAgentRepository {
             instance_id,
             instance_token,
         )?;
-        let client = self.pool.get().await?;
-
-        let updated = client
-            .execute(
-                "UPDATE agent_instances
-                 SET instance_token = $1, updated_at = NOW()
-                 WHERE id = $2 AND status != 'deleted'",
-                &[&encrypted_token, &instance_id],
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+        let row = tx
+            .query_opt(
+                "SELECT instance_url, dashboard_url
+                 FROM agent_instances
+                 WHERE id = $1 AND status != 'deleted'
+                 FOR UPDATE",
+                &[&instance_id],
             )
             .await?;
 
+        let Some(row) = row else {
+            return Ok(false);
+        };
+
+        // Read only the URLs so an unreadable old instance token can still be repaired.
+        // Hold the row lock until all credential copies have been updated together.
+        let rotate_url = |column, stored| -> anyhow::Result<Option<String>> {
+            let decoded = self.decode_optional_field(column, instance_id, stored)?;
+            let updated = decoded.and_then(|value| replace_url_token(&value, instance_token));
+
+            self.encode_optional_field(column, instance_id, updated)
+        };
+        let instance_url = rotate_url("instance_url", row.get(0))?;
+        let dashboard_url = rotate_url("dashboard_url", row.get(1))?;
+
+        let updated = tx
+            .execute(
+                "UPDATE agent_instances
+                 SET instance_token = $1,
+                     instance_url = COALESCE($2, instance_url),
+                     dashboard_url = COALESCE($3, dashboard_url),
+                     updated_at = NOW()
+                 WHERE id = $4 AND status != 'deleted'",
+                &[
+                    &encrypted_token,
+                    &instance_url,
+                    &dashboard_url,
+                    &instance_id,
+                ],
+            )
+            .await?;
+
+        tx.commit().await?;
+
         Ok(updated == 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_url_token;
+
+    #[test]
+    fn url_token_rotation_preserves_unrelated_url_bytes() {
+        let original =
+            "https://agent.example.com/path?next=a%20b&token=old&empty=&flag#token=fragment";
+
+        let updated = replace_url_token(original, "new+token/&=?# %");
+
+        assert_eq!(
+            updated.as_deref(),
+            Some("https://agent.example.com/path?next=a%20b&token=new%2Btoken%2F%26%3D%3F%23+%25&empty=&flag#token=fragment")
+        );
+    }
+
+    #[test]
+    fn url_token_rotation_replaces_duplicate_encoded_and_valueless_parameters() {
+        let original = "https://agent.example.com/?token=old&%74oken=stale&token&other_token=keep#";
+
+        let updated = replace_url_token(original, "new");
+
+        assert_eq!(
+            updated.as_deref(),
+            Some("https://agent.example.com/?token=new&token=new&token=new&other_token=keep#")
+        );
+    }
+
+    #[test]
+    fn url_token_rotation_does_not_add_tokens_or_change_fragments() {
+        for original in [
+            "https://agent.example.com",
+            "https://agent.example.com/?",
+            "https://agent.example.com/?other_token=old&Token=keep",
+            "https://agent.example.com/#?token=fragment",
+            "https://agent.example.com/?next=%3Ftoken%3Dold#token=fragment",
+        ] {
+            assert_eq!(replace_url_token(original, "new"), None);
+        }
     }
 }
