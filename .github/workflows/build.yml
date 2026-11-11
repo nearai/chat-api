@@ -22,7 +22,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Log in to Docker registry
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6
@@ -48,7 +50,7 @@ jobs:
             echo "Unable to parse image tag from ${GITHUB_REF_TYPE}: ${GITHUB_REF_NAME}" >&2
             exit 1
           fi
-          echo "IMAGE_REFERENCE=${{ env.REGISTRY }}/${{ env.IMAGE_REPOSITORY }}:${TAG}" >> "$GITHUB_ENV"
+          echo "IMAGE_REFERENCE=${REGISTRY}/${IMAGE_REPOSITORY}:${TAG}" >> "$GITHUB_ENV"
 
       - name: Install build dependencies
         run: |
@@ -57,7 +59,7 @@ jobs:
 
       - name: Build and push reproducible image
         run: |
-          ./scripts/build-image.sh --push "${{ env.IMAGE_REFERENCE }}"
+          ./scripts/build-image.sh --push "${IMAGE_REFERENCE}"
 
       - name: Get image digest
         run: |
@@ -69,7 +71,7 @@ jobs:
           echo "IMAGE_DIGEST=${DIGEST}" >> "$GITHUB_ENV"
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_REPOSITORY }}
           subject-digest: ${{ env.IMAGE_DIGEST }}
@@ -80,16 +82,16 @@ jobs:
 
       - name: Sign image with cosign (keyless)
         run: |
-          cosign sign --yes "${{ env.REGISTRY }}/${{ env.IMAGE_REPOSITORY }}@${{ env.IMAGE_DIGEST }}"
+          cosign sign --yes "${REGISTRY}/${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
 
       - name: Generate build summary
         run: |
           {
             echo "## private-chat docker image"
             echo ""
-            echo "- tag: \`${{ env.IMAGE_REFERENCE }}\`"
-            echo "- digest: \`${{ env.IMAGE_DIGEST }}\`"
-            echo "- sigstore: https://search.sigstore.dev/?hash=${{ env.IMAGE_DIGEST }}"
+            echo "- tag: \`${IMAGE_REFERENCE}\`"
+            echo "- digest: \`${IMAGE_DIGEST}\`"
+            echo "- sigstore: https://search.sigstore.dev/?hash=${IMAGE_DIGEST}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Trigger deploy chat-api staging
