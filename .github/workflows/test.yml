@@ -1,5 +1,8 @@
 name: Tests
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [ main, develop ]
@@ -30,15 +33,17 @@ jobs:
           - 5432:5432
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        persist-credentials: false
     
     - name: Install Rust
-      uses: actions-rust-lang/setup-rust-toolchain@v1
+      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
       with:
         components: rustfmt, clippy
 
     - name: Cache dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
       with:
         path: |
           ~/.cargo/registry

@@ -3,7 +3,7 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, ready_for_review]
-  issue_comment:
+  issue_comment: # zizmor: ignore[dangerous-triggers] Explicit write-permission check precedes checkout and Claude.
     types: [created]  # Listen for @claude mentions in PR comments
 
 jobs:
@@ -27,14 +27,27 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Require repository write permission
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
+          script: |
+            const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({
+              ...context.repo,
+              username: context.actor
+            });
+            if (!['admin', 'write', 'maintain'].includes(access.permission)) {
+              throw new Error('Code review requires repository write permission.');
+            }
+
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
           fetch-depth: 1
 
       - name: Run Claude Code Review
         id: claude-review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
