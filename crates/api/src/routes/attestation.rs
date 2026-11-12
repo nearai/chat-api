@@ -291,7 +291,7 @@ fn validate_nonce(nonce: &str) -> Result<(), ApiError> {
 fn validate_instance_name(name: &str) -> Result<(), ApiError> {
     // Reject names containing path traversal sequences
     if name.contains("..") || name.contains("/") || name.contains("\\") {
-        tracing::warn!("Instance name contains invalid characters: {}", name);
+        tracing::warn!("Instance name contains invalid characters");
         return Err(ApiError::bad_request(
             "Instance name contains invalid characters",
         ));

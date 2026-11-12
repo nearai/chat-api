@@ -480,10 +480,9 @@ async fn list_users_bi_impl(
                         );
                     } else {
                         tracing::debug!(
-                            "filter: subscription_plan={:?} -> {} price_id(s): {:?}",
+                            "filter: subscription_plan={:?} -> {} price_id(s)",
                             fv,
-                            price_ids.len(),
-                            price_ids
+                            price_ids.len()
                         );
                     }
                     (Some(price_ids), false, None)
@@ -2195,8 +2194,7 @@ pub async fn admin_add_aml_allowlist_entry(
         })?;
 
     tracing::info!(
-        "Admin: Added AML allowlist entry: account_id={}, admin_user_id={}",
-        request.account_id,
+        "Admin: Added AML allowlist entry: admin_user_id={}",
         admin.user_id
     );
 
@@ -2226,7 +2224,7 @@ pub async fn admin_remove_aml_allowlist_entry(
 ) -> Result<StatusCode, ApiError> {
     let removed = app_state
         .subscription_service
-        .admin_remove_aml_allowlist_entry(account_id.clone())
+        .admin_remove_aml_allowlist_entry(account_id)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -2237,8 +2235,7 @@ pub async fn admin_remove_aml_allowlist_entry(
         })?;
     if removed {
         tracing::info!(
-            "Admin: Removed AML allowlist entry: account_id={}, admin_user_id={}",
-            account_id,
+            "Admin: Removed AML allowlist entry: admin_user_id={}",
             admin.user_id
         );
         Ok(StatusCode::NO_CONTENT)

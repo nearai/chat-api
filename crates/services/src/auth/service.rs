@@ -191,10 +191,7 @@ impl OAuthServiceImpl {
             avatar_url: user_data["picture"].as_str().map(|s| s.to_string()),
         };
 
-        tracing::info!(
-            "Successfully fetched Google user info: provider_user_id={}",
-            user_info.provider_user_id
-        );
+        tracing::info!("Successfully fetched Google user info");
 
         Ok(user_info)
     }
@@ -267,10 +264,7 @@ impl OAuthServiceImpl {
             avatar_url: user_data["avatar_url"].as_str().map(|s| s.to_string()),
         };
 
-        tracing::info!(
-            "Successfully fetched Github user info: provider_user_id={}",
-            user_info.provider_user_id
-        );
+        tracing::info!("Successfully fetched Github user info");
 
         Ok(user_info)
     }
@@ -445,10 +439,9 @@ impl OAuthServiceImpl {
         let session = self.session_repository.create_session(user_id).await?;
 
         tracing::info!(
-            "User authenticated via OAuth: user_id={}, provider={:?}, session_id={}",
+            "User authenticated via OAuth: user_id={}, provider={:?}",
             user_id,
-            provider,
-            session.session_id
+            provider
         );
 
         Ok(OAuthCallbackSuccess {
@@ -525,11 +518,6 @@ impl EmailAuthServiceImpl {
 
     fn normalize_email(email: &str) -> String {
         email.trim().to_ascii_lowercase()
-    }
-
-    fn email_log_hash(email: &str) -> String {
-        let digest = Sha256::digest(email.as_bytes());
-        hex::encode(&digest[..6])
     }
 
     async fn find_or_create_user_by_email_exact(
@@ -639,7 +627,6 @@ impl EmailAuthServiceImpl {
         &self,
         token: &str,
         client_ip: &str,
-        email_hash: &str,
     ) -> Result<(), RequestEmailCodeError> {
         let response = self
             .http_client
@@ -671,7 +658,6 @@ impl EmailAuthServiceImpl {
             tracing::warn!(
                 client_ip_present = !client_ip.is_empty(),
                 error_code_count = body.error_codes.as_ref().map_or(0, Vec::len),
-                email_hash = %email_hash,
                 "Turnstile verification rejected request"
             );
             return Err(RequestEmailCodeError::HumanVerificationFailed);
@@ -695,9 +681,8 @@ impl EmailAuthService for EmailAuthServiceImpl {
         })?;
 
         let email = Self::normalize_email(&email);
-        let email_hash = Self::email_log_hash(&email);
 
-        self.verify_turnstile_token(&turnstile_token, &client_ip, &email_hash)
+        self.verify_turnstile_token(&turnstile_token, &client_ip)
             .await?;
 
         let now = Utc::now();
@@ -710,7 +695,6 @@ impl EmailAuthService for EmailAuthServiceImpl {
             >= self.config.otp_rate_limit_per_hour
         {
             tracing::warn!(
-                email_hash = %email_hash,
                 client_ip_present = !client_ip.is_empty(),
                 client_ip_len = client_ip.len(),
                 "Email OTP request rate-limited by email threshold"
@@ -725,7 +709,6 @@ impl EmailAuthService for EmailAuthServiceImpl {
             >= self.config.otp_requests_per_ip_per_hour
         {
             tracing::warn!(
-                email_hash = %email_hash,
                 client_ip_present = !client_ip.is_empty(),
                 client_ip_len = client_ip.len(),
                 "Email OTP request rate-limited by IP threshold"
@@ -771,7 +754,6 @@ impl EmailAuthService for EmailAuthServiceImpl {
         })?;
 
         let email = Self::normalize_email(&email);
-        let email_hash = Self::email_log_hash(&email);
 
         let now = Utc::now();
         let since = now - chrono::Duration::hours(1);
@@ -784,7 +766,6 @@ impl EmailAuthService for EmailAuthServiceImpl {
             >= self.config.otp_verify_failures_per_hour
         {
             tracing::warn!(
-                email_hash = %email_hash,
                 client_ip_present = !client_ip.is_empty(),
                 client_ip_len = client_ip.len(),
                 "Email OTP verify rate-limited by email failure threshold"
@@ -800,7 +781,6 @@ impl EmailAuthService for EmailAuthServiceImpl {
             >= self.config.otp_verifies_per_ip_per_hour
         {
             tracing::warn!(
-                email_hash = %email_hash,
                 client_ip_present = !client_ip.is_empty(),
                 client_ip_len = client_ip.len(),
                 "Email OTP verify rate-limited by IP failure threshold"
@@ -1024,7 +1004,6 @@ impl OAuthService for OAuthServiceImpl {
         {
             if let Err(cleanup_error) = self.session_repository.delete_session(session_id).await {
                 tracing::error!(
-                    %session_id,
                     error_type = error_type(&cleanup_error),
                     "Failed to remove session after OAuth callback-code storage failure"
                 );
@@ -1048,11 +1027,11 @@ impl OAuthService for OAuthServiceImpl {
     }
 
     async fn revoke_session(&self, session_id: SessionId) -> anyhow::Result<()> {
-        tracing::info!("Revoking session: session_id={}", session_id);
+        tracing::info!("Revoking session");
 
         self.session_repository.delete_session(session_id).await?;
 
-        tracing::info!("Session revoked successfully: session_id={}", session_id);
+        tracing::info!("Session revoked successfully");
         Ok(())
     }
 

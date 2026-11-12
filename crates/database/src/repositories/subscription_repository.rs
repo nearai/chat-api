@@ -50,9 +50,9 @@ impl PostgresSubscriptionRepository {
         preserve_pending_when_null: bool,
     ) -> anyhow::Result<Subscription> {
         tracing::info!(
-            "Repository: Upserting subscription - subscription_id={}, user_id={}, preserve_pending_when_null={}",
-            subscription.subscription_id,
+            "Repository: Upserting subscription - user_id={}, provider={}, preserve_pending_when_null={}",
             subscription.user_id,
+            subscription.provider,
             preserve_pending_when_null
         );
 
@@ -337,10 +337,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         txn: &tokio_postgres::Transaction<'_>,
         subscription_id: &str,
     ) -> anyhow::Result<()> {
-        tracing::info!(
-            "Repository: Deleting subscription (in txn) - subscription_id={}",
-            subscription_id
-        );
+        tracing::info!("Repository: Deleting subscription (in txn)");
         txn.execute(
             "DELETE FROM subscriptions WHERE subscription_id = $1",
             &[&subscription_id],

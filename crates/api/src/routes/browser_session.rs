@@ -128,7 +128,7 @@ pub async fn establish(
             .await
         {
             tracing::error!(
-                session_id = %session.session_id,
+                user_id = %session.user_id,
                 error_type = services::logging::error_type(&error),
                 "Failed to revoke session after browser setup failure"
             );
