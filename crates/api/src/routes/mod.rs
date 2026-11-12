@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod agent_hosting_sunset;
 pub mod agents;
 pub mod api;
 pub mod attestation;
@@ -142,6 +143,10 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     // Build the base router.
     let router = Router::new()
         .route("/health", get(health_check))
+        .route(
+            "/v1/agent-hosting/sunset",
+            get(agent_hosting_sunset::get_sunset),
+        )
         .merge(configs_routes) // Configs route (requires user auth)
         .merge(subscription_routes) // Subscription routes (requires user auth)
         .merge(credits_routes) // Credits routes (requires user auth)

@@ -214,6 +214,112 @@ async fn initiation_rejects_legacy_and_invalid_frontend_pkce() {
 }
 
 #[tokio::test]
+async fn sunset_oauth_callback_preserves_login_and_only_redirects_rejections_to_trusted_frontends()
+{
+    for (existing_user, untrusted_callback) in [(false, false), (true, false), (false, true)] {
+        let provider = MockServer::start().await;
+        let email = format!("oauth-sunset-{}@example.com", Uuid::new_v4());
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "mock-access-token", "token_type": "Bearer", "expires_in": 3600
+            })))
+            .mount(&provider)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/userinfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": format!("google-{}", Uuid::new_v4()),
+                "email": email, "verified_email": true
+            })))
+            .mount(&provider)
+            .await;
+        let (server, db) = create_test_server_and_db(TestServerConfig {
+            google_oauth_token_url: Some(format!("{}/token", provider.uri())),
+            google_oauth_user_info_url: Some(format!("{}/userinfo", provider.uri())),
+            agent_hosting_sunset: Some(
+                serde_json::from_value(json!({
+                    "cutoff_at": "2000-01-01T00:00:00Z",
+                    "export_deadline_at": "2099-01-01T00:00:00Z",
+                    "shutdown_at": "2099-01-02T00:00:00Z",
+                    "export_url": "https://example.com/export",
+                    "support_url": "https://example.com/support",
+                    "close_signups": true
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        })
+        .await;
+        if existing_user {
+            db.user_repository()
+                .create_user(email.clone(), None, None)
+                .await
+                .unwrap();
+        }
+        let initiation = server.get(&format!(
+            "/v1/auth/google?frontend_callback=http%3A%2F%2Flocalhost%3A3000&frontend_response_mode=code&code_challenge={}&code_challenge_method=S256&frontend_state={}",
+            "A".repeat(43), "B".repeat(43)
+        )).await;
+        let redirect = Url::parse(initiation.header(LOCATION).to_str().unwrap()).unwrap();
+        let state = redirect
+            .query_pairs()
+            .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
+            .unwrap();
+        if untrusted_callback {
+            let mut stored = db
+                .oauth_repository()
+                .consume_oauth_state(&state)
+                .await
+                .unwrap()
+                .unwrap();
+            stored.frontend_callback = Some("https://untrusted.example.com".into());
+            db.oauth_repository()
+                .store_oauth_state(&stored)
+                .await
+                .unwrap();
+        }
+        let callback_path = format!("/v1/auth/callback?code=mock-code&state={state}");
+        let response = server.get(&callback_path).await;
+        assert!(!response.headers().contains_key(SET_COOKIE));
+        if untrusted_callback {
+            response.assert_status_bad_request();
+            assert!(!response.headers().contains_key(LOCATION));
+        } else {
+            assert_eq!(response.status_code(), 302);
+            assert_eq!(response.header(CACHE_CONTROL), "no-store");
+            assert_eq!(response.header(REFERRER_POLICY), "no-referrer");
+            let url = Url::parse(response.header(LOCATION).to_str().unwrap()).unwrap();
+            assert_eq!(url.origin().ascii_serialization(), "http://localhost:3000");
+            assert_eq!(url.path(), "/auth/callback");
+            let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+            if existing_user {
+                assert!(query.contains_key("code"));
+                assert_eq!(query.get("state").unwrap(), &"B".repeat(43));
+                assert!(!query.contains_key("oauth_error"));
+            } else {
+                assert_eq!(query.len(), 1);
+                assert_eq!(
+                    query.get("oauth_error").unwrap(),
+                    "agent_hosting_signups_closed"
+                );
+            }
+        }
+        assert_eq!(
+            db.user_repository()
+                .get_user_by_email(&email)
+                .await
+                .unwrap()
+                .is_some(),
+            existing_user
+        );
+        let replay = server.get(&callback_path).await;
+        replay.assert_status_unauthorized();
+        assert!(!replay.headers().contains_key(LOCATION));
+    }
+}
+
+#[tokio::test]
 async fn provider_callback_works_with_global_encryption_writes_disabled() {
     let provider = MockServer::start().await;
     let (gateway, gateway_calls) = gateway_config(1, Ok(Some(GATEWAY_COOKIE)));

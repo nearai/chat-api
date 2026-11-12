@@ -918,3 +918,62 @@ async fn test_concurrent_verify_only_allows_one_success() {
     let session_count: i64 = row.get(0);
     assert_eq!(session_count, 1);
 }
+
+#[tokio::test]
+#[serial]
+async fn test_sunset_blocks_new_email_signup_but_keeps_existing_login() {
+    let resend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_sunset" })))
+        .mount(&resend)
+        .await;
+    mount_turnstile_success(&resend).await;
+    set_email_auth_env();
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        email_resend_base_url: Some(resend.uri()),
+        email_auth_enabled: Some(true),
+        agent_hosting_sunset: Some(
+            serde_json::from_value(json!({
+                "cutoff_at": "2000-01-01T00:00:00Z",
+                "export_deadline_at": "2099-01-01T00:00:00Z",
+                "shutdown_at": "2099-01-02T00:00:00Z",
+                "export_url": "https://example.com/export",
+                "support_url": "https://example.com/support",
+                "close_signups": true
+            }))
+            .unwrap(),
+        ),
+        ..Default::default()
+    })
+    .await;
+
+    let existing = unique_email("sunset-existing");
+    let new = unique_email("sunset-new");
+    let users = db.user_repository();
+    users
+        .create_user(existing.clone(), None, None)
+        .await
+        .unwrap();
+
+    for (email, exists) in [(&existing, true), (&new, false)] {
+        let ip = unique_ip();
+        assert_eq!(
+            request_email_code(&server, email, &ip).await.status_code(),
+            204
+        );
+        set_latest_challenge_code(&db, email, "123456").await;
+
+        let response = verify_email_code(&server, email, "123456", &ip).await;
+        let body = response.json::<serde_json::Value>();
+        if exists {
+            response.assert_status_ok();
+            assert_eq!(body["is_new_user"], false);
+        } else {
+            response.assert_status_forbidden();
+            assert_eq!(body["code"], "agent_hosting_signups_closed");
+            assert!(users.get_user_by_email(email).await.unwrap().is_none());
+        }
+    }
+}
