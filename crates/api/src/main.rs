@@ -106,12 +106,11 @@ async fn run() -> anyhow::Result<()> {
 
     log_lukka_aml_policy_config(&config.lukka_aml)?;
     let agent_hosting_sunset = api::routes::agent_hosting_sunset::AgentHostingSunset::from_env()
-        .map_err(|error| {
+        .inspect_err(|error| {
             tracing::error!(
-                error_type = error_type(&error),
+                error_type = error_type(error),
                 "Invalid AGENT_HOSTING_SUNSET configuration"
             );
-            error
         })?;
     let signup_cutoff = agent_hosting_sunset
         .as_ref()
