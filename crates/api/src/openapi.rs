@@ -27,6 +27,7 @@ use utoipa::OpenApi;
         crate::routes::users::get_current_user,
         crate::routes::users::get_user_status,
         crate::routes::users::delete_current_user,
+        crate::routes::users::get_account_deletion_preflight,
         crate::routes::users::get_my_usage,
         // Proxy endpoints
         crate::routes::api::proxy_responses,
