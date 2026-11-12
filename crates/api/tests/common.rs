@@ -30,6 +30,7 @@ const TEST_DATABASE_ENCRYPTION_KEY: &str =
 #[derive(Default)]
 pub struct TestServerConfig {
     pub stripe_config: Option<config::StripeConfig>,
+    pub agent_hosting_sunset: Option<api::routes::agent_hosting_sunset::AgentHostingSunset>,
     pub agent_managers: Option<Vec<config::AgentManager>>,
     pub database_name: Option<String>,
     pub field_encryption: Option<services::db_pool::FieldEncryptionConfig>,
@@ -290,6 +291,10 @@ pub async fn create_test_server_with_state(
 
     // Create services
     let http_client = reqwest::Client::new();
+    let signup_cutoff = test_config
+        .agent_hosting_sunset
+        .as_ref()
+        .and_then(|sunset| sunset.signup_cutoff());
     let oauth_service = services::auth::OAuthServiceImpl::new(
         oauth_repo.clone(),
         session_repo.clone(),
@@ -301,7 +306,8 @@ pub async fn create_test_server_with_state(
         config.oauth.github_client_secret.clone(),
         config.oauth.redirect_uri.clone(),
         config.near.rpc_url.clone(),
-    );
+    )
+    .with_signup_cutoff(signup_cutoff);
     #[cfg(feature = "test")]
     let oauth_service = match (
         test_config.google_oauth_token_url.clone(),
@@ -326,17 +332,21 @@ pub async fn create_test_server_with_state(
                     http_client.clone(),
                     config.email_auth.clone(),
                     turnstile_verify_url,
-                ),
+                )
+                .with_signup_cutoff(signup_cutoff),
             )
         } else {
-            Arc::new(services::auth::EmailAuthServiceImpl::new(
-                email_challenge_repo
-                    as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
-                session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
-                user_repo.clone(),
-                http_client.clone(),
-                config.email_auth.clone(),
-            ))
+            Arc::new(
+                services::auth::EmailAuthServiceImpl::new(
+                    email_challenge_repo
+                        as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
+                    session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
+                    user_repo.clone(),
+                    http_client.clone(),
+                    config.email_auth.clone(),
+                )
+                .with_signup_cutoff(signup_cutoff),
+            )
         };
 
     let aml_service: Arc<dyn services::aml::AmlRiskService> = test_config
@@ -527,6 +537,7 @@ pub async fn create_test_server_with_state(
 
     // Create application state
     let app_state = AppState {
+        agent_hosting_sunset: test_config.agent_hosting_sunset,
         db_pool: db.pool().clone(),
         database_encryption_worker: Default::default(),
         oauth_service,

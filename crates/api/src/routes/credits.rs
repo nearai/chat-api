@@ -125,7 +125,7 @@ pub async fn get_credits(
         (status = 200, description = "Stripe checkout redirect or House-of-Stake payment intent", body = CreateCreditCheckoutResponse),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "House-of-Stake credit purchase requires a linked NEAR wallet"),
+        (status = 403, description = "Agent Hosting is closed to new credit purchases, or House-of-Stake requires a linked NEAR wallet"),
         (status = 503, description = "Credits or selected payment provider is not configured")
     ),
     security(("session_token" = []))
@@ -135,6 +135,7 @@ pub async fn create_credit_checkout(
     Extension(user): Extension<AuthenticatedUser>,
     Json(req): Json<CreateCreditCheckoutRequest>,
 ) -> Result<Json<CreateCreditCheckoutResponse>, ApiError> {
+    super::agent_hosting_sunset::require_new_activity_allowed(&app_state)?;
     validation::validate_redirect_url(&req.success_url, "success_url")
         .map_err(ApiError::bad_request)?;
     validation::validate_redirect_url(&req.cancel_url, "cancel_url")

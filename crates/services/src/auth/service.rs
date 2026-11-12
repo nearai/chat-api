@@ -2,7 +2,7 @@ use crate::logging::error_type;
 use anyhow::Context;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use near_kit::standards::nep413::SignMessageParams;
 use oauth2::{
@@ -100,6 +100,7 @@ pub struct OAuthServiceImpl {
     session_repository: Arc<dyn SessionRepository>,
     user_repository: Arc<dyn UserRepository>,
     near_auth: NearAuthService,
+    signup_cutoff: Option<DateTime<Utc>>,
     google_client_id: String,
     google_client_secret: String,
     google_token_url: String,
@@ -135,6 +136,7 @@ impl OAuthServiceImpl {
             session_repository,
             user_repository,
             near_auth,
+            signup_cutoff: None,
             google_client_id,
             google_client_secret,
             google_token_url: "https://oauth2.googleapis.com/token".to_string(),
@@ -143,6 +145,12 @@ impl OAuthServiceImpl {
             github_client_secret,
             redirect_uri,
         }
+    }
+
+    pub fn with_signup_cutoff(mut self, cutoff: Option<DateTime<Utc>>) -> Self {
+        self.signup_cutoff = cutoff;
+        self.near_auth.set_signup_cutoff(cutoff);
+        self
     }
 
     /// Override Google endpoints for integration tests without contacting the
@@ -300,6 +308,7 @@ impl OAuthServiceImpl {
 
             (existing_user.id, false)
         } else {
+            super::ports::require_signup_allowed(self.signup_cutoff)?;
             match self
                 .user_repository
                 .create_user(
@@ -428,7 +437,18 @@ impl OAuthServiceImpl {
             }
         };
 
-        let (user_id, is_new_user) = self.find_or_create_user_from_oauth(&user_info).await?;
+        let (user_id, is_new_user) = self
+            .find_or_create_user_from_oauth(&user_info)
+            .await
+            .map_err(|error| {
+                if error.is::<super::ports::SignupsClosed>() {
+                    error.context(super::ports::OAuthSignupClosed {
+                        frontend_callback: oauth_state.frontend_callback.clone(),
+                    })
+                } else {
+                    error
+                }
+            })?;
 
         let oauth_tokens = OAuthTokens {
             access_token: access_token.to_string(),
@@ -469,6 +489,7 @@ pub struct EmailAuthServiceImpl {
     http_client: reqwest::Client,
     config: config::EmailAuthConfig,
     turnstile_verify_url: String,
+    signup_cutoff: Option<DateTime<Utc>>,
 }
 
 impl EmailAuthServiceImpl {
@@ -504,7 +525,13 @@ impl EmailAuthServiceImpl {
             http_client,
             config,
             turnstile_verify_url,
+            signup_cutoff: None,
         }
+    }
+
+    pub fn with_signup_cutoff(mut self, cutoff: Option<DateTime<Utc>>) -> Self {
+        self.signup_cutoff = cutoff;
+        self
     }
 
     fn ensure_enabled(&self) -> Result<(), EmailAuthAvailabilityError> {
@@ -540,6 +567,7 @@ impl EmailAuthServiceImpl {
             return Ok((existing_user.id, false));
         }
 
+        super::ports::require_signup_allowed(self.signup_cutoff)?;
         match self
             .user_repository
             .create_user(email.to_string(), None, None)

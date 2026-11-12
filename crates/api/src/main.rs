@@ -105,6 +105,16 @@ async fn run() -> anyhow::Result<()> {
     let proxy_service = Arc::new(proxy_service);
 
     log_lukka_aml_policy_config(&config.lukka_aml)?;
+    let agent_hosting_sunset = api::routes::agent_hosting_sunset::AgentHostingSunset::from_env()
+        .inspect_err(|error| {
+            tracing::error!(
+                error_type = error_type(error),
+                "Invalid AGENT_HOSTING_SUNSET configuration"
+            );
+        })?;
+    let signup_cutoff = agent_hosting_sunset
+        .as_ref()
+        .and_then(|sunset| sunset.signup_cutoff());
 
     let frontend_callback_allowed_origins = api::routes::oauth::frontend_callback_allowed_origins();
     if (!config.oauth.google_client_id.is_empty() || !config.oauth.github_client_id.is_empty())
@@ -176,29 +186,35 @@ async fn run() -> anyhow::Result<()> {
 
     // Create services
     tracing::info!("Initializing services...");
-    let oauth_service = Arc::new(OAuthServiceImpl::new(
-        oauth_repo.clone(),
-        session_repo.clone(),
-        user_repo.clone(),
-        near_nonce_repo,
-        config.oauth.google_client_id.clone(),
-        config.oauth.google_client_secret.clone(),
-        config.oauth.github_client_id.clone(),
-        config.oauth.github_client_secret.clone(),
-        config.oauth.redirect_uri.clone(),
-        config.near.rpc_url.clone(),
-    ));
+    let oauth_service = Arc::new(
+        OAuthServiceImpl::new(
+            oauth_repo.clone(),
+            session_repo.clone(),
+            user_repo.clone(),
+            near_nonce_repo,
+            config.oauth.google_client_id.clone(),
+            config.oauth.google_client_secret.clone(),
+            config.oauth.github_client_id.clone(),
+            config.oauth.github_client_secret.clone(),
+            config.oauth.redirect_uri.clone(),
+            config.near.rpc_url.clone(),
+        )
+        .with_signup_cutoff(signup_cutoff),
+    );
 
     let http_client = reqwest::Client::new();
 
-    let email_auth_service = Arc::new(EmailAuthServiceImpl::new(
-        email_challenge_repo
-            as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
-        session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
-        user_repo.clone(),
-        http_client.clone(),
-        config.email_auth.clone(),
-    ));
+    let email_auth_service = Arc::new(
+        EmailAuthServiceImpl::new(
+            email_challenge_repo
+                as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
+            session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
+            user_repo.clone(),
+            http_client.clone(),
+            config.email_auth.clone(),
+        )
+        .with_signup_cutoff(signup_cutoff),
+    );
 
     let user_service = Arc::new(UserServiceImpl::new_with_aml(
         user_repo.clone(),
@@ -397,6 +413,7 @@ async fn run() -> anyhow::Result<()> {
     };
 
     let app_state = AppState {
+        agent_hosting_sunset,
         db_pool: db.pool().clone(),
         database_encryption_worker: Default::default(),
         oauth_service,

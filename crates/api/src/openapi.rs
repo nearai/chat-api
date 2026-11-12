@@ -14,6 +14,7 @@ use utoipa::OpenApi;
     paths(
         // Health endpoint
         crate::routes::health_check,
+        crate::routes::agent_hosting_sunset::get_sunset,
         // Auth endpoints
         crate::routes::oauth::google_login,
         crate::routes::oauth::github_login,
