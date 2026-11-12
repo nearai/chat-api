@@ -220,6 +220,18 @@ fn assert_no_credentials_or_errors(path: &str, body: &str, code: &str) {
         "data",
         "buffer",
         "tags",
+        "account_id",
+        "account_id_str",
+        "near_account",
+        "provider_user_id",
+        "customer_id",
+        "subscription_id",
+        "price_id",
+        "price_ids",
+        "purchase_id",
+        "sid",
+        "instance_name",
+        "encoded_name",
     ] {
         assert!(
             !logs_raw_identifier(code, identifier)
@@ -240,6 +252,8 @@ fn assert_no_credentials_or_errors(path: &str, body: &str, code: &str) {
         "config.near.rpc_url",
         "task_message.payload",
         ".uri()",
+        ".account_id",
+        "instance.name",
     ] {
         assert!(
             !code.contains(expression),
@@ -291,6 +305,14 @@ fn source_guard_rejects_credentials_and_nested_errors() {
         r#"url, "sending request""#,
         r#"err, "request failed""#,
         r#""Agent manager #{} ({}) has an empty API token", i, mgr.url"#,
+        r#""event: {}", item.account_id"#,
+        r#""event: {}", account_id"#,
+        r#""event: {}", customer_id"#,
+        r#"subscription_id = %subscription_id, "event""#,
+        r#""event: {}", provider_user_id"#,
+        r#""event: {}", instance.name"#,
+        r#""event: {}", encoded_name"#,
+        r#""event: {}", sid"#,
     ] {
         let code: String = string_literals_removed(body)
             .chars()

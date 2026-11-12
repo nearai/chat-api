@@ -896,10 +896,9 @@ impl UserRepository for PostgresUserRepository {
         provider_user_id: String,
     ) -> anyhow::Result<()> {
         tracing::info!(
-            "Repository: Linking OAuth account - user_id={}, provider={:?}, provider_user_id={}",
+            "Repository: Linking OAuth account - user_id={}, provider={:?}",
             user_id,
-            provider,
-            provider_user_id
+            provider
         );
 
         let client = self.pool.get().await?;
@@ -942,9 +941,8 @@ impl UserRepository for PostgresUserRepository {
         provider_user_id: &str,
     ) -> anyhow::Result<Option<UserId>> {
         tracing::debug!(
-            "Repository: Finding user by OAuth - provider={:?}, provider_user_id={}",
-            provider,
-            provider_user_id
+            "Repository: Finding user by OAuth - provider={:?}",
+            provider
         );
 
         let client = self.pool.get().await?;
@@ -971,11 +969,7 @@ impl UserRepository for PostgresUserRepository {
                 provider
             );
         } else {
-            tracing::debug!(
-                "Repository: No user found for provider={:?}, provider_user_id={}",
-                provider,
-                provider_user_id
-            );
+            tracing::debug!("Repository: No user found for provider={:?}", provider);
         }
 
         Ok(result)

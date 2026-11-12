@@ -272,21 +272,17 @@ async fn get_instance_details_static(
     let response = http_client.get(&url).bearer_auth(token).send().await.ok()?;
 
     let status = response.status();
-    tracing::debug!(
-        "GET /instances/{} response status: {}",
-        encoded_name,
-        status
-    );
+    tracing::debug!("Agent instance lookup response status: {}", status);
 
     if !response.status().is_success() {
         if response.status().as_u16() == 404 {
-            tracing::debug!("Agent API instance not found: name={}", name);
+            tracing::debug!("Agent API instance not found");
         }
         return None;
     }
 
     let json = response.json::<serde_json::Value>().await.ok()?;
-    tracing::debug!("GET /instances/{} response received", encoded_name);
+    tracing::debug!("Agent instance lookup response received");
     Some(json)
 }
 
@@ -873,15 +869,11 @@ impl AgentServiceImpl {
 
         if !response.status().is_success() {
             if response.status().as_u16() == 404 {
-                tracing::debug!(
-                    "SSH endpoint not found for instance: name={}",
-                    instance_name
-                );
+                tracing::debug!("SSH endpoint not found for instance");
             } else {
                 tracing::warn!(
-                    "Agent API SSH endpoint failed: status={}, instance_name={}",
-                    response.status(),
-                    instance_name
+                    "Agent API SSH endpoint failed: status={}",
+                    response.status()
                 );
             }
             return None;
@@ -889,15 +881,14 @@ impl AgentServiceImpl {
 
         match response.json::<serde_json::Value>().await {
             Ok(data) => {
-                tracing::debug!("SSH command fetched: instance_name={}", instance_name);
+                tracing::debug!("SSH command fetched");
                 data.get("command")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
             }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to parse SSH command response: instance_name={}, error={}",
-                    instance_name,
+                    "Failed to parse SSH command response: error={}",
                     error_type(&e)
                 );
                 None
@@ -1318,24 +1309,15 @@ async fn fetch_instance_details_static(
     instance_name: &str,
     bearer_token: Option<&str>,
 ) -> Option<serde_json::Value> {
-    tracing::debug!(
-        "Fetching instance details from Agent API: instance_name={}",
-        instance_name
-    );
+    tracing::debug!("Fetching instance details from Agent API");
 
     let result =
         get_instance_details_static(http_client, manager, instance_name, bearer_token).await;
 
     if result.is_some() {
-        tracing::debug!(
-            "Instance details fetched successfully: instance_name={}",
-            instance_name
-        );
+        tracing::debug!("Instance details fetched successfully");
     } else {
-        tracing::warn!(
-            "Failed to fetch instance details from Agent API: instance_name={}",
-            instance_name
-        );
+        tracing::warn!("Failed to fetch instance details from Agent API");
     }
 
     result
@@ -1570,9 +1552,8 @@ impl AgentService for AgentServiceImpl {
                 if let Some(instance_name_str) = instance_name_str {
                     let instance_name = instance_name_str.to_string();
                     tracing::info!(
-                        "Fetching full instance details for passkey instance: user_id={}, instance_name={}",
-                        user_id,
-                        instance_name
+                        "Fetching full instance details for passkey instance: user_id={}",
+                        user_id
                     );
 
                     if let Some(instance_details) = fetch_instance_details_static(
@@ -1584,12 +1565,8 @@ impl AgentService for AgentServiceImpl {
                     .await
                     {
                         tracing::info!(
-                            "Fetched /instances/{}: instance_name={}, status={}",
-                            instance_name,
-                            instance_details
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown"),
+                            "Fetched passkey instance details: user_id={}, status={}",
+                            user_id,
                             instance_details
                                 .get("status")
                                 .and_then(|v| v.as_str())
@@ -1606,9 +1583,8 @@ impl AgentService for AgentServiceImpl {
                         }
                     } else {
                         tracing::warn!(
-                            "Failed to fetch instance details for enrichment: user_id={}, instance_name={}",
-                            user_id,
-                            instance_name
+                            "Failed to fetch instance details for enrichment: user_id={}",
+                            user_id
                         );
                     }
 
@@ -2053,12 +2029,9 @@ impl AgentService for AgentServiceImpl {
         // Merge SSH commands into enrichment map
         for (name, ssh_cmd) in ssh_results {
             if let Some(_ssh_cmd_str) = &ssh_cmd {
-                tracing::debug!("SSH command available for instance: instance_name={}", name);
+                tracing::debug!("SSH command available for instance");
             } else {
-                tracing::debug!(
-                    "No SSH command available for instance: instance_name={}",
-                    name
-                );
+                tracing::debug!("No SSH command available for instance");
             }
             if let Some(enrichment) = map.get_mut(&name) {
                 enrichment.ssh_command = ssh_cmd;
@@ -2167,11 +2140,7 @@ impl AgentService for AgentServiceImpl {
             .delete_instance(instance_id, actor_user_id, reason)
             .await?;
 
-        tracing::info!(
-            "Instance deleted successfully: instance_id={}, name={}",
-            instance_id,
-            instance.name
-        );
+        tracing::info!("Instance deleted successfully: instance_id={}", instance_id);
 
         Ok(())
     }
@@ -2256,9 +2225,8 @@ impl AgentService for AgentServiceImpl {
             .await?;
 
         tracing::info!(
-            "Instance restarted successfully: instance_id={}, name={}",
-            instance_id,
-            instance.name
+            "Instance restarted successfully: instance_id={}",
+            instance_id
         );
 
         Ok(())
@@ -2402,11 +2370,7 @@ impl AgentService for AgentServiceImpl {
             .update_instance_status(instance_id, "stopped", Some(actor_user_id), reason)
             .await?;
 
-        tracing::info!(
-            "Instance stopped successfully: instance_id={}, name={}",
-            instance_id,
-            instance.name
-        );
+        tracing::info!("Instance stopped successfully: instance_id={}", instance_id);
 
         Ok(())
     }
@@ -2486,11 +2450,7 @@ impl AgentService for AgentServiceImpl {
             .update_instance_status(instance_id, "active", Some(actor_user_id), reason)
             .await?;
 
-        tracing::info!(
-            "Instance started successfully: instance_id={}, name={}",
-            instance_id,
-            instance.name
-        );
+        tracing::info!("Instance started successfully: instance_id={}", instance_id);
 
         Ok(())
     }
@@ -3337,11 +3297,7 @@ impl AgentServiceImpl {
         manager: &AgentManager,
         instance_id: Uuid,
     ) -> anyhow::Result<UpgradeAvailability> {
-        tracing::info!(
-            "Checking upgrade availability: instance_id={}, instance_name={}",
-            instance_id,
-            instance.name
-        );
+        tracing::info!("Checking upgrade availability: instance_id={}", instance_id);
 
         // Use manager token (admin secret) for the crabshack API
         let bearer_token = &manager.token;
@@ -3359,8 +3315,8 @@ impl AgentServiceImpl {
             .map_err(|e| anyhow!("Failed to fetch instance status: {}", e))?;
 
         tracing::debug!(
-            "Upgrade check: /instances/{} response status: {}",
-            encoded_name,
+            "Upgrade check: instance status response: instance_id={}, status={}",
+            instance_id,
             instance_resp.status()
         );
 
@@ -3390,8 +3346,8 @@ impl AgentServiceImpl {
 
             // Log image + digest only — raw body can carry sensitive crabshack instance metadata.
             tracing::debug!(
-                "Upgrade check: Parsed /instances/{} response: image={}, digest={:?}, service_type={:?}",
-                encoded_name,
+                "Upgrade check: parsed instance response: instance_id={}, image={}, digest={:?}, service_type={:?}",
+                instance_id,
                 instance_status.image,
                 instance_status.image_digest,
                 instance_status.service_type
@@ -3594,9 +3550,8 @@ impl AgentServiceImpl {
         user_id: UserId,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
         tracing::info!(
-            "Upgrading instance (streaming): instance_id={}, instance_name={}",
-            instance_id,
-            instance.name
+            "Upgrading instance (streaming): instance_id={}",
+            instance_id
         );
 
         // Fetch current instance to determine its image tag type

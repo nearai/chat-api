@@ -949,11 +949,7 @@ impl AmlRiskService for LukkaAmlService {
             return AmlCheckResult::unknown(account_id, "disabled");
         }
         if let Some(result) = self.cached_result(account_id).await {
-            tracing::debug!(
-                account_id = %account_id,
-                risk_level = ?result.risk_level,
-                "Lukka AML cache hit"
-            );
+            tracing::debug!(risk_level = ?result.risk_level, "Lukka AML cache hit");
             return result;
         }
 
