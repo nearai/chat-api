@@ -3,6 +3,8 @@ use crate::{StripeClient, StripeClientError};
 use serde::Deserialize;
 use serde_json::Value;
 
+const PRICING_REVIEW_REASON: &str = "Metered or unknown pricing requires manual review";
+
 pub struct RefundInvoice {
     pub invoice_id: String,
     pub currency: String,
@@ -72,7 +74,26 @@ impl StripeClient {
         }
         let mut invoices = Vec::new();
         for mut invoice in page.data {
+            // Validate ownership before resolving an unexpanded price. New Stripe invoice
+            // versions return a price ID in pricing.price_details rather than an object.
             let mut row = normalize_invoice(&invoice, subscription_id, customer_id)?;
+            if row.review_reason.as_deref() == Some(PRICING_REVIEW_REASON) {
+                let line = &invoice["lines"]["data"][0];
+                let price = line_price(line);
+                if !price.is_object() {
+                    if let Some(id) = object_id(price).filter(|id| safe_id(id, "price_")) {
+                        let resolved: Value =
+                            self.get_json(&format!("/v1/prices/{id}"), &[]).await?;
+                        if object_id(&resolved) != Some(id) {
+                            return Err(StripeClientError::InvalidResponse(
+                                "Price identity mismatch",
+                            ));
+                        }
+                        invoice["lines"]["data"][0]["price"] = resolved;
+                        row = normalize_invoice(&invoice, subscription_id, customer_id)?;
+                    }
+                }
+            }
             if invoice["parent"]["subscription_details"].is_object()
                 && invoice.get("payments").is_none_or(Value::is_null)
                 && object_id(&invoice["charge"]).is_none()
@@ -155,6 +176,12 @@ pub(crate) fn payment_reference(invoice: &Value) -> Option<(&'static str, String
     }
 }
 
+fn line_price(line: &Value) -> &Value {
+    line.get("price")
+        .filter(|price| !price.is_null())
+        .unwrap_or(&line["pricing"]["price_details"]["price"])
+}
+
 fn normalize_invoice(
     invoice: &Value,
     subscription: &str,
@@ -213,6 +240,8 @@ fn normalize_invoice(
             )
         {
             Some("Subscription changes or non-recurring lines require review")
+        } else if line_price(line)["recurring"]["usage_type"] != "licensed" {
+            Some(PRICING_REVIEW_REASON)
         } else if [
             "total_discount_amounts",
             "total_tax_amounts",
@@ -299,7 +328,7 @@ mod tests {
         json!({
             "id":"in_test","subscription":"sub_test","customer":"cus_test","currency":"usd",
             "amount_paid":1001,"total":1001,"status":"paid","billing_reason":"subscription_cycle","charge":"ch_test",
-            "lines":{"has_more":false,"data":[{"type":"subscription","proration":false,"amount":1001,"period":{"start":100,"end":200}}]}
+            "lines":{"has_more":false,"data":[{"type":"subscription","proration":false,"price":{"id":"price_test","recurring":{"usage_type":"licensed"}},"amount":1001,"period":{"start":100,"end":200}}]}
         })
     }
     fn charge() -> Value {
@@ -327,6 +356,11 @@ mod tests {
         i.as_object_mut().unwrap().remove("subscription");
         i.as_object_mut().unwrap().remove("charge");
         i["parent"] = json!({"subscription_details":{"subscription":"sub_test"}});
+        i["lines"]["data"][0]["pricing"] = json!({"type":"price_details","price_details":{"price":i["lines"]["data"][0]["price"].clone()}});
+        i["lines"]["data"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("price");
         i["lines"]["data"][0]["type"] = Value::Null;
         i["lines"]["data"][0]["parent"] = json!({"type":"subscription_item_details","subscription_item_details":{"proration":false}});
         i["payments"] = json!({"has_more":false,"data":[{"status":"paid","payment":{"type":"payment_intent","payment_intent":"pi_test"}}]});
@@ -344,6 +378,68 @@ mod tests {
             .push(json!({}));
         assert!(payment_reference(&i).is_none());
     }
+    #[test]
+    fn refund_preview_does_not_prorate_metered_or_unknown_pricing() {
+        for price in [
+            json!({"recurring":{"usage_type":"metered"}}),
+            json!({"recurring":null}),
+            json!({"recurring":{"usage_type":"unknown"}}),
+            Value::Null,
+            json!("price_unexpanded"),
+        ] {
+            let mut i = invoice();
+            i["lines"]["data"][0]["price"] = price;
+            assert_eq!(
+                normalize(&i, &charge()).review_reason.as_deref(),
+                Some("Metered or unknown pricing requires manual review")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refund_preview_resolves_modern_prices_without_guessing_usage_type() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        for usage in ["licensed", "metered", "unknown"] {
+            let server = MockServer::start().await;
+            let mut i = invoice();
+            i["lines"]["data"][0]["price"] = Value::Null;
+            i["lines"]["data"][0]["pricing"] =
+                json!({"type":"price_details","price_details":{"price":"price_test"}});
+            Mock::given(method("GET"))
+                .and(path("/v1/invoices"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"data":[i],"has_more":false})),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/v1/prices/price_test"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"id":"price_test","recurring":{"usage_type":usage}})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/v1/charges/ch_test"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(charge()))
+                .mount(&server)
+                .await;
+            let page = StripeClient::for_test(server.uri())
+                .refund_preview_invoices("sub_test", "cus_test", None)
+                .await
+                .unwrap();
+            assert_eq!(
+                page.invoices[0].review_reason.is_none(),
+                usage == "licensed"
+            );
+        }
+    }
+
     #[test]
     fn refund_preview_flags_billing_exceptions() {
         for (path, value) in [
