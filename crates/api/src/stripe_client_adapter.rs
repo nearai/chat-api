@@ -26,6 +26,37 @@ impl StripeClientAdapter {
 
 #[async_trait]
 impl StripeClientPort for StripeClientAdapter {
+    async fn refund_preview_invoices(
+        &self,
+        subscription_id: &str,
+        customer_id: &str,
+        starting_after: Option<&str>,
+    ) -> Result<services::subscription::refund_preview::RefundInvoicePage, SubscriptionError> {
+        use services::subscription::refund_preview::{RefundInvoice, RefundInvoicePage};
+        let page = self
+            .client
+            .refund_preview_invoices(subscription_id, customer_id, starting_after)
+            .await
+            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+        Ok(RefundInvoicePage {
+            has_more: page.has_more,
+            invoices: page
+                .invoices
+                .into_iter()
+                .map(|i| RefundInvoice {
+                    invoice_id: i.invoice_id,
+                    currency: i.currency,
+                    amount_paid: i.amount_paid,
+                    amount_refunded: i.amount_refunded,
+                    charge_id: i.charge_id,
+                    period_start: i.period_start,
+                    period_end: i.period_end,
+                    review_reason: i.review_reason,
+                })
+                .collect(),
+        })
+    }
+
     async fn verify_webhook_signature(
         &self,
         payload: &[u8],

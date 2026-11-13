@@ -4230,6 +4230,42 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
     }
 
+    async fn admin_refund_preview(
+        &self,
+        subscription_id: &str,
+        request: super::refund_preview::RefundPreviewRequest,
+    ) -> Result<super::refund_preview::RefundPreview, SubscriptionError> {
+        if self.stripe_secret_key.trim().is_empty() {
+            return Err(SubscriptionError::NotConfigured);
+        }
+        let subscriptions = self
+            .subscription_repo
+            .get_user_subscriptions(request.user_id.into())
+            .await?;
+        let subscription = subscriptions
+            .iter()
+            .find(|s| s.subscription_id == subscription_id)
+            .ok_or(SubscriptionError::SubscriptionNotFound)?;
+        if subscription.provider != "stripe" {
+            return Err(SubscriptionError::InvalidProvider(
+                subscription.provider.clone(),
+            ));
+        }
+        let page = self
+            .stripe_client
+            .refund_preview_invoices(
+                subscription_id,
+                &subscription.customer_id,
+                request.starting_after.as_deref(),
+            )
+            .await?;
+        Ok(super::refund_preview::build_preview(
+            subscription_id,
+            &request,
+            page,
+        ))
+    }
+
     async fn admin_list_subscriptions(
         &self,
         user_id: Option<UserId>,

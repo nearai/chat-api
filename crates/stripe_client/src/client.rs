@@ -239,7 +239,7 @@ impl StripeClient {
         map_checkout_session(response)
     }
 
-    async fn get_json<T: serde::de::DeserializeOwned>(
+    pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         query: &[(&str, &str)],
