@@ -15,6 +15,36 @@ const SESSION_TOKEN: &str = "user-session-token";
 const PUBKEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtestkeytestkeytestkeytestkeytestkeytest me@host";
 
+#[tokio::test]
+async fn client_disconnect_closes_idle_upstream_body() {
+    let (upstream_tx, upstream_rx) = tokio::sync::mpsc::channel::<anyhow::Result<bytes::Bytes>>(1);
+    let body = reqwest::Body::wrap_stream(tokio_stream::wrappers::ReceiverStream::new(upstream_rx));
+    let response = reqwest::Response::from(http::Response::new(body));
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let task = tokio::spawn(forward_stream(response, tx, Uuid::new_v4()));
+    // The upstream stays open without producing even a keepalive.
+    drop(rx);
+    tokio::time::timeout(Duration::from_secs(1), upstream_tx.closed())
+        .await
+        .expect("disconnect must drop the idle upstream body");
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn upstream_body_failure_is_forwarded_after_partial_frame() {
+    let partial = bytes::Bytes::from_static(b"event: status\ndata: {\"step\":\"arch");
+    let body = reqwest::Body::wrap_stream(futures::stream::iter(vec![
+        Ok(partial.clone()),
+        Err(std::io::Error::other("upstream disconnected")),
+    ]));
+    let response = reqwest::Response::from(http::Response::new(body));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+    forward_stream(response, tx, Uuid::new_v4()).await;
+    assert_eq!(rx.recv().await.unwrap().unwrap(), partial);
+    assert!(rx.recv().await.unwrap().is_err());
+    assert!(rx.recv().await.is_none());
+}
+
 struct NoSystemConfigs;
 
 #[async_trait]

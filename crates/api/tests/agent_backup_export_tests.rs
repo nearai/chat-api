@@ -23,6 +23,7 @@ struct Fixture {
     instance: AgentInstance,
     owner_token: String,
     other_token: String,
+    state: api::state::AppState,
 }
 
 impl Fixture {
@@ -49,7 +50,7 @@ impl Fixture {
 /// Owner with CrabShack passkey credentials and one instance on a mocked manager.
 async fn fixture() -> Fixture {
     let manager = MockServer::start().await;
-    let (server, db, _) = create_test_server_with_state(TestServerConfig {
+    let (server, db, state) = create_test_server_with_state(TestServerConfig {
         agent_managers: Some(vec![config::AgentManager {
             url: manager.uri(),
             token: "test-manager-token".into(),
@@ -93,7 +94,48 @@ async fn fixture() -> Fixture {
         instance,
         owner_token,
         other_token,
+        state,
     }
+}
+
+#[tokio::test]
+async fn export_propagates_body_errors_without_completing_a_partial_sse_event() {
+    use axum::extract::{Extension, Path, State};
+    use services::agent::ports::MockAgentService;
+
+    let mut f = fixture().await;
+    let mut service = MockAgentService::new();
+    service
+        .expect_export_backup_stream()
+        .times(1)
+        .returning(|_, _, _| {
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            tx.try_send(Ok(bytes::Bytes::from_static(
+                b"event: backup_complete\ndata: {\"backup_id\":\"01J",
+            )))
+            .unwrap();
+            tx.try_send(Err(anyhow::anyhow!("Backup stream error")))
+                .unwrap();
+            Ok(rx)
+        });
+    f.state.agent_service = std::sync::Arc::new(service);
+    let response = api::routes::agent_backups::export_backup(
+        State(f.state),
+        Extension(api::middleware::AuthenticatedUser {
+            user_id: f.instance.user_id,
+            session_id: services::SessionId(Uuid::new_v4()),
+        }),
+        Path(f.instance.id.to_string()),
+        axum::Json(api::routes::agent_backups::ExportBackupRequest {
+            export_ssh_pubkey: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .is_err());
 }
 
 async fn mount_login(manager: &MockServer) {

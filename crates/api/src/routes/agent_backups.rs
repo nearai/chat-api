@@ -5,7 +5,6 @@ use axum::{
     response::Response,
     Json,
 };
-use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use services::agent::backup::{is_valid_backup_id, validate_export_ssh_pubkey};
 use services::agent::ports::AgentBackupError;
@@ -13,10 +12,6 @@ use services::logging::error_type;
 use services::UserId;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
-
-/// SSE event sent when the manager stream breaks; the leading blank lines end any partial event.
-const STREAM_ERROR_EVENT: &str =
-    "\n\nevent: error\ndata: {\"message\":\"Backup stream interrupted\"}\n\n";
 
 /// Request body for exporting a backup of the caller's instance.
 #[derive(Deserialize, Serialize, utoipa::ToSchema)]
@@ -109,11 +104,8 @@ pub async fn export_backup(
         .await
         .map_err(|e| backup_api_error(e, instance_uuid, "Failed to start backup"))?;
 
-    let stream = ReceiverStream::new(rx).map(|chunk| {
-        Ok::<_, std::convert::Infallible>(
-            chunk.unwrap_or_else(|_| axum::body::Bytes::from_static(STREAM_ERROR_EVENT.as_bytes())),
-        )
-    });
+    // Propagate body errors: appending an SSE event could complete a truncated JSON frame.
+    let stream = ReceiverStream::new(rx);
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/event-stream")

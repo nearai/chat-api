@@ -111,7 +111,15 @@ async fn forward_stream(
     instance_id: Uuid,
 ) {
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            _ = tx.closed() => {
+                tracing::info!(%instance_id, "Backup export client disconnected");
+                return;
+            }
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = chunk else { break };
         match chunk {
             Ok(bytes) => {
                 if tx.send(Ok(bytes)).await.is_err() {
