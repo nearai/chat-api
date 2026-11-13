@@ -179,8 +179,6 @@ async fn code_mode_initiation_accepts_valid_pkce_for_both_providers() {
 
 #[tokio::test]
 async fn initiation_rejects_legacy_and_invalid_frontend_pkce() {
-    let (config, calls) = gateway_config(0, Ok(Some(GATEWAY_COOKIE)));
-    let (server, _) = create_test_server_and_db(config).await;
     let challenge = "A".repeat(43);
     let state = "B".repeat(43);
     let pkce =
@@ -199,6 +197,9 @@ async fn initiation_rejects_legacy_and_invalid_frontend_pkce() {
         format!("&frontend_response_mode=code&code_challenge=invalid&code_challenge_method=S256&frontend_state={state}"),
     ];
     for provider in ["google", "github"] {
+        // Keep validation cases below the independent initiation rate limit.
+        let (config, calls) = gateway_config(0, Ok(Some(GATEWAY_COOKIE)));
+        let (server, _) = create_test_server_and_db(config).await;
         for query in &invalid_queries {
             let response = server
                 .get(&format!(
@@ -209,8 +210,8 @@ async fn initiation_rejects_legacy_and_invalid_frontend_pkce() {
             assert!(!response.headers().contains_key(LOCATION));
             assert!(!response.headers().contains_key(SET_COOKIE));
         }
+        assert!(calls.lock().unwrap().is_empty());
     }
-    assert!(calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

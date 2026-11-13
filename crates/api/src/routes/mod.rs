@@ -10,6 +10,7 @@ pub mod users;
 
 pub mod browser_session;
 mod cors;
+mod oauth_rate_limit;
 
 // Re-export validation constants from services crate for API layer usage
 pub use services::agent::ports::{is_valid_service_type, VALID_SERVICE_TYPES};
@@ -67,7 +68,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     };
 
     // OAuth routes (public, no auth required)
-    let auth_routes = oauth::create_oauth_router();
+    let auth_routes = oauth::create_oauth_router(app_state.email_auth_trusted_proxy_count);
 
     // Logout route (requires authentication)
     let logout_route = Router::new()
