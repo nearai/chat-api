@@ -52,6 +52,16 @@ async fn delete_account_blocks_non_terminal_subscription_statuses() {
             .expect("insert non-terminal subscription");
 
         let (name, value) = auth_header(&token);
+        let preflight = server
+            .get("/v1/users/me/account-deletion-preflight")
+            .add_header(name, value)
+            .await;
+        preflight.assert_status_ok();
+        assert_eq!(
+            preflight.json::<serde_json::Value>(),
+            serde_json::json!({"status":"blocking_subscriptions"})
+        );
+        let (name, value) = auth_header(&token);
         let response = server.delete("/v1/users/me").add_header(name, value).await;
 
         assert_eq!(
@@ -107,6 +117,16 @@ async fn delete_account_allows_terminal_subscription_statuses() {
             .expect("insert terminal subscription");
 
         let (name, value) = auth_header(&token);
+        let preflight = server
+            .get("/v1/users/me/account-deletion-preflight")
+            .add_header(name, value)
+            .await;
+        preflight.assert_status_ok();
+        assert_eq!(
+            preflight.json::<serde_json::Value>(),
+            serde_json::json!({"status":"ready"})
+        );
+        let (name, value) = auth_header(&token);
         let response = server.delete("/v1/users/me").add_header(name, value).await;
         assert_eq!(
             response.status_code(),
@@ -138,6 +158,16 @@ async fn delete_account_blocks_non_deleted_instance() {
         .await
         .expect("insert active instance");
 
+    let (name, value) = auth_header(&token);
+    let preflight = server
+        .get("/v1/users/me/account-deletion-preflight")
+        .add_header(name, value)
+        .await;
+    preflight.assert_status_ok();
+    assert_eq!(
+        preflight.json::<serde_json::Value>(),
+        serde_json::json!({"status":"instances_not_deleted", "count":1})
+    );
     let (name, value) = auth_header(&token);
     let response = server.delete("/v1/users/me").add_header(name, value).await;
 
