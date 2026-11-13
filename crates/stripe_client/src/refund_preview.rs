@@ -25,11 +25,11 @@ struct InvoicePage {
     has_more: bool,
 }
 
-fn object_id(value: &Value) -> Option<&str> {
+pub(crate) fn object_id(value: &Value) -> Option<&str> {
     value.as_str().or_else(|| value.get("id")?.as_str())
 }
 
-fn safe_id(id: &str, prefix: &str) -> bool {
+pub(crate) fn safe_id(id: &str, prefix: &str) -> bool {
     id.starts_with(prefix)
         && id.len() > prefix.len()
         && id.len() <= 255
@@ -128,7 +128,7 @@ impl StripeClient {
     }
 }
 
-fn payment_reference(invoice: &Value) -> Option<(&'static str, String)> {
+pub(crate) fn payment_reference(invoice: &Value) -> Option<(&'static str, String)> {
     // Pre-Basil invoices expose the charge/payment intent directly.
     if let Some(charge) = object_id(&invoice["charge"]) {
         return Some(("charge", charge.into()));

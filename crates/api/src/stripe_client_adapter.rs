@@ -26,6 +26,30 @@ impl StripeClientAdapter {
 
 #[async_trait]
 impl StripeClientPort for StripeClientAdapter {
+    async fn refund_evidence(
+        &self,
+        invoice: &str,
+        subscription: &str,
+        customer: &str,
+    ) -> Result<stripe_client::refunds::RefundEvidence, SubscriptionError> {
+        self.client
+            .refund_evidence(invoice, subscription, customer)
+            .await
+            .map_err(|e| SubscriptionError::StripeError(e.to_string()))
+    }
+    async fn create_sunset_refund(
+        &self,
+        charge: &str,
+        amount: i64,
+        operation: &str,
+        attempt: &str,
+    ) -> Result<stripe_client::refunds::StripeRefund, SubscriptionError> {
+        self.client
+            .create_sunset_refund(charge, amount, operation, attempt)
+            .await
+            .map_err(|e| SubscriptionError::StripeError(e.to_string()))
+    }
+
     async fn refund_preview_invoices(
         &self,
         subscription_id: &str,

@@ -50,6 +50,7 @@ pub struct SubscriptionServiceConfig {
     pub aml_service: Arc<dyn AmlRiskService>,
     pub aml_report_repo: Arc<dyn AmlReportRepository>,
     pub stripe_secret_key: String,
+    pub refund_execution_enabled: bool,
     pub stripe_webhook_secret: String,
     /// When set, enables `provider = house-of-stake` subscription intents (staking contract account id).
     pub near_staking_contract_id: Option<String>,
@@ -290,6 +291,7 @@ pub struct SubscriptionServiceImpl {
     aml_service: Arc<dyn AmlRiskService>,
     aml_report_repo: Arc<dyn AmlReportRepository>,
     stripe_secret_key: String,
+    refund_execution_enabled: bool,
     stripe_webhook_secret: String,
     near_staking_contract_id: Option<String>,
     near_rpc_url: String,
@@ -300,6 +302,14 @@ pub struct SubscriptionServiceImpl {
 }
 
 impl SubscriptionServiceImpl {
+    fn refunds(&self) -> super::refunds::Refunds<'_> {
+        super::refunds::Refunds {
+            pool: &self.db_pool,
+            stripe: self.stripe_client.as_ref(),
+            enabled: self.refund_execution_enabled,
+        }
+    }
+
     /// Returns true when Stripe is configured well enough to perform Stripe API calls.
     fn is_stripe_configured(&self) -> bool {
         !self.stripe_secret_key.trim().is_empty() && !self.stripe_webhook_secret.trim().is_empty()
@@ -364,6 +374,7 @@ impl SubscriptionServiceImpl {
             aml_service: config.aml_service,
             aml_report_repo: config.aml_report_repo,
             stripe_secret_key: config.stripe_secret_key,
+            refund_execution_enabled: config.refund_execution_enabled,
             stripe_webhook_secret: config.stripe_webhook_secret,
             near_staking_contract_id: config.near_staking_contract_id,
             near_rpc_url: config.near_rpc_url,
@@ -3575,6 +3586,24 @@ impl SubscriptionService for SubscriptionServiceImpl {
             event_type
         );
 
+        // Re-read Stripe rather than applying possibly out-of-order webhook snapshots.
+        if matches!(
+            event_type,
+            "refund.created" | "refund.updated" | "refund.failed" | "charge.refunded"
+        ) {
+            let obj = &payload_json["data"]["object"];
+            let charge = if event_type == "charge.refunded" {
+                obj["id"].as_str()
+            } else {
+                obj["charge"].as_str()
+            };
+            if let Some(charge) = charge {
+                self.refunds().sync_charge(charge).await.map_err(|_| {
+                    SubscriptionError::StripeError("Refund reconciliation failed".into())
+                })?;
+            }
+        }
+
         // Check if this is a subscription event
         let is_subscription_event = event_type.starts_with("customer.subscription.");
         let is_invoice_event = matches!(event_type, "invoice.upcoming" | "invoice.created");
@@ -4228,6 +4257,56 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 }
             }
         }
+    }
+
+    async fn admin_prepare_refund(
+        &self,
+        request: super::refunds::PrepareRefund,
+        actor: crate::UserId,
+    ) -> super::refunds::Result<super::refunds::RefundOperation> {
+        use super::refunds::RefundError;
+        request.validate()?;
+        if self.stripe_secret_key.trim().is_empty() {
+            return Err(RefundError::Upstream);
+        }
+        let subscriptions = self
+            .subscription_repo
+            .get_user_subscriptions(request.user_id.into())
+            .await
+            .map_err(|_| RefundError::Database)?;
+        let sub = subscriptions
+            .iter()
+            .find(|s| s.subscription_id == request.subscription_id)
+            .ok_or(RefundError::NotFound)?;
+        if sub.provider != "stripe" {
+            return Err(RefundError::Invalid(
+                "Only Stripe subscriptions support refunds",
+            ));
+        }
+        self.refunds()
+            .prepare(request, &sub.customer_id, actor.into())
+            .await
+    }
+    async fn admin_list_refunds(
+        &self,
+        subscription: Option<String>,
+        limit: i64,
+        offset: i64,
+    ) -> super::refunds::Result<super::refunds::RefundList> {
+        self.refunds()
+            .list(subscription.as_deref(), limit, offset)
+            .await
+    }
+    async fn admin_refund_action(
+        &self,
+        id: uuid::Uuid,
+        action: super::refunds::Action,
+        confirmation: Option<super::refunds::RefundConfirmation>,
+        actor: crate::UserId,
+    ) -> super::refunds::Result<super::refunds::RefundOperation> {
+        self.refunds()
+            .run(id, action, confirmation, Some(actor.into()))
+            .await
     }
 
     async fn admin_refund_preview(

@@ -3229,6 +3229,13 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/users/{user_id}/activity", get(get_user_activity))
         .route("/subscriptions", get(admin_list_subscriptions))
         .route(
+            "/refunds",
+            get(super::admin_refunds::list).post(super::admin_refunds::prepare),
+        )
+        .route("/refunds/{id}/execute", post(super::admin_refunds::execute))
+        .route("/refunds/{id}/retry", post(super::admin_refunds::retry))
+        .route("/refunds/{id}/sync", post(super::admin_refunds::sync))
+        .route(
             "/subscriptions/{subscription_id}/refund-preview",
             post(super::admin_refund_preview::preview),
         )
