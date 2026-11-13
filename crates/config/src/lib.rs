@@ -583,6 +583,8 @@ impl TelemetryConfig {
 /// Stripe payment configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct StripeConfig {
+    /// Explicit deployment gate for admin sunset refund execution.
+    pub refund_execution_enabled: bool,
     /// Stripe secret key for API authentication
     pub secret_key: String,
     /// Stripe webhook secret for verifying webhook signatures
@@ -608,6 +610,8 @@ impl Default for StripeConfig {
             } else {
                 std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default()
             },
+            refund_execution_enabled: std::env::var("STRIPE_REFUND_EXECUTION_ENABLED").as_deref()
+                == Ok("true"),
             test_clock_enabled: std::env::var("STRIPE_TEST_CLOCK_ENABLED")
                 .ok()
                 .and_then(|v| v.parse().ok())

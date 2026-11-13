@@ -123,6 +123,67 @@ pub(super) const FIELDS: &[Field] = &[
 ];
 
 pub(super) const APPROVED: &[(&str, &str, &str)] = &[
+    // Sunset refund records follow the existing plaintext billing-identifier policy.
+    (
+        "agent_hosting_refunds",
+        "subscription_id",
+        "Stripe billing identifier required for refund reconciliation and duplicate prevention",
+    ),
+    (
+        "agent_hosting_refunds",
+        "invoice_id",
+        "Stripe billing identifier required for refund reconciliation and duplicate prevention",
+    ),
+    (
+        "agent_hosting_refunds",
+        "customer_id",
+        "Stripe billing identifier required for refund reconciliation and duplicate prevention",
+    ),
+    (
+        "agent_hosting_refunds",
+        "charge_id",
+        "Stripe billing identifier required for refund reconciliation and duplicate prevention",
+    ),
+    (
+        "agent_hosting_refund_attempts",
+        "stripe_refund_id",
+        "Stripe refund identifier required for reconciliation and duplicate prevention",
+    ),
+    (
+        "agent_hosting_refunds",
+        "policy_reference",
+        "Bounded administrative reference ID or URL path; excludes free-form notes and personal data by contract",
+    ),
+    (
+        "agent_hosting_refunds",
+        "reconciliation_reference",
+        "Bounded administrative reference ID or URL path; excludes free-form notes and personal data by contract",
+    ),
+    (
+        "agent_hosting_refunds",
+        "currency",
+        "Three-letter currency code",
+    ),
+    (
+        "agent_hosting_refunds",
+        "review_reason",
+        "Fixed reconciliation reason code",
+    ),
+    (
+        "agent_hosting_refund_attempts",
+        "status",
+        "Queryable refund state enum",
+    ),
+    (
+        "agent_hosting_refund_attempts",
+        "failure_reason",
+        "Bounded Stripe failure code, never raw provider error text",
+    ),
+    (
+        "agent_hosting_refund_attempts",
+        "last_error",
+        "Fixed redacted error code",
+    ),
     (
         "conversations",
         "id",
@@ -567,6 +628,8 @@ pub(super) const STRUCTURAL_TYPES: &[&str] = &[
 ];
 
 pub(super) const CLASSIFIED_TABLES: &[&str] = &[
+    "agent_hosting_refunds",
+    "agent_hosting_refund_attempts",
     "browser_sessions",
     "browser_access_tokens",
     "browser_refresh_tokens",

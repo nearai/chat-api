@@ -16,6 +16,8 @@ const STRIPE_API_BASE: &str = "https://api.stripe.com";
 pub struct StripeClient {
     http: reqwest::Client,
     secret_key: String,
+    #[cfg(test)]
+    api_base: Option<String>,
 }
 
 pub struct CreateCustomerParams<'a> {
@@ -54,6 +56,20 @@ pub struct UpdateSubscriptionParams<'a> {
 }
 
 impl StripeClient {
+    fn api_base(&self) -> &str {
+        #[cfg(test)]
+        if let Some(base) = &self.api_base {
+            return base;
+        }
+        STRIPE_API_BASE
+    }
+    #[cfg(test)]
+    pub(crate) fn for_test(base: String) -> Self {
+        let mut client = Self::new("sk_test_fixture".into());
+        client.api_base = Some(base);
+        client
+    }
+
     pub fn new(secret_key: String) -> Self {
         Self {
             http: reqwest::Client::builder()
@@ -61,6 +77,8 @@ impl StripeClient {
                 .build()
                 .expect("valid reqwest client config"),
             secret_key,
+            #[cfg(test)]
+            api_base: None,
         }
     }
 
@@ -239,21 +257,21 @@ impl StripeClient {
         map_checkout_session(response)
     }
 
-    async fn get_json<T: serde::de::DeserializeOwned>(
+    pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<T, StripeClientError> {
         let request = self
             .http
-            .get(format!("{STRIPE_API_BASE}{path}"))
+            .get(format!("{}{path}", self.api_base()))
             .header(AUTHORIZATION, format!("Bearer {}", self.secret_key))
             .query(query);
         let response = request.send().await.inspect_err(log_transport_error)?;
         decode_response(response).await
     }
 
-    async fn post_form<T: serde::de::DeserializeOwned>(
+    pub(crate) async fn post_form<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         form: &[(&str, String)],
@@ -261,7 +279,7 @@ impl StripeClient {
     ) -> Result<T, StripeClientError> {
         let mut request = self
             .http
-            .post(format!("{STRIPE_API_BASE}{path}"))
+            .post(format!("{}{path}", self.api_base()))
             .header(AUTHORIZATION, format!("Bearer {}", self.secret_key))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(encode_form(form));

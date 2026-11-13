@@ -1,5 +1,7 @@
 pub mod client;
 pub mod error;
+pub mod refund_preview;
+pub mod refunds;
 pub mod types;
 pub mod webhook;
 
