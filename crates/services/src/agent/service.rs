@@ -10,11 +10,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::backup;
 use super::ports::{
     is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentApiKeyAuthError,
-    AgentApiKeyCreationError, AgentInstance, AgentRepository, AgentService, AgentServiceError,
-    CreateInstanceParams, InstanceBalance, UpgradeAvailability, UsageLogEntry,
-    DEFAULT_AGENT_SERVICE_TYPE, VALID_SERVICE_TYPES,
+    AgentApiKeyCreationError, AgentBackupError, AgentInstance, AgentRepository, AgentService,
+    AgentServiceError, BackupDownload, CreateInstanceParams, InstanceBalance, UpgradeAvailability,
+    UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE, VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
@@ -2294,6 +2295,45 @@ impl AgentService for AgentServiceImpl {
 
         self.upgrade_instance_stream_impl(&instance, manager, instance_id, user_id)
             .await
+    }
+
+    async fn export_backup_stream(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+        export_ssh_pubkey: Option<String>,
+    ) -> Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>, AgentBackupError> {
+        let instance =
+            backup::load_owned_instance(self.repository.as_ref(), instance_id, user_id).await?;
+        let manager = self.resolve_manager(&instance)?;
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
+        tracing::info!(%instance_id, "Starting backup export");
+        let target = backup::ManagerTarget {
+            base_url: &manager.url,
+            bearer_token: &bearer_token,
+            instance_name: &instance.name,
+            instance_id,
+        };
+        backup::start_backup_export(&self.http_client, target, export_ssh_pubkey).await
+    }
+
+    async fn get_backup_download(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+        backup_id: &str,
+    ) -> Result<BackupDownload, AgentBackupError> {
+        let instance =
+            backup::load_owned_instance(self.repository.as_ref(), instance_id, user_id).await?;
+        let manager = self.resolve_manager(&instance)?;
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
+        let target = backup::ManagerTarget {
+            base_url: &manager.url,
+            bearer_token: &bearer_token,
+            instance_name: &instance.name,
+            instance_id,
+        };
+        backup::fetch_backup_download(&self.http_client, target, backup_id).await
     }
 
     async fn check_upgrade_available(

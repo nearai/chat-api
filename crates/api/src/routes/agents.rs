@@ -871,6 +871,14 @@ pub fn create_agent_router() -> Router<AppState> {
             "/instances/{id}/upgrade-available",
             get(check_upgrade_available),
         )
+        .route(
+            "/instances/{id}/backups/export",
+            post(super::agent_backups::export_backup),
+        )
+        .route(
+            "/instances/{id}/backups/{backup_id}/download",
+            get(super::agent_backups::get_backup_download),
+        )
         .route("/instances/{id}", delete(delete_instance))
 }
 
