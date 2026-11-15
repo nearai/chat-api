@@ -389,12 +389,11 @@ fn select_proxy_chain_ip(ips: &[IpAddr], trusted_proxy_count: usize) -> Option<I
         return None;
     }
 
-    // ONLINE VALIDATION REQUIRED:
-    // This assumes our ingress/proxy chain appends trusted hops to X-Forwarded-For / Forwarded.
-    // The client IP is selected by walking left from the trusted proxy suffix. This should be
-    // verified against production ingress behavior and adjusted if the deployed proxy topology
-    // differs from the configured trusted_proxy_count.
-    let index = ips.len().saturating_sub(trusted_proxy_count + 1);
+    // The socket peer is the final trusted proxy and is not an XFF entry.
+    // An appending ingress puts the real client at the right-hand end for one
+    // proxy. Only enable this setting behind the configured proxy chain; direct
+    // traffic must use zero. Reject incomplete chains instead of trusting a prefix.
+    let index = ips.len().checked_sub(trusted_proxy_count)?;
     ips.get(index).copied()
 }
 
@@ -423,7 +422,7 @@ fn extract_forwarded_ip(headers: &HeaderMap, trusted_proxy_count: usize) -> Opti
     select_proxy_chain_ip(&ips, trusted_proxy_count)
 }
 
-fn extract_client_ip(
+pub(super) fn extract_client_ip(
     headers: &HeaderMap,
     trusted_proxy_count: usize,
     peer_addr: Option<SocketAddr>,
@@ -464,7 +463,7 @@ fn extract_client_ip(
         x_forwarded_for_len = x_forwarded_for.map(str::len).unwrap_or(0),
         x_real_ip_present = x_real_ip.is_some(),
         forwarded_present = forwarded.is_some(),
-        "Resolved client IP for email auth request"
+        "Resolved client IP for authentication request"
     );
 
     resolved_ip.to_string()
@@ -552,6 +551,16 @@ fn is_pkce_verifier(value: &str) -> bool {
 fn validate_frontend_response_options(
     params: &OAuthInitQuery,
 ) -> Result<OAuthFrontendResponseOptions, ApiError> {
+    if params.frontend_callback.len() > 2048
+        || params
+            .redirect_uri
+            .as_ref()
+            .is_some_and(|uri| uri.len() > 2048)
+    {
+        return Err(ApiError::bad_request(
+            "OAuth URLs must not exceed 2048 bytes",
+        ));
+    }
     if params.frontend_response_mode.as_deref() != Some("code") {
         return Err(ApiError::bad_request("frontend_response_mode must be code"));
     }
@@ -940,13 +949,13 @@ pub async fn google_login(
         "OAuth login initiated"
     );
 
+    let frontend_response = validate_frontend_response_options(&params)?;
     let redirect_uri = params
         .redirect_uri
         .clone()
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
     let frontend_callback =
         validate_oauth_frontend_callback(&params.frontend_callback, &app_state)?;
-    let frontend_response = validate_frontend_response_options(&params)?;
 
     tracing::debug!(
         provider = "google",
@@ -1291,13 +1300,13 @@ pub async fn github_login(
         "OAuth login initiated"
     );
 
+    let frontend_response = validate_frontend_response_options(&params)?;
     let redirect_uri = params
         .redirect_uri
         .clone()
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
     let frontend_callback =
         validate_oauth_frontend_callback(&params.frontend_callback, &app_state)?;
-    let frontend_response = validate_frontend_response_options(&params)?;
 
     tracing::debug!(
         provider = "github",
@@ -1687,7 +1696,14 @@ pub async fn near_auth(
 }
 
 /// Create OAuth router with all routes (excluding logout, which requires auth)
-pub fn create_oauth_router() -> Router<AppState> {
+pub fn create_oauth_router(trusted_proxy_count: usize) -> Router<AppState> {
+    let initiation_routes = Router::new()
+        .route("/google", get(google_login))
+        .route("/github", get(github_login))
+        .layer(axum::middleware::from_fn_with_state(
+            super::oauth_rate_limit::OAuthInitiationLimit::new(trusted_proxy_count),
+            super::oauth_rate_limit::limit_oauth_initiation,
+        ));
     // Callback-code exchange responses may contain a session credential. Keep
     // both success and error variants out of browser and intermediary caches.
     let exchange_route = Router::new()
@@ -1697,9 +1713,7 @@ pub fn create_oauth_router() -> Router<AppState> {
         ));
 
     let router = Router::new()
-        // OAuth initiation routes
-        .route("/google", get(google_login))
-        .route("/github", get(github_login))
+        .merge(initiation_routes)
         .route("/email/request-code", post(request_email_code))
         .route("/email/verify-code", post(verify_email_code))
         // NEAR wallet authentication
@@ -2057,7 +2071,7 @@ mod tests {
     }
 
     #[test]
-    fn select_proxy_chain_ip_uses_ip_before_trusted_suffix() {
+    fn select_proxy_chain_ip_counts_the_socket_peer_as_a_trusted_hop() {
         let cases = [
             (
                 vec![
@@ -2065,7 +2079,7 @@ mod tests {
                     "203.0.113.20".parse::<IpAddr>().unwrap(),
                 ],
                 1,
-                Some("198.51.100.10".parse::<IpAddr>().unwrap()),
+                Some("203.0.113.20".parse::<IpAddr>().unwrap()),
             ),
             (
                 vec![
@@ -2074,7 +2088,7 @@ mod tests {
                     "203.0.113.21".parse::<IpAddr>().unwrap(),
                 ],
                 2,
-                Some("198.51.100.10".parse::<IpAddr>().unwrap()),
+                Some("203.0.113.20".parse::<IpAddr>().unwrap()),
             ),
             (
                 vec![
@@ -2082,7 +2096,7 @@ mod tests {
                     "203.0.113.20".parse::<IpAddr>().unwrap(),
                 ],
                 5,
-                Some("198.51.100.10".parse::<IpAddr>().unwrap()),
+                None,
             ),
             (Vec::new(), 1, None),
         ];

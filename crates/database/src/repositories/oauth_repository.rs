@@ -98,6 +98,23 @@ impl OAuthRepository for PostgresOAuthRepository {
 
         let client = self.pool.get().await?;
 
+        // Cleanup is bounded and does not wait for concurrent cleanup batches.
+        // TTL enforcement at consumption is independent of cleanup success.
+        if client
+            .execute(
+                "DELETE FROM oauth_states WHERE state IN (
+                SELECT state FROM oauth_states
+                WHERE created_at <= NOW() - INTERVAL '10 minutes'
+                ORDER BY created_at LIMIT 1000 FOR UPDATE SKIP LOCKED
+            )",
+                &[],
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!("Failed to clean up expired OAuth states");
+        }
+
         let id = Uuid::new_v4();
         let provider_code_verifier = state
             .provider_code_verifier
@@ -165,11 +182,13 @@ impl OAuthRepository for PostgresOAuthRepository {
         // Get and delete the state in one go
         let row = transaction
             .query_opt(
-                "DELETE FROM oauth_states
-                 WHERE state = $1
-                 RETURNING state, provider, redirect_uri, frontend_callback,
-                           frontend_code_challenge,
-                           frontend_state, created_at, id, provider_code_verifier",
+                "WITH consumed AS (
+                    DELETE FROM oauth_states WHERE state = $1
+                    RETURNING state, provider, redirect_uri, frontend_callback,
+                              frontend_code_challenge, frontend_state, created_at,
+                              id, provider_code_verifier
+                 ) SELECT * FROM consumed
+                   WHERE created_at > NOW() - INTERVAL '10 minutes'",
                 &[&state],
             )
             .await?;
