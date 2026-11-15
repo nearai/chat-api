@@ -1,4 +1,4 @@
-//! Bounded, per-process admission limits for public OAuth initiation.
+//! Bounded, per-process admission limits for public OAuth initiation and NEAR wallet login.
 use axum::{
     extract::{ConnectInfo, Request, State},
     middleware::Next,
@@ -74,7 +74,7 @@ pub(super) async fn limit_oauth_initiation(
         return (
             http::StatusCode::TOO_MANY_REQUESTS,
             [(http::header::RETRY_AFTER, "60")],
-            axum::Json(serde_json::json!({"error": "Too many OAuth login attempts"})),
+            axum::Json(serde_json::json!({"error": "Too many login attempts"})),
         )
             .into_response();
     }
