@@ -23,9 +23,8 @@ impl PaymentWebhookRepository for PostgresPaymentWebhookRepository {
         payload: serde_json::Value,
     ) -> anyhow::Result<StoreWebhookResult> {
         tracing::info!(
-            "Repository: Storing payment webhook - provider={}, event_id={}",
-            provider,
-            event_id
+            "Repository: Storing payment webhook - provider={}",
+            provider
         );
 
         // This query is idempotent due to UNIQUE(provider, event_id) constraint
@@ -53,9 +52,8 @@ impl PaymentWebhookRepository for PostgresPaymentWebhookRepository {
         } else {
             // Webhook already exists, fetch it
             tracing::debug!(
-                "Repository: Webhook already exists, fetching - provider={}, event_id={}",
-                provider,
-                event_id
+                "Repository: Webhook already exists, fetching - provider={}",
+                provider
             );
 
             let row = txn

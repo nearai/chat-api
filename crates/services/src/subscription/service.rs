@@ -566,7 +566,6 @@ impl SubscriptionServiceImpl {
         } else {
             tracing::debug!(
                 user_id = %user_id,
-                near_account = %result.account_id,
                 flow = %flow,
                 risk_level = ?result.risk_level,
                 "AML result for NEAR wallet flow"
@@ -789,11 +788,7 @@ impl SubscriptionServiceImpl {
                 return Err(SubscriptionError::TestClockNotAllowedForExistingCustomer);
             }
 
-            tracing::debug!(
-                "Stripe customer already exists: user_id={}, customer_id={}",
-                user_id,
-                customer_id
-            );
+            tracing::debug!("Stripe customer already exists: user_id={}", user_id);
             return Ok(customer_id);
         }
 
@@ -829,11 +824,7 @@ impl SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-        tracing::info!(
-            "Stripe customer created: user_id={}, customer_id={}",
-            user_id,
-            customer_id
-        );
+        tracing::info!("Stripe customer created: user_id={}", user_id);
 
         Ok(customer_id)
     }
@@ -1409,7 +1400,7 @@ impl SubscriptionServiceImpl {
         );
         tracing::warn!(
             user_id = %user_id,
-            subscription_id = %subscription.subscription_id,
+            provider = %subscription.provider,
             reason,
             "using persisted HoS entitlement after chain lookup failure"
         );
@@ -2649,9 +2640,8 @@ fn resolve_plan_name_from_config(
 
     if result.is_none() {
         tracing::error!(
-            "Failed to resolve plan name: provider={}, price_id={}, configured_plans=[{}]",
+            "Failed to resolve plan name: provider={}, configured_plans=[{}]",
             provider,
-            price_id,
             plans.keys().cloned().collect::<Vec<_>>().join(", ")
         );
     }
@@ -3059,9 +3049,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         tracing::info!(
-            "Subscription canceled at period end: user_id={}, subscription_id={}",
+            "Subscription canceled at period end: user_id={}, provider={}",
             user_id,
-            subscription.subscription_id
+            subscription.provider
         );
 
         Ok(CancelSubscriptionOutcome::Completed)
@@ -3151,9 +3141,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         tracing::info!(
-            "Subscription resumed: user_id={}, subscription_id={}",
+            "Subscription resumed: user_id={}, provider={}",
             user_id,
-            subscription.subscription_id
+            subscription.provider
         );
 
         Ok(ResumeSubscriptionOutcome::Completed)
@@ -3354,9 +3344,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
                 self.invalidate_credit_limit_cache(user_id).await;
                 tracing::info!(
-                    "Pending downgrade cancelled: user_id={}, subscription_id={}",
+                    "Pending downgrade cancelled: user_id={}, provider={}",
                     user_id,
-                    subscription.subscription_id
+                    subscription.provider
                 );
                 return Ok(ChangePlanOutcome::DowngradeCancelled);
             } else {
@@ -3398,10 +3388,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
             tracing::info!(
-                "Downgrade scheduled for period end: user_id={}, subscription_id={}, target_price_id={}",
+                "Downgrade scheduled for period end: user_id={}, provider={}, target_plan={}",
                 user_id,
-                subscription.subscription_id,
-                price_id
+                subscription.provider,
+                target_plan
             );
 
             return Ok(ChangePlanOutcome::ScheduledForPeriodEnd);
@@ -3453,10 +3443,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await?;
 
         tracing::info!(
-            "Plan changed immediately in Stripe: user_id={}, target_plan={}, subscription_id={}",
+            "Plan changed immediately in Stripe: user_id={}, target_plan={}",
             user_id,
-            target_plan,
-            subscription.subscription_id
+            target_plan
         );
 
         Ok(ChangePlanOutcome::ChangedImmediately)
@@ -3569,8 +3558,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
-        tracing::info!(
-            "Processing verified webhook: event_id={}, type={}",
+        tracing::info!("Processing verified webhook: type={}", event_type);
+        tracing::debug!(
+            "Verified webhook provider event: event_id={}, type={}",
             event_id,
             event_type
         );
@@ -3602,12 +3592,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             )
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let webhook_id = store_result.webhook.id;
 
         // Skip processing if this webhook was already processed (duplicate/retry)
         if !store_result.is_new {
             tracing::info!(
-                "Webhook already processed (duplicate): event_id={}, type={}, original_created_at={}",
-                event_id,
+                "Webhook already processed (duplicate): webhook_id={}, type={}, original_created_at={}",
+                webhook_id,
                 event_type,
                 store_result.webhook.created_at
             );
@@ -3656,8 +3647,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 Ok(uuid) => Some(uuid),
                                 Err(_) => {
                                     tracing::warn!(
-                                        "Invalid user_id in checkout.session.completed metadata: user_id={:?}",
-                                        user_id_str
+                                        "Invalid user_id in checkout.session.completed metadata: webhook_id={}",
+                                        webhook_id
                                     );
                                     None
                                 }
@@ -3689,8 +3680,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 if let Some(line_items) = session.line_items {
                                     if session.line_items_has_more {
                                         tracing::warn!(
-                                            "Checkout session line_items truncated (has_more=true): session_id={}",
-                                            sid
+                                            "Checkout session line_items truncated (has_more=true): webhook_id={}, user_id={}",
+                                            webhook_id,
+                                            user_uuid
                                         );
                                         None
                                     } else {
@@ -3700,10 +3692,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                             let item_price_id = item.price_id.clone();
                                             if item_price_id != credit_price_id {
                                                 tracing::warn!(
-                                                    "Unexpected price id in credit checkout: session_id={}, expected={}, got={}",
-                                                    sid,
-                                                    credit_price_id,
-                                                    item_price_id
+                                                    "Unexpected price in credit checkout: webhook_id={}, user_id={}",
+                                                    webhook_id,
+                                                    user_uuid
                                                 );
                                                 bad_price = true;
                                                 break;
@@ -3715,8 +3706,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                             None
                                         } else if credits_count <= 0 {
                                             tracing::warn!(
-                                                "No credits quantity found in checkout session: session_id={}",
-                                                sid
+                                                "No credits quantity found in checkout session: webhook_id={}, user_id={}",
+                                                webhook_id,
+                                                user_uuid
                                             );
                                             None
                                         } else if let Some(amount_nano_usd) =
@@ -3745,33 +3737,36 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                                         )
                                                     })?;
                                                 tracing::info!(
-                                                    "Credits added for user_id={}, amount_nano_usd={}, credits_count={}, session_id={}",
+                                                    "Credits added for user_id={}, amount_nano_usd={}, credits_count={}, webhook_id={}",
                                                     user_id,
                                                     amount_nano_usd,
                                                     credits_count,
-                                                    sid
+                                                    webhook_id
                                                 );
                                                 Some(user_id)
                                             } else {
                                                 tracing::info!(
-                                                    "Credit purchase already processed (duplicate): session_id={}",
-                                                    sid
+                                                    "Credit purchase already processed (duplicate): webhook_id={}, user_id={}",
+                                                    webhook_id,
+                                                    user_id
                                                 );
                                                 None
                                             }
                                         } else {
                                             tracing::error!(
-                                                "Overflow converting credits_count={} to nano-USD for session_id={}",
+                                                "Overflow converting credits_count={} to nano-USD: webhook_id={}, user_id={}",
                                                 credits_count,
-                                                sid
+                                                webhook_id,
+                                                user_uuid
                                             );
                                             None
                                         }
                                     }
                                 } else {
                                     tracing::warn!(
-                                        "Missing line_items in checkout session: session_id={}",
-                                        sid
+                                        "Missing line_items in checkout session: webhook_id={}, user_id={}",
+                                        webhook_id,
+                                        user_uuid
                                     );
                                     None
                                 }
@@ -3814,10 +3809,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 })?;
 
             tracing::info!(
-                "Processing subscription event: event_id={}, type={}, subscription_id={}",
-                event_id,
-                event_type,
-                subscription_id
+                "Processing subscription event: webhook_id={}, type={}",
+                webhook_id,
+                event_type
             );
 
             let stripe_sub = self
@@ -3879,15 +3873,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
             }
 
             tracing::info!(
-                "Subscription synced to database: subscription_id={}, user_id={}",
-                subscription_id,
-                user_id
+                "Subscription synced to database: webhook_id={}, user_id={}, status={}",
+                webhook_id,
+                user_id,
+                new_sub.status
             );
             user_id_to_invalidate = Some(user_id);
         } else {
             tracing::debug!(
-                "Non-subscription webhook stored: event_id={}, type={}",
-                event_id,
+                "Non-subscription webhook stored: webhook_id={}, type={}",
+                webhook_id,
                 event_type
             );
         }
@@ -3928,8 +3923,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         tracing::info!(
-            "Webhook processed successfully: event_id={}, type={}",
-            event_id,
+            "Webhook processed successfully: webhook_id={}, type={}",
+            webhook_id,
             event_type
         );
 
@@ -3974,11 +3969,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
             .ok_or(SubscriptionError::NoStripeCustomer)?;
 
-        tracing::debug!(
-            "Found Stripe customer: user_id={}, customer_id={}",
-            user_id,
-            customer_id
-        );
+        tracing::debug!("Found Stripe customer: user_id={}", user_id);
 
         let session = self
             .stripe_client
@@ -4158,10 +4149,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     )
                     .ok_or_else(|| {
                         tracing::error!(
-                            "Failed to resolve plan name for model access: user_id={}, provider={}, price_id={} does not match any configured plan",
+                            "Failed to resolve plan name for model access: user_id={}, provider={}, price does not match any configured plan",
                             user_id,
-                            sub.provider,
-                            sub.price_id
+                            sub.provider
                         );
                         SubscriptionError::InternalError(
                             "Failed to resolve subscription plan configuration".to_string(),
@@ -4328,10 +4318,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .await?;
 
                 tracing::info!(
-                    "House-of-Stake credit payment intent created: user_id={}, credits={}, price_id={}",
+                    "House-of-Stake credit payment intent created: user_id={}, credits={}",
                     user_id,
-                    credits,
-                    price_id
+                    credits
                 );
 
                 Ok(CreateCreditPurchaseOutcome::HouseOfStake {
@@ -4517,17 +4506,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
         if inserted {
             self.invalidate_credit_limit_cache(user_id).await;
             tracing::info!(
-                "House-of-Stake credits added for user_id={}, amount_nano_usd={}, credits={}, purchase_id={}",
+                "House-of-Stake credits added for user_id={}, amount_nano_usd={}, credits={}",
                 user_id,
                 amount_nano_usd,
-                expected_credits,
-                purchase_id
+                expected_credits
             );
         } else {
             tracing::info!(
-                "House-of-Stake credit purchase already processed: user_id={}, purchase_id={}",
-                user_id,
-                purchase_id
+                "House-of-Stake credit purchase already processed: user_id={}",
+                user_id
             );
         }
 
