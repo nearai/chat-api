@@ -2885,9 +2885,8 @@ async fn ensure_near_balance_for_near_user(
     }
 
     tracing::info!(
-        "Checking NEAR balance for user_id={} account_id={} (with cache)",
-        user.user_id,
-        account_id_str
+        "Checking NEAR balance for user_id={} (with cache)",
+        user.user_id
     );
 
     // First, check in-memory cache to avoid frequent RPC calls
@@ -2897,10 +2896,9 @@ async fn ensure_near_balance_for_near_user(
             let age = Utc::now().signed_duration_since(entry.last_checked_at);
             if age.num_seconds() >= 0 && age.num_seconds() < NEAR_BALANCE_CACHE_TTL_SECS {
                 tracing::debug!(
-                    "Using cached NEAR balance for account '{}' (age={}s, balance={} yoctoNEAR)",
-                    account_id_str,
-                    age.num_seconds(),
-                    entry.balance
+                    "Using cached NEAR balance for user_id={} (age={}s)",
+                    user.user_id,
+                    age.num_seconds()
                 );
 
                 // We only treat cached values as authoritative if they meet the minimum balance.
@@ -2915,8 +2913,7 @@ async fn ensure_near_balance_for_near_user(
     // Parse NEAR account ID
     let account_id: AccountId = account_id_str.parse().map_err(|e| {
         tracing::error!(
-            "Invalid NEAR account id '{}' for user_id={}: {}",
-            account_id_str,
+            "Invalid NEAR account id for user_id={}: {}",
             user.user_id,
             error_type(&e)
         );
@@ -2933,8 +2930,8 @@ async fn ensure_near_balance_for_near_user(
         .await
         .map_err(|e| {
             tracing::error!(
-                "Failed to fetch NEAR account info for account_id='{}': {}",
-                account_id_str,
+                "Failed to fetch NEAR account info for user_id={}: {}",
+                user.user_id,
                 error_type(&e)
             );
             (
@@ -2947,18 +2944,15 @@ async fn ensure_near_balance_for_near_user(
         })?;
 
     tracing::info!(
-        "NEAR balance for account '{}' (user_id={}): {} yoctoNEAR",
-        account_id_str,
+        "NEAR balance checked for user_id={}: sufficient={}",
         user.user_id,
-        balance
+        balance >= MIN_NEAR_BALANCE
     );
 
     if balance < MIN_NEAR_BALANCE {
         tracing::warn!(
-            "NEAR balance too low for user_id={} account_id={} balance={} (required >= {})",
+            "NEAR balance too low for user_id={} (required >= {} yoctoNEAR)",
             user.user_id,
-            account_id_str,
-            balance,
             MIN_NEAR_BALANCE
         );
 

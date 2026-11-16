@@ -39,9 +39,8 @@ impl StripeCustomerRepository for PostgresStripeCustomerRepository {
         customer_id: String,
     ) -> anyhow::Result<StripeCustomer> {
         tracing::info!(
-            "Repository: Creating/updating Stripe customer mapping - user_id={}, customer_id={}",
-            user_id,
-            customer_id
+            "Repository: Creating/updating Stripe customer mapping - user_id={}",
+            user_id
         );
 
         let client = self.pool.get().await?;

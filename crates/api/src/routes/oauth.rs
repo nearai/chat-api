@@ -1028,8 +1028,7 @@ pub async fn oauth_callback(
         })?;
 
     tracing::info!(
-        "OAuth callback processed successfully - session_id: {}, user_id: {}, provider: {:?}",
-        callback.session.session_id,
+        "OAuth callback processed successfully - user_id: {}, provider: {:?}",
         callback.session.user_id,
         callback.provider
     );
@@ -1197,7 +1196,7 @@ pub async fn exchange_oauth_callback_code(
 
     let token = exchanged.session.token.ok_or_else(|| {
         tracing::error!(
-            session_id = %exchanged.session.session_id,
+            user_id = %exchanged.session.user_id,
             "Rotated session token was not returned from callback-code exchange"
         );
         ApiError::internal_server_error("Failed to exchange OAuth callback code")
@@ -1234,7 +1233,7 @@ pub async fn exchange_oauth_callback_code(
                 .await
             {
                 tracing::error!(
-                    session_id = %exchanged.session.session_id,
+                    user_id = %exchanged.session.user_id,
                     error_type = error_type(&error),
                     "Failed to revoke session after OAuth gateway setup failure"
                 );
@@ -1360,8 +1359,7 @@ pub async fn logout(
     // or stale after another tab signs in, and could revoke the wrong session.
     let session_id = authenticated_user.session_id;
     tracing::info!(
-        "Logout requested for authenticated session_id: {} by user_id: {}",
-        session_id,
+        "Logout requested by user_id: {}",
         authenticated_user.user_id
     );
 
@@ -1371,16 +1369,15 @@ pub async fn logout(
         .await
         .map_err(|e| {
             tracing::error!(
-                "Failed to revoke session {}: {}",
-                session_id,
+                "Failed to revoke session for user_id={}: {}",
+                authenticated_user.user_id,
                 error_type(&e)
             );
             ApiError::logout_failed()
         })?;
 
     tracing::info!(
-        "Session {} successfully revoked by user_id: {}",
-        session_id,
+        "Session successfully revoked by user_id: {}",
         authenticated_user.user_id
     );
 
@@ -1520,11 +1517,7 @@ pub async fn mock_login(
         ApiError::internal_server_error("Failed to create session")
     })?;
 
-    tracing::info!(
-        "Mock login successful - user_id={}, session_id={}",
-        user.id,
-        session.session_id
-    );
+    tracing::info!("Mock login successful - user_id={}", user.id);
 
     // Set up gateway session (authenticate with compose-api) so the user's
     // instances are reachable immediately upon login
@@ -1571,10 +1564,7 @@ pub async fn near_auth(
     Json(request): Json<NearAuthRequest>,
 ) -> Result<(HeaderMap, Json<NearAuthResponse>), ApiError> {
     let browser_context = super::browser_session::login_context(&request_headers)?;
-    tracing::info!(
-        "NEAR authentication request for account: {}",
-        request.signed_message.account_id
-    );
+    tracing::info!("NEAR authentication request received");
 
     // Convert to near-kit types
     let signed_message: SignedMessage = request
@@ -1643,15 +1633,14 @@ pub async fn near_auth(
 
     let token = session.token.ok_or_else(|| {
         tracing::error!(
-            "Session token not returned from service for session_id: {}",
-            session.session_id
+            "Session token not returned from service for user_id: {}",
+            session.user_id
         );
         ApiError::internal_server_error("Failed to create session")
     })?;
 
     tracing::info!(
-        "NEAR authentication successful - session_id: {}, user_id: {}, is_new_user: {}",
-        session.session_id,
+        "NEAR authentication successful - user_id: {}, is_new_user: {}",
         session.user_id,
         is_new_user
     );
