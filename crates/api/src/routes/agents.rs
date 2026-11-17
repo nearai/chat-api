@@ -133,7 +133,6 @@ async fn get_instance_limit(
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 402, description = "Payment required - instance limit exceeded for plan", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Agent Hosting is closed to new deployments", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(("session_token" = []))
@@ -144,7 +143,6 @@ pub async fn create_instance(
     headers: HeaderMap,
     Json(request): Json<CreateInstanceRequest>,
 ) -> Result<Response, ApiError> {
-    super::agent_hosting_sunset::require_new_activity_allowed()?;
     // Validate service_type if provided
     if let Some(service_type) = request.service_type.as_deref() {
         if !is_valid_service_type(service_type) {

@@ -489,7 +489,7 @@ fn email_verify_error_to_api_error(error: VerifyEmailCodeError) -> ApiError {
             ApiError::too_many_requests("Too many verification attempts. Please try again later")
         }
         VerifyEmailCodeError::Internal(err) if err.is::<services::auth::ports::SignupsClosed>() => {
-            super::agent_hosting_sunset::signups_closed_error()
+            super::agent_hosting_restrictions::signups_closed_error()
         }
         VerifyEmailCodeError::Internal(err) => {
             tracing::error!("Email verification failed: {}", error_type(&err));
@@ -1064,7 +1064,7 @@ pub async fn oauth_callback(
                         return Ok((StatusCode::FOUND, headers));
                     }
                 }
-                return Err(super::agent_hosting_sunset::signups_closed_error());
+                return Err(super::agent_hosting_restrictions::signups_closed_error());
             }
             return Err(ApiError::oauth_failed());
         }
@@ -1626,7 +1626,7 @@ pub async fn near_auth(
         .await
         .map_err(|e| {
             if e.is::<services::auth::ports::SignupsClosed>() {
-                return super::agent_hosting_sunset::signups_closed_error();
+                return super::agent_hosting_restrictions::signups_closed_error();
             }
             tracing::error!("NEAR authentication failed: {}", error_type(&e));
             ApiError::unauthorized(e.to_string())

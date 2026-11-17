@@ -1,11 +1,11 @@
 use crate::error::ApiError;
 use axum::http::StatusCode;
 
-pub fn require_new_activity_allowed() -> Result<(), ApiError> {
+pub fn require_new_subscriptions_allowed() -> Result<(), ApiError> {
     Err(ApiError::new(
         StatusCode::FORBIDDEN,
-        "agent_hosting_closed",
-        "Agent Hosting no longer accepts new deployments, subscriptions or credit purchases.",
+        "agent_hosting_subscriptions_closed",
+        "New Agent Hosting subscriptions are closed. Existing subscriptions remain available.",
     ))
 }
 

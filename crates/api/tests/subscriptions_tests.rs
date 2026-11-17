@@ -350,7 +350,7 @@ async fn test_create_subscription_requires_auth() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_sunset_blocks_create_subscription_not_configured() {
+async fn test_closed_subscriptions_block_create_subscription_not_configured() {
     let server = create_test_server().await;
 
     clear_subscription_plans(&server).await;
@@ -380,13 +380,13 @@ async fn test_sunset_blocks_create_subscription_not_configured() {
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_closed"
+        "agent_hosting_subscriptions_closed"
     );
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_sunset_blocks_create_subscription_invalid_provider() {
+async fn test_closed_subscriptions_block_create_subscription_invalid_provider() {
     let server = create_test_server().await;
 
     set_subscription_plans(
@@ -424,13 +424,13 @@ async fn test_sunset_blocks_create_subscription_invalid_provider() {
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_closed"
+        "agent_hosting_subscriptions_closed"
     );
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_sunset_blocks_create_subscription_invalid_plan() {
+async fn test_closed_subscriptions_block_create_subscription_invalid_plan() {
     let server = create_test_server().await;
 
     set_subscription_plans(
@@ -467,13 +467,13 @@ async fn test_sunset_blocks_create_subscription_invalid_plan() {
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_closed"
+        "agent_hosting_subscriptions_closed"
     );
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_sunset_blocks_create_subscription_instance_limit_exceeded() {
+async fn test_closed_subscriptions_block_create_subscription_instance_limit_exceeded() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
     ensure_stripe_env_for_gating();
 
@@ -514,7 +514,7 @@ async fn test_sunset_blocks_create_subscription_instance_limit_exceeded() {
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_closed"
+        "agent_hosting_subscriptions_closed"
     );
 }
 
@@ -2860,7 +2860,7 @@ async fn active_to_canceled_transition_sets_free_plan_anchor() {
 // Test clock tests
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_sunset_blocks_create_subscription_with_test_clock_disabled() {
+async fn test_closed_subscriptions_block_create_subscription_with_test_clock_disabled() {
     std::env::set_var("STRIPE_TEST_CLOCK_ENABLED", "false");
 
     let server = create_test_server().await;
@@ -2900,7 +2900,7 @@ async fn test_sunset_blocks_create_subscription_with_test_clock_disabled() {
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_closed"
+        "agent_hosting_subscriptions_closed"
     );
 }
 
@@ -3794,7 +3794,7 @@ fn test_change_plan_outcome_unit_variants_preserve_legacy_string_shape() {
 }
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_sunset_blocks_house_of_stake_subscription() {
+async fn test_closed_subscriptions_block_house_of_stake_subscription() {
     clear_proxy_env_for_local_wiremock();
     let near_mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -3854,13 +3854,13 @@ async fn test_sunset_blocks_house_of_stake_subscription() {
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_closed"
+        "agent_hosting_subscriptions_closed"
     );
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_sunset_blocks_create_subscription_house_of_stake_requires_near_wallet() {
+async fn test_closed_subscriptions_block_create_subscription_house_of_stake_requires_near_wallet() {
     let (server, _) = create_test_server_and_db(TestServerConfig {
         near_staking_contract_id: Some("staking.testnet".to_string()),
         ..Default::default()
@@ -3899,7 +3899,7 @@ async fn test_sunset_blocks_create_subscription_house_of_stake_requires_near_wal
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_closed"
+        "agent_hosting_subscriptions_closed"
     );
 }
 

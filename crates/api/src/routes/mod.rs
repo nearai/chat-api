@@ -1,6 +1,6 @@
 pub mod admin;
 pub mod agent_backups;
-pub mod agent_hosting_sunset;
+pub mod agent_hosting_restrictions;
 pub mod agents;
 pub mod api;
 pub mod attestation;

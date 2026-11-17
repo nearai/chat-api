@@ -8,14 +8,16 @@ use services::agent::ports::{AgentRepository, CreateInstanceParams};
 use services::user::ports::UserRepository;
 use uuid::Uuid;
 
-/// New activity remains closed for this request scenario.
+/// Test creating an Agent instance (as admin or regular user)
 #[tokio::test]
-async fn test_sunset_blocks_create_agent_instance() {
+async fn test_create_agent_instance() {
     let server = create_test_server_and_db(Default::default()).await.0;
 
     let user_email = "test_user@example.com";
     let user_token = mock_login(&server, user_email).await;
 
+    // In real scenario, this would create via Agent API
+    // For now, we test the endpoint exists and requires auth
     let response = server
         .post("/v1/agents/instances")
         .add_header(
@@ -27,10 +29,13 @@ async fn test_sunset_blocks_create_agent_instance() {
         }))
         .await;
 
-    assert_eq!(response.status_code(), 403, "{}", response.text());
-    assert_eq!(
-        response.json::<serde_json::Value>()["code"],
-        "agent_hosting_closed"
+    // Should fail in test because we're not mocking the Agent API
+    // But we verify auth is required
+    let status = response.status_code();
+    assert!(
+        status.is_client_error() || status.is_server_error(),
+        "Endpoint should require valid Agent API key, got status: {}",
+        status
     );
 }
 
@@ -429,17 +434,21 @@ async fn test_get_instance_usage_requires_auth() {
     );
 }
 
-/// New activity remains closed for this request scenario.
+/// Test that users without an active subscription cannot create agent instances.
+/// Previously, users without a subscription could bypass limits and create unlimited instances.
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_sunset_blocks_deployment_without_subscription() {
+async fn test_create_instance_rejects_unsubscribed_user() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
 
     let user_email = "no_sub_user@example.com";
     let user_token = mock_login(&server, user_email).await;
 
+    // Ensure user has NO subscription
     common::cleanup_user_subscriptions(&db, user_email).await;
 
+    // Set subscription plans (for subscribed users); unsubscribed users get 0 instances
+    // Note: set_subscription_plans overwrites any existing plans, so no need to clear first
     common::set_subscription_plans(
         &server,
         json!({
@@ -452,6 +461,7 @@ async fn test_sunset_blocks_deployment_without_subscription() {
     )
     .await;
 
+    // Try to create instance - should be rejected with 402 (no instances allowed without subscription)
     let response = server
         .post("/v1/agents/instances")
         .add_header(
@@ -463,22 +473,37 @@ async fn test_sunset_blocks_deployment_without_subscription() {
         }))
         .await;
 
-    assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
-        response.json::<serde_json::Value>()["code"],
-        "agent_hosting_closed"
+        response.status_code(),
+        402,
+        "Unsubscribed user should get 402 Payment Required (active subscription required)"
+    );
+
+    let error_body: serde_json::Value = response.json();
+    let error_message = error_body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        error_message.contains("limit"),
+        "Error message should mention limit, got: {}",
+        error_message
     );
 }
 
-/// New activity remains closed for this request scenario.
+/// Test agent instance limit validation with subscription plans
+/// Tests that the limit is enforced when user reaches max instances
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_sunset_blocks_deployment_at_instance_limit() {
+async fn test_create_instance_respects_agent_instance_limit_max_1() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
 
     let user_email = "limit_test_user_max1@example.com";
     let user_token = mock_login(&server, user_email).await;
 
+    // Set up subscription with agent_instances limit of 1
+    // NOTE: insert_test_subscription uses price_id "price_test_basic"
+    // Note: set_subscription_plans overwrites any existing plans, so no need to clear first
     tracing::info!("Setting up subscription plans");
     common::set_subscription_plans(
         &server,
@@ -500,8 +525,10 @@ async fn test_sunset_blocks_deployment_at_instance_limit() {
     )
     .await;
 
+    // Create a subscription for the user
     common::insert_test_subscription(&server, &db, user_email, false).await;
 
+    // Get user to get their user_id
     let user_response = server
         .get("/v1/users/me")
         .add_header(
@@ -518,6 +545,7 @@ async fn test_sunset_blocks_deployment_at_instance_limit() {
         .expect("User should have id");
     let user_id = Uuid::parse_str(&user_id_str).expect("Valid user_id");
 
+    // Create first instance directly in database
     let agent_repo = db.agent_repository();
     let unique_id = Uuid::new_v4();
     let first_instance = agent_repo
@@ -537,6 +565,7 @@ async fn test_sunset_blocks_deployment_at_instance_limit() {
 
     tracing::info!("Created first instance: {}", first_instance.id);
 
+    // Try to create second instance via API (should be rejected with 402)
     let response2 = server
         .post("/v1/agents/instances")
         .add_header(
@@ -548,9 +577,20 @@ async fn test_sunset_blocks_deployment_at_instance_limit() {
         }))
         .await;
 
-    assert_eq!(response2.status_code(), 403, "{}", response2.text());
     assert_eq!(
-        response2.json::<serde_json::Value>()["code"],
-        "agent_hosting_closed"
+        response2.status_code(),
+        402,
+        "Second instance should be rejected with 402 Payment Required due to instance limit"
+    );
+
+    let error_body: serde_json::Value = response2.json();
+    let error_message = error_body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        error_message.contains("limit"),
+        "Error message should mention limit, got: {}",
+        error_message
     );
 }
