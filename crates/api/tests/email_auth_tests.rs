@@ -937,11 +937,13 @@ async fn test_concurrent_verify_only_allows_one_success() {
 
 #[tokio::test]
 #[serial]
-async fn test_sunset_blocks_new_email_signup_but_keeps_existing_login() {
+async fn test_registration_restriction_preserves_existing_email_login() {
     let resend = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/emails"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_sunset" })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "id": "email_registration" })),
+        )
         .mount(&resend)
         .await;
     mount_turnstile_success(&resend).await;
@@ -954,8 +956,8 @@ async fn test_sunset_blocks_new_email_signup_but_keeps_existing_login() {
     })
     .await;
 
-    let existing = unique_email("sunset-existing");
-    let new = unique_email("sunset-new");
+    let existing = unique_email("registration-existing");
+    let new = unique_email("registration-new");
     let users = db.user_repository();
     users
         .create_user(existing.clone(), None, None)
@@ -977,7 +979,7 @@ async fn test_sunset_blocks_new_email_signup_but_keeps_existing_login() {
             assert_eq!(body["is_new_user"], false);
         } else {
             response.assert_status_forbidden();
-            assert_eq!(body["code"], "agent_hosting_signups_closed");
+            assert_eq!(body["code"], "service_signups_closed");
             assert!(users.get_user_by_email(email).await.unwrap().is_none());
         }
     }

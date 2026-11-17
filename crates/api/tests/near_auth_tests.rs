@@ -32,7 +32,7 @@ async fn near_auth_returns_bad_request_for_over_long_public_key() {
 }
 
 #[tokio::test]
-async fn sunset_near_login_preserves_existing_users_and_rejects_new_accounts() {
+async fn near_login_preserves_existing_users_and_rejects_new_accounts() {
     use common::{create_test_server_and_db, TestServerConfig};
     use near_kit::{signer::SecretKey, standards::nep413};
     use services::{
@@ -62,7 +62,7 @@ async fn sunset_near_login_preserves_existing_users_and_rejects_new_accounts() {
     );
     let key = SecretKey::ed25519_from_bytes([37; 32]);
     for existing in [false, true] {
-        let account = format!("sunset-{}.testnet", Uuid::new_v4().simple());
+        let account = format!("registration-{}.testnet", Uuid::new_v4().simple());
         let email = format!("{account}@near");
         let user = if existing {
             let user = db

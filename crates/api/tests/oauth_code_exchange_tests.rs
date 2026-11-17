@@ -214,11 +214,11 @@ async fn initiation_rejects_legacy_and_invalid_frontend_pkce() {
 }
 
 #[tokio::test]
-async fn sunset_oauth_callback_preserves_login_and_only_redirects_rejections_to_trusted_frontends()
+async fn oauth_callback_preserves_login_and_only_redirects_signup_rejections_to_trusted_frontends()
 {
     for (existing_user, untrusted_callback) in [(false, false), (true, false), (false, true)] {
         let provider = MockServer::start().await;
-        let email = format!("oauth-sunset-{}@example.com", Uuid::new_v4());
+        let email = format!("oauth-registration-{}@example.com", Uuid::new_v4());
         Mock::given(method("POST"))
             .and(path("/token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -288,10 +288,7 @@ async fn sunset_oauth_callback_preserves_login_and_only_redirects_rejections_to_
                 assert!(!query.contains_key("oauth_error"));
             } else {
                 assert_eq!(query.len(), 1);
-                assert_eq!(
-                    query.get("oauth_error").unwrap(),
-                    "agent_hosting_signups_closed"
-                );
+                assert_eq!(query.get("oauth_error").unwrap(), "service_signups_closed");
             }
         }
         assert_eq!(

@@ -13,14 +13,18 @@ async fn blocks_new_subscriptions_and_preserves_existing_account_access() {
         &server,
         json!({
             "starter": {
-                "providers": { "stripe": { "price_id": "price_sunset_test" } },
+                "providers": { "stripe": { "price_id": "price_restrictions_test" } },
                 "agent_instances": { "max": 1 },
                 "monthly_credits": { "max": 1000000 }
             }
         }),
     )
     .await;
-    let token = mock_login(&server, &format!("sunset-{}@test.org", Uuid::new_v4())).await;
+    let token = mock_login(
+        &server,
+        &format!("registration-{}@test.org", Uuid::new_v4()),
+    )
+    .await;
     let auth = HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
 
     let checkout = json!({
@@ -36,11 +40,6 @@ async fn blocks_new_subscriptions_and_preserves_existing_account_access() {
         ("/v1/subscriptions", near_checkout),
     ];
 
-    server
-        .get("/v1/agent-hosting/sunset")
-        .await
-        .assert_status_not_found();
-
     for (path, body) in blocked_requests {
         let response = server
             .post(path)
@@ -50,7 +49,7 @@ async fn blocks_new_subscriptions_and_preserves_existing_account_access() {
         response.assert_status_forbidden();
         assert_eq!(
             response.json::<Value>()["code"],
-            "agent_hosting_subscriptions_closed"
+            "service_subscriptions_closed"
         );
     }
 

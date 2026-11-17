@@ -1,12 +1,12 @@
 pub mod admin;
 pub mod agent_backups;
-pub mod agent_hosting_restrictions;
 pub mod agents;
 pub mod api;
 pub mod attestation;
 pub mod configs;
 pub mod credits;
 pub mod oauth;
+pub mod service_restrictions;
 pub mod subscriptions;
 pub mod users;
 

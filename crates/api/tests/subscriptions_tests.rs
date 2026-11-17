@@ -380,7 +380,7 @@ async fn test_closed_subscriptions_block_create_subscription_not_configured() {
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_subscriptions_closed"
+        "service_subscriptions_closed"
     );
 }
 
@@ -424,7 +424,7 @@ async fn test_closed_subscriptions_block_create_subscription_invalid_provider() 
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_subscriptions_closed"
+        "service_subscriptions_closed"
     );
 }
 
@@ -467,7 +467,7 @@ async fn test_closed_subscriptions_block_create_subscription_invalid_plan() {
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_subscriptions_closed"
+        "service_subscriptions_closed"
     );
 }
 
@@ -514,7 +514,7 @@ async fn test_closed_subscriptions_block_create_subscription_instance_limit_exce
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_subscriptions_closed"
+        "service_subscriptions_closed"
     );
 }
 
@@ -2900,7 +2900,7 @@ async fn test_closed_subscriptions_block_create_subscription_with_test_clock_dis
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_subscriptions_closed"
+        "service_subscriptions_closed"
     );
 }
 
@@ -3854,7 +3854,7 @@ async fn test_closed_subscriptions_block_house_of_stake_subscription() {
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_subscriptions_closed"
+        "service_subscriptions_closed"
     );
 }
 
@@ -3899,7 +3899,7 @@ async fn test_closed_subscriptions_block_create_subscription_house_of_stake_requ
     assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
         response.json::<serde_json::Value>()["code"],
-        "agent_hosting_subscriptions_closed"
+        "service_subscriptions_closed"
     );
 }
 

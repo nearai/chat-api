@@ -489,7 +489,7 @@ fn email_verify_error_to_api_error(error: VerifyEmailCodeError) -> ApiError {
             ApiError::too_many_requests("Too many verification attempts. Please try again later")
         }
         VerifyEmailCodeError::Internal(err) if err.is::<services::auth::ports::SignupsClosed>() => {
-            super::agent_hosting_restrictions::signups_closed_error()
+            super::service_restrictions::signups_closed_error()
         }
         VerifyEmailCodeError::Internal(err) => {
             tracing::error!("Email verification failed: {}", error_type(&err));
@@ -1051,7 +1051,7 @@ pub async fn oauth_callback(
                     if !is_mobile_callback_base(&url) {
                         url.query_pairs_mut()
                             .clear()
-                            .append_pair("oauth_error", "agent_hosting_signups_closed");
+                            .append_pair("oauth_error", "service_signups_closed");
                         let mut headers = HeaderMap::new();
                         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
                         headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
@@ -1064,7 +1064,7 @@ pub async fn oauth_callback(
                         return Ok((StatusCode::FOUND, headers));
                     }
                 }
-                return Err(super::agent_hosting_restrictions::signups_closed_error());
+                return Err(super::service_restrictions::signups_closed_error());
             }
             return Err(ApiError::oauth_failed());
         }
@@ -1626,7 +1626,7 @@ pub async fn near_auth(
         .await
         .map_err(|e| {
             if e.is::<services::auth::ports::SignupsClosed>() {
-                return super::agent_hosting_restrictions::signups_closed_error();
+                return super::service_restrictions::signups_closed_error();
             }
             tracing::error!("NEAR authentication failed: {}", error_type(&e));
             ApiError::unauthorized(e.to_string())

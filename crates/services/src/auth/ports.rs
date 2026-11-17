@@ -125,7 +125,7 @@ pub struct EmailAuthSuccess {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Agent Hosting is closed to new signups")]
+#[error("New account registrations are closed")]
 pub struct SignupsClosed;
 
 #[derive(Debug, thiserror::Error)]

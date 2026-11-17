@@ -4,15 +4,15 @@ use axum::http::StatusCode;
 pub fn require_new_subscriptions_allowed() -> Result<(), ApiError> {
     Err(ApiError::new(
         StatusCode::FORBIDDEN,
-        "agent_hosting_subscriptions_closed",
-        "New Agent Hosting subscriptions are closed. Existing subscriptions remain available.",
+        "service_subscriptions_closed",
+        "New subscriptions are closed. Existing subscriptions remain available.",
     ))
 }
 
 pub fn signups_closed_error() -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,
-        "agent_hosting_signups_closed",
-        "Agent Hosting is closed to new signups. Existing users can still sign in.",
+        "service_signups_closed",
+        "New account registrations are closed. Existing users can still sign in.",
     )
 }
