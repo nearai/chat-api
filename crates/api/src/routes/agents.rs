@@ -425,16 +425,11 @@ pub async fn list_instances(
     for instance in &paginated {
         if let Some(_ssh_cmd) = &instance.ssh_command {
             tracing::debug!(
-                "Instance response with SSH command available: id={}, name={}",
-                instance.id,
-                instance.name
+                "Instance response with SSH command available: id={}",
+                instance.id
             );
         } else {
-            tracing::debug!(
-                "Instance response without SSH command: id={}, name={}",
-                instance.id,
-                instance.name
-            );
+            tracing::debug!("Instance response without SSH command: id={}", instance.id);
         }
     }
 

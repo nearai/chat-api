@@ -152,8 +152,7 @@ async fn authenticate_session_by_token(
         })?;
 
     tracing::debug!(
-        "Session found: session_id={}, user_id={}, created_at={}, expires_at={}",
-        session.session_id,
+        "Session found: user_id={}, created_at={}, expires_at={}",
         session.user_id,
         session.created_at,
         session.expires_at
@@ -164,8 +163,8 @@ async fn authenticate_session_by_token(
     if session.expires_at <= now {
         let time_expired = now.signed_duration_since(session.expires_at);
         tracing::warn!(
-            "Session expired: session_id={}, expired {} seconds ago",
-            session.session_id,
+            "Session expired: user_id={}, expired {} seconds ago",
+            session.user_id,
             time_expired.num_seconds()
         );
         return Err(ApiError::session_expired());
@@ -178,9 +177,8 @@ async fn authenticate_session_by_token(
     );
 
     tracing::info!(
-        "Successfully authenticated session: user_id={}, session_id={}",
-        session.user_id,
-        session.session_id
+        "Successfully authenticated session: user_id={}",
+        session.user_id
     );
 
     Ok(AuthenticatedUser {
@@ -291,9 +289,8 @@ pub async fn auth_middleware(
         .map_err(|e| e.into_response())?;
 
     tracing::info!(
-        "Authentication successful for user_id={}, session_id={} on {} {}",
+        "Authentication successful for user_id={} on {} {}",
         user.user_id,
-        user.session_id,
         method,
         path
     );
