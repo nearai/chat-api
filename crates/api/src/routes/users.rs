@@ -91,6 +91,47 @@ pub async fn get_current_user(
     Ok(Json(profile.into()))
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AccountDeletionPreflight {
+    Ready,
+    BlockingSubscriptions,
+    InstancesNotDeleted { count: i64 },
+}
+
+/// Check account deletion prerequisites without creating a deletion request.
+#[utoipa::path(
+    get,
+    path = "/v1/users/me/account-deletion-preflight",
+    tag = "Users",
+    responses(
+        (status = 200, description = "Current account deletion eligibility", body = AccountDeletionPreflight),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Failed to check eligibility", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn get_account_deletion_preflight(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<AccountDeletionPreflight>, ApiError> {
+    let status = match app_state
+        .user_service
+        .validate_account_deletion_preconditions(user.user_id)
+        .await
+    {
+        Ok(()) => AccountDeletionPreflight::Ready,
+        Err(AccountDeletionError::BlockingSubscriptions { .. }) => {
+            AccountDeletionPreflight::BlockingSubscriptions
+        }
+        Err(AccountDeletionError::InstancesNotDeleted { count, .. }) => {
+            AccountDeletionPreflight::InstancesNotDeleted { count }
+        }
+        Err(error) => return Err(account_deletion_error_to_api_error(error)),
+    };
+    Ok(Json(status))
+}
+
 /// Delete current user account
 ///
 /// Requests asynchronous account deletion after verifying the user has no non-terminal subscriptions
@@ -431,6 +472,10 @@ pub fn create_user_router() -> Router<AppState> {
     Router::new()
         .route("/status", get(get_user_status))
         .route("/me", get(get_current_user).delete(delete_current_user))
+        .route(
+            "/me/account-deletion-preflight",
+            get(get_account_deletion_preflight),
+        )
         .route("/me/usage", get(get_my_usage))
         .route("/me/settings", get(get_user_settings))
         .route("/me/settings", post(update_user_settings))
