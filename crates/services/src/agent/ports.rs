@@ -135,6 +135,40 @@ pub enum AgentServiceError {
     InstanceNotFound,
 }
 
+/// Errors from owner backup operations, mapped to HTTP statuses by the API layer.
+#[derive(Debug, Error)]
+pub enum AgentBackupError {
+    #[error("Instance not found")]
+    InstanceNotFound,
+    #[error("Access denied")]
+    AccessDenied,
+    /// Agent manager rejected the request; the message is meant for the instance owner.
+    #[error("Invalid backup request")]
+    InvalidRequest(String),
+    #[error("Backup not found")]
+    BackupNotFound,
+    #[error("Backup is not ready")]
+    BackupNotReady,
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+/// Presigned download link for a finished backup.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BackupDownload {
+    pub url: String,
+    pub expires_in: u64,
+}
+
+impl std::fmt::Debug for BackupDownload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackupDownload")
+            .field("url", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 /// Usage log entry for tracking API consumption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageLogEntry {
@@ -483,6 +517,23 @@ pub trait AgentService: Send + Sync {
         instance_id: Uuid,
         user_id: UserId,
     ) -> anyhow::Result<UpgradeAvailability>;
+
+    /// Start a backup on the instance's manager and stream its SSE events unchanged.
+    /// `export_ssh_pubkey` adds an extra recipient the owner can decrypt the archive with.
+    async fn export_backup_stream(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+        export_ssh_pubkey: Option<String>,
+    ) -> Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>, AgentBackupError>;
+
+    /// Presigned download link for a finished backup of the instance.
+    async fn get_backup_download(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+        backup_id: &str,
+    ) -> Result<BackupDownload, AgentBackupError>;
 
     async fn stop_instance(
         &self,

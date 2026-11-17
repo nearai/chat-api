@@ -42,7 +42,6 @@ pub type SystemConfigsCache = Arc<RwLock<Option<SystemConfigsCacheEntry>>>;
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
-    pub agent_hosting_sunset: Option<crate::routes::agent_hosting_sunset::AgentHostingSunset>,
     pub db_pool: database::DbPool,
     pub database_encryption_worker: crate::database_encryption::WorkerState,
     pub oauth_service: Arc<dyn services::auth::ports::OAuthService>,

@@ -134,15 +134,6 @@ pub struct OAuthSignupClosed {
     pub frontend_callback: Option<String>,
 }
 
-pub(super) fn require_signup_allowed(
-    cutoff: Option<chrono::DateTime<chrono::Utc>>,
-) -> Result<(), SignupsClosed> {
-    if cutoff.is_some_and(|cutoff| chrono::Utc::now() >= cutoff) {
-        return Err(SignupsClosed);
-    }
-    Ok(())
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyEmailCodeError {
     #[error("Email authentication is disabled")]

@@ -268,7 +268,7 @@ pub async fn create_subscription(
     Extension(user): Extension<AuthenticatedUser>,
     Json(req): Json<CreateSubscriptionRequest>,
 ) -> Result<Json<CreateSubscriptionResponse>, ApiError> {
-    super::agent_hosting_sunset::require_new_activity_allowed(&app_state)?;
+    super::agent_hosting_sunset::require_new_activity_allowed()?;
     tracing::info!(
         "Creating subscription for user_id={}, provider={}, plan={}",
         user.user_id,

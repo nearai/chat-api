@@ -358,6 +358,10 @@ async fn test_email_auth_normalizes_email_case_across_request_and_verify() {
     let mixed_case_email = normalized_email.to_uppercase();
     let ip = unique_ip();
     cleanup_email_auth_state(&db, &normalized_email).await;
+    db.user_repository()
+        .create_user(normalized_email.clone(), None, None)
+        .await
+        .unwrap();
 
     let request_response = request_email_code(&server, &mixed_case_email, &ip).await;
     assert_eq!(request_response.status_code(), 204);
@@ -399,6 +403,10 @@ async fn test_request_email_code_invalidates_previous_challenge() {
     let email = unique_email("email-auth-resend");
     let ip = unique_ip();
     cleanup_email_auth_state(&db, &email).await;
+    db.user_repository()
+        .create_user(email.clone(), None, None)
+        .await
+        .unwrap();
 
     let first = request_email_code(&server, &email, &ip).await;
     assert_eq!(first.status_code(), 204);
@@ -470,6 +478,10 @@ async fn test_verify_email_code_cannot_be_replayed() {
     let email = unique_email("email-auth-replay");
     let ip = unique_ip();
     cleanup_email_auth_state(&db, &email).await;
+    db.user_repository()
+        .create_user(email.clone(), None, None)
+        .await
+        .unwrap();
 
     let request_response = request_email_code(&server, &email, &ip).await;
     assert_eq!(request_response.status_code(), 204);
@@ -866,6 +878,10 @@ async fn test_concurrent_verify_only_allows_one_success() {
     let email = unique_email("email-auth-concurrent");
     let ip = unique_ip();
     cleanup_email_auth_state(&db, &email).await;
+    db.user_repository()
+        .create_user(email.clone(), None, None)
+        .await
+        .unwrap();
 
     let request_response = request_email_code(&server, &email, &ip).await;
     assert_eq!(request_response.status_code(), 204);
@@ -934,17 +950,6 @@ async fn test_sunset_blocks_new_email_signup_but_keeps_existing_login() {
     let (server, db) = create_test_server_and_db(TestServerConfig {
         email_resend_base_url: Some(resend.uri()),
         email_auth_enabled: Some(true),
-        agent_hosting_sunset: Some(
-            serde_json::from_value(json!({
-                "cutoff_at": "2000-01-01T00:00:00Z",
-                "export_deadline_at": "2099-01-01T00:00:00Z",
-                "shutdown_at": "2099-01-02T00:00:00Z",
-                "export_url": "https://example.com/export",
-                "support_url": "https://example.com/support",
-                "close_signups": true
-            }))
-            .unwrap(),
-        ),
         ..Default::default()
     })
     .await;

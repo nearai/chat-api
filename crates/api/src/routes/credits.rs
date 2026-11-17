@@ -135,7 +135,7 @@ pub async fn create_credit_checkout(
     Extension(user): Extension<AuthenticatedUser>,
     Json(req): Json<CreateCreditCheckoutRequest>,
 ) -> Result<Json<CreateCreditCheckoutResponse>, ApiError> {
-    super::agent_hosting_sunset::require_new_activity_allowed(&app_state)?;
+    super::agent_hosting_sunset::require_new_activity_allowed()?;
     validation::validate_redirect_url(&req.success_url, "success_url")
         .map_err(ApiError::bad_request)?;
     validation::validate_redirect_url(&req.cancel_url, "cancel_url")

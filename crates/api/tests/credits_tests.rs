@@ -328,10 +328,10 @@ async fn test_post_credits_checkout_requires_auth() {
     );
 }
 
-/// Runs before test_post_credits_checkout_invalid so credits are never set (fresh server state).
+/// New activity remains closed for this request scenario.
 #[tokio::test]
 #[serial(credits_tests)]
-async fn test_post_credits_checkout_01_not_configured() {
+async fn test_sunset_blocks_post_credits_checkout_01_not_configured() {
     ensure_stripe_env();
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
     clear_credits_config(&db).await;
@@ -356,18 +356,16 @@ async fn test_post_credits_checkout_01_not_configured() {
         }))
         .await;
 
-    let status = response.status_code();
-    let body = response.text();
+    assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
-        status, 503,
-        "POST /v1/credits should return 503 when credits not configured, body: {}",
-        body
+        response.json::<serde_json::Value>()["code"],
+        "agent_hosting_closed"
     );
 }
 
 #[tokio::test]
 #[serial(credits_tests)]
-async fn test_post_credits_checkout_02_invalid_credits_zero() {
+async fn test_sunset_blocks_post_credits_checkout_02_invalid_credits_zero() {
     ensure_stripe_env();
     let server = create_test_server().await;
 
@@ -393,16 +391,16 @@ async fn test_post_credits_checkout_02_invalid_credits_zero() {
         }))
         .await;
 
+    assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
-        response.status_code(),
-        400,
-        "POST /v1/credits with credits=0 should return 400"
+        response.json::<serde_json::Value>()["code"],
+        "agent_hosting_closed"
     );
 }
 
 #[tokio::test]
 #[serial(credits_tests)]
-async fn test_post_credits_checkout_requires_near_wallet() {
+async fn test_sunset_blocks_post_credits_checkout_requires_near_wallet() {
     let (server, _) = create_test_server_and_db(TestServerConfig {
         near_staking_contract_id: Some("staking.testnet".to_string()),
         near_network_id: Some("testnet".to_string()),
@@ -431,11 +429,15 @@ async fn test_post_credits_checkout_requires_near_wallet() {
         .await;
 
     assert_eq!(response.status_code(), 403, "{}", response.text());
+    assert_eq!(
+        response.json::<serde_json::Value>()["code"],
+        "agent_hosting_closed"
+    );
 }
 
 #[tokio::test]
 #[serial(credits_tests)]
-async fn test_post_credits_checkout_house_of_stake_returns_intent() {
+async fn test_sunset_blocks_house_of_stake_credit_checkout() {
     clear_proxy_env_for_local_wiremock();
     let near_mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -472,44 +474,16 @@ async fn test_post_credits_checkout_house_of_stake_returns_intent() {
         }))
         .await;
 
-    assert_eq!(response.status_code(), 200, "{}", response.text());
-    let body: serde_json::Value = response.json();
+    assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
-        body.get("kind").and_then(|v| v.as_str()),
-        Some("house_of_stake")
-    );
-    assert_eq!(
-        body.get("price_id").and_then(|v| v.as_str()),
-        Some("price_hos_credits")
-    );
-    assert_eq!(
-        body.get("network_id").and_then(|v| v.as_str()),
-        Some("testnet")
-    );
-    assert_eq!(
-        body.get("contract_id").and_then(|v| v.as_str()),
-        Some("staking.testnet")
-    );
-    assert_eq!(body.get("quantity").and_then(|v| v.as_u64()), Some(10));
-    assert_eq!(
-        body.get("attached_deposit_yocto").and_then(|v| v.as_str()),
-        Some("50")
-    );
-    assert_eq!(
-        body.pointer("/storage/method_name")
-            .and_then(|v| v.as_str()),
-        Some("storage_deposit")
-    );
-    assert_eq!(
-        body.pointer("/storage/required_deposit_yocto")
-            .and_then(|v| v.as_str()),
-        Some("1250000000000000000000")
+        response.json::<serde_json::Value>()["code"],
+        "agent_hosting_closed"
     );
 }
 
 #[tokio::test]
 #[serial(credits_tests)]
-async fn test_post_credits_checkout_stripe_default_returns_checkout_url_without_near_wallet() {
+async fn test_sunset_blocks_stripe_credit_checkout() {
     ensure_stripe_env();
     let (server, _) = create_test_server_and_db(TestServerConfig {
         stripe_client: Some(Arc::new(MockStripeClient::new(
@@ -545,18 +519,16 @@ async fn test_post_credits_checkout_stripe_default_returns_checkout_url_without_
         }))
         .await;
 
-    assert_eq!(response.status_code(), 200, "{}", response.text());
-    let body: serde_json::Value = response.json();
-    assert_eq!(body.get("kind").and_then(|v| v.as_str()), Some("stripe"));
+    assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
-        body.get("checkout_url").and_then(|v| v.as_str()),
-        Some("https://checkout.stripe.com/c/pay/cs_test_credits")
+        response.json::<serde_json::Value>()["code"],
+        "agent_hosting_closed"
     );
 }
 
 #[tokio::test]
 #[serial(credits_tests)]
-async fn test_post_credits_checkout_request_provider_overrides_default_provider() {
+async fn test_sunset_blocks_credit_checkout_with_provider_override() {
     ensure_stripe_env();
     clear_proxy_env_for_local_wiremock();
     let near_mock = MockServer::start().await;
@@ -604,26 +576,16 @@ async fn test_post_credits_checkout_request_provider_overrides_default_provider(
         }))
         .await;
 
-    assert_eq!(response.status_code(), 200, "{}", response.text());
-    let body: serde_json::Value = response.json();
+    assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
-        body.get("kind").and_then(|v| v.as_str()),
-        Some("house_of_stake")
+        response.json::<serde_json::Value>()["code"],
+        "agent_hosting_closed"
     );
-    assert_eq!(
-        body.get("price_id").and_then(|v| v.as_str()),
-        Some("price_hos_credits")
-    );
-    assert_eq!(
-        body.get("contract_id").and_then(|v| v.as_str()),
-        Some("staking.testnet")
-    );
-    assert_eq!(body.get("quantity").and_then(|v| v.as_u64()), Some(10));
 }
 
 #[tokio::test]
 #[serial(credits_tests)]
-async fn test_post_credits_checkout_unsupported_provider_returns_400() {
+async fn test_sunset_blocks_credit_checkout_with_unsupported_provider() {
     ensure_stripe_env();
     let (server, _) = create_test_server_and_db(TestServerConfig {
         stripe_client: Some(Arc::new(MockStripeClient::new(
@@ -660,7 +622,11 @@ async fn test_post_credits_checkout_unsupported_provider_returns_400() {
         }))
         .await;
 
-    assert_eq!(response.status_code(), 400, "{}", response.text());
+    assert_eq!(response.status_code(), 403, "{}", response.text());
+    assert_eq!(
+        response.json::<serde_json::Value>()["code"],
+        "agent_hosting_closed"
+    );
 }
 
 #[tokio::test]

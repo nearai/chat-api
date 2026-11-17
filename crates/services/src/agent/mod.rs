@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod ports;
 pub mod proxy;
 pub mod service;

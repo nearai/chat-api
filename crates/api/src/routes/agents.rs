@@ -144,7 +144,7 @@ pub async fn create_instance(
     headers: HeaderMap,
     Json(request): Json<CreateInstanceRequest>,
 ) -> Result<Response, ApiError> {
-    super::agent_hosting_sunset::require_new_activity_allowed(&app_state)?;
+    super::agent_hosting_sunset::require_new_activity_allowed()?;
     // Validate service_type if provided
     if let Some(service_type) = request.service_type.as_deref() {
         if !is_valid_service_type(service_type) {
@@ -427,16 +427,11 @@ pub async fn list_instances(
     for instance in &paginated {
         if let Some(_ssh_cmd) = &instance.ssh_command {
             tracing::debug!(
-                "Instance response with SSH command available: id={}, name={}",
-                instance.id,
-                instance.name
+                "Instance response with SSH command available: id={}",
+                instance.id
             );
         } else {
-            tracing::debug!(
-                "Instance response without SSH command: id={}, name={}",
-                instance.id,
-                instance.name
-            );
+            tracing::debug!("Instance response without SSH command: id={}", instance.id);
         }
     }
 
@@ -872,6 +867,14 @@ pub fn create_agent_router() -> Router<AppState> {
         .route(
             "/instances/{id}/upgrade-available",
             get(check_upgrade_available),
+        )
+        .route(
+            "/instances/{id}/backups/export",
+            post(super::agent_backups::export_backup),
+        )
+        .route(
+            "/instances/{id}/backups/{backup_id}/download",
+            get(super::agent_backups::get_backup_download),
         )
         .route("/instances/{id}", delete(delete_instance))
 }

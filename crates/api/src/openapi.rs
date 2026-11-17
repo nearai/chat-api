@@ -14,7 +14,6 @@ use utoipa::OpenApi;
     paths(
         // Health endpoint
         crate::routes::health_check,
-        crate::routes::agent_hosting_sunset::get_sunset,
         // Auth endpoints
         crate::routes::oauth::google_login,
         crate::routes::oauth::github_login,
@@ -96,6 +95,8 @@ use utoipa::OpenApi;
         crate::routes::agents::restart_instance,
         crate::routes::agents::upgrade_instance,
         crate::routes::agents::check_upgrade_available,
+        crate::routes::agent_backups::export_backup,
+        crate::routes::agent_backups::get_backup_download,
         crate::routes::admin::admin_create_backup,
         crate::routes::admin::admin_list_backups,
         crate::routes::admin::admin_get_backup,
@@ -190,6 +191,8 @@ use utoipa::OpenApi;
         crate::models::BalanceResponse,
         crate::models::UsageQueryParams,
         crate::routes::agents::UpgradeAvailabilityResponse,
+        crate::routes::agent_backups::ExportBackupRequest,
+        crate::routes::agent_backups::BackupDownloadResponse,
         // BI metrics (admin)
         crate::routes::admin::BiDeploymentQuery,
         crate::routes::admin::BiSummaryQuery,
@@ -275,5 +278,7 @@ mod tests {
 
         assert!(paths.contains_key("/v1/responses"));
         assert!(paths.contains_key("/v1/users/me"));
+        assert!(paths.contains_key("/v1/agents/instances/{id}/backups/export"));
+        assert!(paths.contains_key("/v1/agents/instances/{id}/backups/{backup_id}/download"));
     }
 }

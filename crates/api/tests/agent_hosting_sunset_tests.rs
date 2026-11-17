@@ -1,7 +1,5 @@
 mod common;
 
-use api::create_router_with_cors;
-use axum_test::TestServer;
 use common::{create_test_server_with_state, mock_login, set_subscription_plans, TestServerConfig};
 use http::{header::AUTHORIZATION, HeaderValue};
 use serde_json::{json, Value};
@@ -9,7 +7,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn sunset_blocks_new_activity_and_preserves_existing_account_access() {
-    let (server, _, mut state) = create_test_server_with_state(TestServerConfig::default()).await;
+    let (server, _, _) = create_test_server_with_state(TestServerConfig::default()).await;
     set_subscription_plans(
         &server,
         json!({
@@ -41,34 +39,13 @@ async fn sunset_blocks_new_activity_and_preserves_existing_account_access() {
         ("/v1/credits", near_checkout),
     ];
 
-    let mut schedule = json!({
-        "cutoff_at": "2098-01-01T00:00:00Z",
-        "export_deadline_at": "2099-01-01T00:00:00Z",
-        "shutdown_at": "2099-01-02T00:00:00Z",
-        "export_url": "https://example.com/export",
-        "support_url": "https://example.com/support",
-        "close_signups": true
-    });
-    state.agent_hosting_sunset = Some(serde_json::from_value(schedule.clone()).unwrap());
-    let before_cutoff =
-        TestServer::new(create_router_with_cors(state.clone(), Default::default())).unwrap();
-    // No agent is provisioned: validation still runs before the cutoff.
-    let invalid_instance = before_cutoff
-        .post("/v1/agents/instances")
-        .add_header(AUTHORIZATION, auth.clone())
-        .json(&json!({"service_type": "invalid"}))
-        .await;
-    invalid_instance.assert_status_bad_request();
-
-    schedule["cutoff_at"] = json!("2000-01-01T00:00:00Z");
-    state.agent_hosting_sunset = Some(serde_json::from_value(schedule.clone()).unwrap());
-    let after_cutoff = TestServer::new(create_router_with_cors(state, Default::default())).unwrap();
-    let notice = after_cutoff.get("/v1/agent-hosting/sunset").await;
-    notice.assert_status_ok();
-    assert_eq!(notice.json::<Value>()["schedule"], schedule);
+    server
+        .get("/v1/agent-hosting/sunset")
+        .await
+        .assert_status_not_found();
 
     for (path, body) in blocked_requests {
-        let response = after_cutoff
+        let response = server
             .post(path)
             .add_header(AUTHORIZATION, auth.clone())
             .json(&body)
@@ -78,14 +55,14 @@ async fn sunset_blocks_new_activity_and_preserves_existing_account_access() {
     }
 
     for path in ["/v1/users/me", "/v1/agents/instances", "/v1/subscriptions"] {
-        after_cutoff
+        server
             .get(path)
             .add_header(AUTHORIZATION, auth.clone())
             .await
             .assert_status_ok();
     }
 
-    let deletion = after_cutoff
+    let deletion = server
         .delete("/v1/users/me")
         .add_header(AUTHORIZATION, auth)
         .await;

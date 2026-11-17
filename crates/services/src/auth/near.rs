@@ -100,7 +100,6 @@ pub struct NearAuthService {
     user_repository: Arc<dyn UserRepository>,
     nonce_repository: Arc<dyn NearNonceRepository>,
     network: Near,
-    signup_cutoff: Option<DateTime<Utc>>,
 }
 
 impl NearAuthService {
@@ -116,12 +115,7 @@ impl NearAuthService {
             user_repository,
             nonce_repository,
             network,
-            signup_cutoff: None,
         }
-    }
-
-    pub(super) fn set_signup_cutoff(&mut self, cutoff: Option<DateTime<Utc>>) {
-        self.signup_cutoff = cutoff;
     }
 
     async fn cleanup_nonces(&self) {
@@ -160,7 +154,7 @@ impl NearAuthService {
 
     /// Find or create user from NEAR account
     async fn find_or_create_user(&self, account_id: &str) -> anyhow::Result<(UserId, bool)> {
-        tracing::info!("Finding or creating user for NEAR account: {}", account_id);
+        tracing::info!("Finding or creating user for NEAR account");
 
         // Check if user exists by NEAR account ID
         if let Some(user_id) = self
@@ -168,48 +162,11 @@ impl NearAuthService {
             .find_user_by_oauth(OAuthProvider::Near, account_id)
             .await?
         {
-            tracing::info!(
-                "Found existing user by NEAR account: user_id={}, account_id={}",
-                user_id,
-                account_id
-            );
+            tracing::info!("Found existing user by NEAR account: user_id={}", user_id);
             return Ok((user_id, false));
         }
 
-        super::ports::require_signup_allowed(self.signup_cutoff)?;
-
-        // Create new user with NEAR account ID as email placeholder
-        // NEAR accounts don't have emails, so we use account_id@near as placeholder
-        let placeholder_email = format!("{}@near", account_id);
-
-        tracing::info!(
-            "No existing user found, creating new user for NEAR account: {}",
-            account_id
-        );
-
-        let user = self
-            .user_repository
-            .create_user(
-                placeholder_email,
-                Some(account_id.to_string()), // Use account ID as name
-                None,
-            )
-            .await?;
-
-        tracing::info!(
-            "Created new user: user_id={}, account_id={}",
-            user.id,
-            account_id
-        );
-
-        // Link the NEAR account
-        self.user_repository
-            .link_oauth_account(user.id, OAuthProvider::Near, account_id.to_string())
-            .await?;
-
-        tracing::info!("Successfully linked NEAR account to user_id={}", user.id);
-
-        Ok((user.id, true))
+        Err(super::ports::SignupsClosed.into())
     }
 
     pub async fn verify_and_authenticate(
@@ -219,7 +176,7 @@ impl NearAuthService {
     ) -> anyhow::Result<(UserSession, bool)> {
         let account_id = signed_message.account_id.to_string();
 
-        tracing::info!("NEAR authentication attempt for account: {}", account_id);
+        tracing::info!("NEAR authentication attempt");
 
         // 1. Validate recipient
         Self::validate_recipient(&payload.recipient)?;
@@ -242,7 +199,7 @@ impl NearAuthService {
         let nonce_hex = hex::encode(payload.nonce);
         let nonce_consumed = self.nonce_repository.consume_nonce(&nonce_hex).await?;
         if !nonce_consumed {
-            tracing::warn!("NEAR signature replay detected for account {}", account_id);
+            tracing::warn!("NEAR signature replay detected");
             return Err(anyhow::anyhow!(
                 "Nonce already used (replay attack detected)"
             ));
@@ -255,9 +212,8 @@ impl NearAuthService {
         let session = self.session_repository.create_session(user_id).await?;
 
         tracing::info!(
-            "NEAR authentication successful - user_id={}, session_id={}, is_new_user={}",
+            "NEAR authentication successful - user_id={}, is_new_user={}",
             user_id,
-            session.session_id,
             is_new_user
         );
 

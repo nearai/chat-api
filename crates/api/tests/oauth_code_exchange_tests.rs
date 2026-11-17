@@ -237,17 +237,6 @@ async fn sunset_oauth_callback_preserves_login_and_only_redirects_rejections_to_
         let (server, db) = create_test_server_and_db(TestServerConfig {
             google_oauth_token_url: Some(format!("{}/token", provider.uri())),
             google_oauth_user_info_url: Some(format!("{}/userinfo", provider.uri())),
-            agent_hosting_sunset: Some(
-                serde_json::from_value(json!({
-                    "cutoff_at": "2000-01-01T00:00:00Z",
-                    "export_deadline_at": "2099-01-01T00:00:00Z",
-                    "shutdown_at": "2099-01-02T00:00:00Z",
-                    "export_url": "https://example.com/export",
-                    "support_url": "https://example.com/support",
-                    "close_signups": true
-                }))
-                .unwrap(),
-            ),
             ..Default::default()
         })
         .await;
@@ -342,6 +331,10 @@ async fn provider_callback_works_with_global_encryption_writes_disabled() {
         ..gateway
     })
     .await;
+    db.user_repository()
+        .create_user(email.clone(), None, None)
+        .await
+        .unwrap();
     let verifier = "provider-callback-verifier-abcdefghijklmnopqrstuvwxyz0123456789";
     let challenge = pkce_challenge(verifier);
     let frontend_state = URL_SAFE_NO_PAD.encode(Sha256::digest(b"frontend-state"));
@@ -442,7 +435,7 @@ async fn provider_callback_works_with_global_encryption_writes_disabled() {
         .as_str()
         .is_some_and(|token| token.starts_with("sess_")));
     assert!(body["session_id"].as_str().is_some());
-    assert_eq!(body["is_new_user"], true);
+    assert_eq!(body["is_new_user"], false);
     assert!(db
         .oauth_repository()
         .consume_oauth_state(&provider_state)

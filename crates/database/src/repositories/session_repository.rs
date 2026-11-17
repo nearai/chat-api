@@ -70,8 +70,7 @@ impl SessionRepository for PostgresSessionRepository {
         };
 
         tracing::info!(
-            "Session created successfully: session_id={}, user_id={}, expires_at={}",
-            session.session_id,
+            "Session created successfully: user_id={}, expires_at={}",
             session.user_id,
             session.expires_at
         );
@@ -121,11 +120,7 @@ impl SessionRepository for PostgresSessionRepository {
         });
 
         if let Some(ref session) = result {
-            tracing::debug!(
-                "Session found: session_id={}, user_id={}",
-                session.session_id,
-                session.user_id
-            );
+            tracing::debug!("Session found: user_id={}", session.user_id);
         } else {
             tracing::debug!("No session found for provided token_hash");
         }
@@ -137,7 +132,7 @@ impl SessionRepository for PostgresSessionRepository {
         &self,
         session_id: SessionId,
     ) -> anyhow::Result<Option<UserSession>> {
-        tracing::debug!("Looking up session by session_id: {}", session_id);
+        tracing::debug!("Looking up session by id");
 
         let client = self.pool.get().await?;
 
@@ -159,13 +154,9 @@ impl SessionRepository for PostgresSessionRepository {
         });
 
         if let Some(ref session) = result {
-            tracing::debug!(
-                "Session found: session_id={}, user_id={}",
-                session.session_id,
-                session.user_id
-            );
+            tracing::debug!("Session found: user_id={}", session.user_id);
         } else {
-            tracing::debug!("No session found for session_id: {}", session_id);
+            tracing::debug!("No session found for id");
         }
 
         Ok(result)
@@ -191,7 +182,7 @@ impl SessionRepository for PostgresSessionRepository {
     }
 
     async fn delete_session(&self, session_id: SessionId) -> anyhow::Result<()> {
-        tracing::info!("Deleting session: session_id={}", session_id);
+        tracing::info!("Deleting session");
 
         let client = self.pool.get().await?;
 
@@ -200,9 +191,9 @@ impl SessionRepository for PostgresSessionRepository {
             .await?;
 
         if rows_affected > 0 {
-            tracing::info!("Session deleted successfully: session_id={}", session_id);
+            tracing::info!("Session deleted successfully");
         } else {
-            tracing::warn!("No session found to delete: session_id={}", session_id);
+            tracing::warn!("No session found to delete");
         }
 
         Ok(())
