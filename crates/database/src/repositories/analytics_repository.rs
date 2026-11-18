@@ -276,7 +276,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
             .to_zoned(jiff::tz::TimeZone::UTC)
             .start_of_day()?
             .timestamp();
-        let end_utc = start_utc + SignedDuration::from_hours(24);
+        let end_utc = start_utc.checked_add(SignedDuration::from_hours(24))?;
 
         let row = client
             .query_one(
@@ -295,7 +295,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         let client = self.pool.get().await?;
 
         let end = date;
-        let start = end - SignedDuration::from_hours(7 * 24);
+        let start = end.checked_sub(SignedDuration::from_hours(7 * 24))?;
 
         let row = client
             .query_one(
@@ -314,7 +314,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         let client = self.pool.get().await?;
 
         let end = date;
-        let start = end - SignedDuration::from_hours(30 * 24);
+        let start = end.checked_sub(SignedDuration::from_hours(30 * 24))?;
 
         let row = client
             .query_one(
