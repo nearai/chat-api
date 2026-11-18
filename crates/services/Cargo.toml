@@ -12,7 +12,7 @@ async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.5", features = ["v4", "serde"] }
-jiff = { version = "0.2", default-features = false, features = ["std", "serde"] }
+jiff = { version = "0.2.46", default-features = false, features = ["std", "serde"] }
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
