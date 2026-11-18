@@ -1,6 +1,6 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use services::model::ports::{
     Model, ModelSettings, ModelsRepository, PartialModelSettings, UpdateModelParams,
     UpsertModelParams,
@@ -140,8 +140,8 @@ impl ModelsRepository for PostgresModelRepository {
         for row in rows {
             let id: Uuid = row.get("id");
             let model_id: String = row.get("model_id");
-            let created_at: DateTime<Utc> = row.get("created_at");
-            let updated_at: DateTime<Utc> = row.get("updated_at");
+            let created_at: Timestamp = row.get("created_at");
+            let updated_at: Timestamp = row.get("updated_at");
 
             let settings = load_settings_from_row(&row)?;
 

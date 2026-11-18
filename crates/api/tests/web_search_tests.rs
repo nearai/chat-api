@@ -754,7 +754,7 @@ async fn mcp_rejects_banned_users_before_forwarding() {
             user_id,
             services::user::ports::BanType::NearBalanceLow,
             Some("test ban".into()),
-            Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            Some(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(1)),
         )
         .await
         .unwrap();
@@ -780,7 +780,7 @@ async fn mcp_enforces_request_rate_limit() {
         .mount(&upstream)
         .await;
     let mut limit = common::restrictive_rate_limit_config();
-    limit.window_duration = chrono::Duration::minutes(1);
+    limit.window_duration = jiff::SignedDuration::from_mins(1);
     let (server, _, state) = common::create_test_server_with_state(TestServerConfig {
         cloud_api_base_url: upstream.uri(),
         rate_limit_config: Some(limit.clone()),

@@ -3,11 +3,11 @@
 mod common;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{Duration, Utc};
 use common::{create_test_server_and_db, create_test_server_with_state, TestServerConfig};
 use http::header::{
     CACHE_CONTROL, LOCATION, REFERRER_POLICY, SET_COOKIE, STRICT_TRANSPORT_SECURITY,
 };
+use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 use services::agent::ports::MockAgentService;
 use services::auth::ports::{OAuthCallbackCode, OAuthRepository, OAuthTokens, SessionRepository};
@@ -678,7 +678,7 @@ async fn callback_code_is_pkce_bound_single_use_and_rotates_the_session_token() 
                 session_id: original_session.session_id,
                 code_challenge: pkce_challenge(&verifier),
                 is_new_user: true,
-                expires_at: Utc::now() + Duration::minutes(2),
+                expires_at: Timestamp::now() + SignedDuration::from_mins(2),
             },
         )
         .await
@@ -770,7 +770,7 @@ async fn concurrent_callback_code_exchanges_have_exactly_one_winner() {
                 session_id: session.session_id,
                 code_challenge: challenge.clone(),
                 is_new_user: false,
-                expires_at: Utc::now() + Duration::minutes(2),
+                expires_at: Timestamp::now() + SignedDuration::from_mins(2),
             },
         )
         .await
@@ -833,7 +833,7 @@ async fn expired_callback_code_cannot_be_exchanged_and_is_cleaned_up() {
                 session_id: session.session_id,
                 code_challenge: pkce_challenge(&verifier),
                 is_new_user: false,
-                expires_at: Utc::now() - Duration::seconds(1),
+                expires_at: Timestamp::now() - SignedDuration::from_secs(1),
             },
         )
         .await
@@ -887,7 +887,7 @@ async fn expired_session_returns_unauthorized_without_consuming_callback_code() 
                 session_id: session.session_id,
                 code_challenge: pkce_challenge(&verifier),
                 is_new_user: false,
-                expires_at: Utc::now() + Duration::minutes(2),
+                expires_at: Timestamp::now() + SignedDuration::from_mins(2),
             },
         )
         .await
@@ -1056,7 +1056,7 @@ async fn gateway_failure_revokes_session_without_restoring_callback_code() {
                     session_id: session.session_id,
                     code_challenge: pkce_challenge(&verifier),
                     is_new_user: false,
-                    expires_at: Utc::now() + Duration::minutes(2),
+                    expires_at: Timestamp::now() + SignedDuration::from_mins(2),
                 },
             )
             .await
@@ -1173,7 +1173,7 @@ async fn gateway_setup_timeout_revokes_session_without_restoring_callback_code()
                 session_id: session.session_id,
                 code_challenge: pkce_challenge(&verifier),
                 is_new_user: false,
-                expires_at: Utc::now() + Duration::minutes(2),
+                expires_at: Timestamp::now() + SignedDuration::from_mins(2),
             },
         )
         .await
@@ -1260,7 +1260,7 @@ async fn browser_exchange_returns_both_cookies_and_a_short_lived_access_token() 
                 session_id: original_session.session_id,
                 code_challenge: pkce_challenge(&verifier),
                 is_new_user: true,
-                expires_at: Utc::now() + Duration::minutes(2),
+                expires_at: Timestamp::now() + SignedDuration::from_mins(2),
             },
         )
         .await
@@ -1305,9 +1305,12 @@ async fn browser_exchange_returns_both_cookies_and_a_short_lived_access_token() 
     assert_eq!(*calls.lock().unwrap(), vec![user.id]);
     assert_eq!(response.header(CACHE_CONTROL), "no-store");
     let body: serde_json::Value = response.json();
-    let expiry =
-        chrono::DateTime::parse_from_rfc3339(body["expires_at"].as_str().unwrap()).unwrap();
-    assert!(expiry <= Utc::now() + Duration::minutes(15));
+    let expiry = body["expires_at"]
+        .as_str()
+        .unwrap()
+        .parse::<jiff::Timestamp>()
+        .unwrap();
+    assert!(expiry <= Timestamp::now() + SignedDuration::from_mins(15));
     assert!(body.get("refresh_token").is_none());
     let rotated_token = body["token"].as_str().expect("rotated token");
     assert_ne!(rotated_token, original_token);
@@ -1379,7 +1382,7 @@ async fn admin_browser_exchange_enforces_both_allowlists_and_revokes_rejected_lo
                     session_id: session.session_id,
                     code_challenge: pkce_challenge(&verifier),
                     is_new_user: false,
-                    expires_at: Utc::now() + Duration::minutes(2),
+                    expires_at: Timestamp::now() + SignedDuration::from_mins(2),
                 },
             )
             .await
@@ -1421,7 +1424,7 @@ async fn admin_browser_exchange_enforces_both_allowlists_and_revokes_rejected_lo
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(root.expires_at <= Utc::now() + Duration::hours(8));
+            assert!(root.expires_at <= Timestamp::now() + SignedDuration::from_hours(8));
         } else {
             response.assert_status_forbidden();
             assert!(calls.lock().unwrap().is_empty());

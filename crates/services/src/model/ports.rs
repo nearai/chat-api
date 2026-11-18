@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::consts::MODEL_PUBLIC_DEFAULT;
 
@@ -46,8 +46,8 @@ pub struct Model {
     pub id: uuid::Uuid,
     pub model_id: String,
     pub settings: ModelSettings,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

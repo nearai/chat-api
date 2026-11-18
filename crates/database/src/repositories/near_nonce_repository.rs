@@ -1,6 +1,6 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use services::auth::NearNonceRepository;
 
 pub struct PostgresNearNonceRepository {
@@ -46,7 +46,7 @@ impl NearNonceRepository for PostgresNearNonceRepository {
         let client = self.pool.get().await?;
 
         // Delete nonces older than 10 minutes (they can't be valid anymore)
-        let cutoff = Utc::now() - Duration::minutes(10);
+        let cutoff = Timestamp::now() - SignedDuration::from_mins(10);
 
         let deleted = client
             .execute(

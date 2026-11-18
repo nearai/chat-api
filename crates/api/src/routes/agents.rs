@@ -7,7 +7,6 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use services::logging::error_type;
 use uuid::Uuid;
@@ -535,9 +534,8 @@ pub async fn create_api_key(
     // Parse expiration if provided
     let expires_at = if let Some(expires_str) = request.expires_at {
         Some(
-            DateTime::parse_from_rfc3339(&expires_str)
-                .map_err(|_| ApiError::bad_request("Invalid expiration timestamp format"))?
-                .with_timezone(&chrono::Utc),
+            services::timestamps::parse_rfc3339(&expires_str)
+                .ok_or_else(|| ApiError::bad_request("Invalid expiration timestamp format"))?,
         )
     } else {
         None
@@ -572,8 +570,8 @@ pub async fn create_api_key(
         name: api_key.name,
         api_key: plaintext_key,
         spend_limit: api_key.spend_limit.map(format_nano_dollars),
-        expires_at: api_key.expires_at.map(|e| e.to_rfc3339()),
-        created_at: api_key.created_at.to_rfc3339(),
+        expires_at: api_key.expires_at.map(services::timestamps::format_utc),
+        created_at: services::timestamps::format_utc(api_key.created_at),
     };
 
     Ok((StatusCode::CREATED, Json(response)))
@@ -708,9 +706,8 @@ pub async fn get_instance_usage(
     // Parse optional date parameters
     let start_date = if let Some(start_str) = params.start_date {
         Some(
-            DateTime::parse_from_rfc3339(&start_str)
-                .map_err(|_| ApiError::bad_request("Invalid start_date format"))?
-                .with_timezone(&chrono::Utc),
+            services::timestamps::parse_rfc3339(&start_str)
+                .ok_or_else(|| ApiError::bad_request("Invalid start_date format"))?,
         )
     } else {
         None
@@ -718,9 +715,8 @@ pub async fn get_instance_usage(
 
     let end_date = if let Some(end_str) = params.end_date {
         Some(
-            DateTime::parse_from_rfc3339(&end_str)
-                .map_err(|_| ApiError::bad_request("Invalid end_date format"))?
-                .with_timezone(&chrono::Utc),
+            services::timestamps::parse_rfc3339(&end_str)
+                .ok_or_else(|| ApiError::bad_request("Invalid end_date format"))?,
         )
     } else {
         None
@@ -1416,7 +1412,7 @@ pub async fn verify_agent_key(
         .ok_or_else(|| ApiError::unauthorized("Invalid token"))?;
 
     if let Some(expires_at) = api_key_info.expires_at {
-        if expires_at < chrono::Utc::now() {
+        if expires_at < jiff::Timestamp::now() {
             return Err(ApiError::unauthorized("Invalid token"));
         }
     }

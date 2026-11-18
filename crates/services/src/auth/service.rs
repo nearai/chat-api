@@ -2,8 +2,8 @@ use crate::logging::error_type;
 use anyhow::Context;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::Utc;
 use hmac::{Hmac, Mac};
+use jiff::Timestamp;
 use near_kit::standards::nep413::SignMessageParams;
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
@@ -410,7 +410,7 @@ impl OAuthServiceImpl {
             refresh_token: token_result.refresh_token().map(|t| t.secret().to_string()),
             expires_at: token_result
                 .expires_in()
-                .map(|d| Utc::now() + chrono::Duration::from_std(d).unwrap()),
+                .map(|d| Timestamp::now() + jiff::SignedDuration::try_from(d).unwrap()),
         };
 
         self.oauth_repository
@@ -653,8 +653,8 @@ impl EmailAuthService for EmailAuthServiceImpl {
         self.verify_turnstile_token(&turnstile_token, &client_ip)
             .await?;
 
-        let now = Utc::now();
-        let since = now - chrono::Duration::hours(1);
+        let now = Timestamp::now();
+        let since = now - jiff::SignedDuration::from_hours(1);
 
         if self
             .challenge_repository
@@ -687,7 +687,7 @@ impl EmailAuthService for EmailAuthServiceImpl {
         let challenge_id = Uuid::new_v4();
         let code = self.generate_verification_code();
         let code_mac = self.compute_code_mac(&email, &code)?;
-        let expires_at = now + chrono::Duration::minutes(self.config.otp_ttl_minutes);
+        let expires_at = now + jiff::SignedDuration::from_mins(self.config.otp_ttl_minutes);
 
         let challenge = self
             .challenge_repository
@@ -723,8 +723,8 @@ impl EmailAuthService for EmailAuthServiceImpl {
 
         let email = Self::normalize_email(&email);
 
-        let now = Utc::now();
-        let since = now - chrono::Duration::hours(1);
+        let now = Timestamp::now();
+        let since = now - jiff::SignedDuration::from_hours(1);
 
         if self
             .challenge_repository
@@ -854,7 +854,7 @@ impl OAuthService for OAuthServiceImpl {
             frontend_code_challenge,
             frontend_state,
             provider_code_verifier: Some(provider_verifier),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
 
         self.oauth_repository
@@ -920,7 +920,7 @@ impl OAuthService for OAuthServiceImpl {
                 .or(existing_tokens.refresh_token),
             expires_at: token_result
                 .expires_in()
-                .map(|d| Utc::now() + chrono::Duration::from_std(d).unwrap()),
+                .map(|d| Timestamp::now() + jiff::SignedDuration::try_from(d).unwrap()),
         };
 
         self.oauth_repository
@@ -962,7 +962,8 @@ impl OAuthService for OAuthServiceImpl {
             session_id,
             code_challenge,
             is_new_user,
-            expires_at: Utc::now() + chrono::Duration::minutes(FRONTEND_CALLBACK_CODE_TTL_MINUTES),
+            expires_at: Timestamp::now()
+                + jiff::SignedDuration::from_mins(FRONTEND_CALLBACK_CODE_TTL_MINUTES),
         };
 
         if let Err(error) = self

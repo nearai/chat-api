@@ -1,7 +1,7 @@
 use crate::agent_secrets;
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use services::agent::ports::{
     AgentApiKey, AgentInstance, AgentRepository, CreateInstanceParams, InstanceBalance,
     UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE,
@@ -714,7 +714,7 @@ impl AgentRepository for PostgresAgentRepository {
         key_hash: String,
         name: String,
         spend_limit: Option<i64>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> anyhow::Result<AgentApiKey> {
         let client = self.pool.get().await?;
 
@@ -758,7 +758,7 @@ impl AgentRepository for PostgresAgentRepository {
         key_hash: String,
         name: String,
         spend_limit: Option<i64>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> anyhow::Result<AgentApiKey> {
         tracing::debug!("Creating unbound API key in DB: user_id={}", user_id);
 
@@ -960,8 +960,8 @@ impl AgentRepository for PostgresAgentRepository {
     async fn get_instance_usage(
         &self,
         instance_id: Uuid,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
+        start_date: Option<Timestamp>,
+        end_date: Option<Timestamp>,
         limit: i64,
         offset: i64,
     ) -> anyhow::Result<(Vec<UsageLogEntry>, i64)> {
@@ -1288,7 +1288,7 @@ impl AgentRepository for PostgresAgentRepository {
         offset: i64,
     ) -> anyhow::Result<(
         Vec<AgentInstance>,
-        std::collections::HashMap<Uuid, DateTime<Utc>>,
+        std::collections::HashMap<Uuid, Timestamp>,
         i64,
     )> {
         let client = self.pool.get().await?;
@@ -1316,7 +1316,7 @@ impl AgentRepository for PostgresAgentRepository {
             .into_iter()
             .map(|r| -> anyhow::Result<_> {
                 let id: Uuid = r.get(0);
-                let last_usage: Option<DateTime<Utc>> = r.get(13);
+                let last_usage: Option<Timestamp> = r.get(13);
                 if let Some(ts) = last_usage {
                     usage_map.insert(id, ts);
                 }

@@ -1,7 +1,7 @@
 //! Analytics repository traits and data structures.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -89,7 +89,7 @@ pub struct CheckAndRecordActivityRequest {
     /// Optional metadata for the activity
     pub metadata: Option<serde_json::Value>,
     /// Duration of the time window for the sliding window rate limit
-    pub window_duration: Duration,
+    pub window_duration: SignedDuration,
     /// Maximum number of activities allowed in the window
     pub limit: u64,
 }
@@ -112,7 +112,7 @@ pub struct ActivityLogEntry {
     pub activity_type: String,
     pub auth_method: Option<String>,
     pub metadata: Option<serde_json::Value>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Summary of user metrics for a time period
@@ -149,8 +149,8 @@ pub struct ActivityMetricsSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AnalyticsSummary {
-    pub period_start: DateTime<Utc>,
-    pub period_end: DateTime<Utc>,
+    pub period_start: Timestamp,
+    pub period_end: Timestamp,
     pub user_metrics: UserMetricsSummary,
     pub activity_metrics: ActivityMetricsSummary,
     pub by_auth_method: Vec<AuthMethodBreakdown>,
@@ -163,15 +163,15 @@ pub struct TopActiveUser {
     pub user_id: UserId,
     pub email: String,
     pub activity_count: i64,
-    pub last_active: DateTime<Utc>,
+    pub last_active: Timestamp,
 }
 
 /// Response for top active users query
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct TopActiveUsersResponse {
-    pub period_start: DateTime<Utc>,
-    pub period_end: DateTime<Utc>,
+    pub period_start: Timestamp,
+    pub period_end: Timestamp,
     pub users: Vec<TopActiveUser>,
 }
 
@@ -193,24 +193,24 @@ pub trait AnalyticsRepository: Send + Sync {
         &self,
         user_id: UserId,
         activity_type: ActivityType,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> anyhow::Result<i64>;
 
     /// Get analytics summary for a time period
     async fn get_analytics_summary(
         &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
+        start: Timestamp,
+        end: Timestamp,
     ) -> anyhow::Result<AnalyticsSummary>;
 
     /// Get daily active users count
-    async fn get_daily_active_users(&self, date: DateTime<Utc>) -> anyhow::Result<i64>;
+    async fn get_daily_active_users(&self, date: Timestamp) -> anyhow::Result<i64>;
 
     /// Get weekly active users count (last 7 days from date)
-    async fn get_weekly_active_users(&self, date: DateTime<Utc>) -> anyhow::Result<i64>;
+    async fn get_weekly_active_users(&self, date: Timestamp) -> anyhow::Result<i64>;
 
     /// Get monthly active users count (last 30 days from date)
-    async fn get_monthly_active_users(&self, date: DateTime<Utc>) -> anyhow::Result<i64>;
+    async fn get_monthly_active_users(&self, date: Timestamp) -> anyhow::Result<i64>;
 
     /// Get activity history for a user
     async fn get_user_activity(
@@ -223,8 +223,8 @@ pub trait AnalyticsRepository: Send + Sync {
     /// Get top active users in a time period
     async fn get_top_active_users(
         &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
+        start: Timestamp,
+        end: Timestamp,
         limit: i64,
     ) -> anyhow::Result<Vec<TopActiveUser>>;
 }

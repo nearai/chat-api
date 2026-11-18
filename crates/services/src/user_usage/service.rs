@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 
 use crate::UserId;
 
@@ -52,7 +52,7 @@ impl UserUsageService for UserUsageServiceImpl {
     async fn get_token_usage_sum(
         &self,
         user_id: UserId,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> anyhow::Result<i64> {
         self.repo
             .get_token_usage_sum(user_id, window_duration)
@@ -62,7 +62,7 @@ impl UserUsageService for UserUsageServiceImpl {
     async fn get_cost_usage_sum(
         &self,
         user_id: UserId,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> anyhow::Result<i64> {
         self.repo.get_cost_usage_sum(user_id, window_duration).await
     }
@@ -70,8 +70,8 @@ impl UserUsageService for UserUsageServiceImpl {
     async fn get_usage_by_user_id(
         &self,
         user_id: UserId,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<Option<super::ports::UserUsageSummary>> {
         self.repo.get_usage_by_user_id(user_id, start, end).await
     }
@@ -79,8 +79,8 @@ impl UserUsageService for UserUsageServiceImpl {
     async fn get_instance_usage_summary(
         &self,
         instance_id: uuid::Uuid,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<InstanceUsageSummary> {
         self.repo
             .get_instance_usage_summary(instance_id, start, end)
@@ -91,8 +91,8 @@ impl UserUsageService for UserUsageServiceImpl {
         &self,
         limit: i64,
         rank_by: super::ports::UsageRankBy,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<Vec<super::ports::UserUsageSummary>> {
         self.repo
             .get_top_users_usage(limit, rank_by, start, end)

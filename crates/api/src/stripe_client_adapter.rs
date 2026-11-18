@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::Timestamp;
 use services::subscription::ports::{
     StripeCheckoutLineItemRef, StripeCheckoutSessionResult, StripeClientPort, StripeCustomerRef,
     StripePortalSessionResult, StripeSubscriptionSnapshot, SubscriptionError,
@@ -33,7 +33,7 @@ impl StripeClientPort for StripeClientAdapter {
         secret: &str,
     ) -> Result<(), SubscriptionError> {
         self.webhook_verifier
-            .verify(payload, signature, secret, Utc::now())
+            .verify(payload, signature, secret, Timestamp::now())
             .map(|_| ())
             .map_err(|e| SubscriptionError::WebhookVerificationFailed(e.to_string()))
     }

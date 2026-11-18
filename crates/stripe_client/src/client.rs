@@ -5,7 +5,7 @@ use crate::types::{
     StripeCustomerRef, StripeErrorResponse, StripePortalSession, StripeRetrieveCustomerResponse,
     StripeSubscriptionResponse, StripeSubscriptionSnapshot,
 };
-use chrono::DateTime;
+use jiff::Timestamp;
 use reqwest::header::AUTHORIZATION;
 use serde_json::Value;
 use std::time::Duration;
@@ -422,9 +422,8 @@ fn map_subscription(
         .ok_or(StripeClientError::InvalidResponse(
             "missing current_period_end on subscription and first item",
         ))?;
-    let current_period_end = DateTime::from_timestamp(current_period_end_ts, 0).ok_or(
-        StripeClientError::InvalidResponse("invalid current_period_end"),
-    )?;
+    let current_period_end = Timestamp::from_second(current_period_end_ts)
+        .map_err(|_| StripeClientError::InvalidResponse("invalid current_period_end"))?;
 
     Ok(StripeSubscriptionSnapshot {
         id: response.id,

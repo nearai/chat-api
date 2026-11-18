@@ -2,7 +2,6 @@ mod common;
 
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use async_trait::async_trait;
-use chrono::{Duration, TimeZone, Timelike, Utc};
 use common::{
     cleanup_user_agent_instances, cleanup_user_subscription_credits, cleanup_user_subscriptions,
     cleanup_user_usage, clear_subscription_plans, create_test_server, create_test_server_and_db,
@@ -11,6 +10,7 @@ use common::{
     TestServerConfig,
 };
 use hmac::Mac;
+use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 use serial_test::serial;
 use services::aml::{
@@ -47,7 +47,7 @@ fn permissive_rate_limit_config() -> RateLimitConfig {
     RateLimitConfig {
         max_concurrent: 100,
         max_requests_per_window: 10000,
-        window_duration: Duration::seconds(60),
+        window_duration: SignedDuration::from_secs(60),
         window_limits: vec![],
         token_window_limits: vec![],
         cost_window_limits: vec![],
@@ -97,7 +97,7 @@ struct StaticAmlReportRepository {
 #[async_trait]
 impl AmlReportRepository for StaticAmlReportRepository {
     async fn record_report(&self, event: AmlReportEvent) -> anyhow::Result<AmlReportRecord> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Ok(AmlReportRecord {
             id: Uuid::new_v4(),
             user_id: Some(event.user_id),
@@ -154,7 +154,7 @@ impl AmlReportRepository for StaticAmlReportRepository {
             account_id: account_id.to_string(),
             reason,
             created_by,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
     }
 
@@ -188,12 +188,12 @@ fn aml_result_with_score(
         risk_level,
         score,
         report_id: Some("report".to_string()),
-        checked_at: Utc::now(),
+        checked_at: Timestamp::now(),
         reason: reason.map(str::to_string),
     }
 }
 
-fn aml_report(result: AmlCheckResult, created_at: chrono::DateTime<Utc>) -> AmlReportRecord {
+fn aml_report(result: AmlCheckResult, created_at: jiff::Timestamp) -> AmlReportRecord {
     AmlReportRecord {
         id: Uuid::new_v4(),
         user_id: None,
@@ -226,7 +226,7 @@ async fn insert_house_of_stake_subscription_for_existing_user(
         .unwrap()
         .unwrap();
     let client = db.pool().get().await.unwrap();
-    let period_end = Utc::now() + Duration::days(1);
+    let period_end = Timestamp::now() + SignedDuration::from_hours(24);
     let sub_id = format!("sub_test_{}", Uuid::new_v4());
     client
         .execute(
@@ -808,10 +808,9 @@ async fn test_change_plan_downgrade_schedules_even_if_instance_limit_exceeded() 
 
     let target: Option<String> = row.get("pending_downgrade_target_price_id");
     let from: Option<String> = row.get("pending_downgrade_from_price_id");
-    let expected_end: Option<chrono::DateTime<chrono::Utc>> =
-        row.get("pending_downgrade_expected_period_end");
+    let expected_end: Option<jiff::Timestamp> = row.get("pending_downgrade_expected_period_end");
     let status: Option<String> = row.get("pending_downgrade_status");
-    let current_end: chrono::DateTime<chrono::Utc> = row.get("current_period_end");
+    let current_end: jiff::Timestamp = row.get("current_period_end");
 
     assert_eq!(target.as_deref(), Some("price_test_starter"));
     assert_eq!(from.as_deref(), Some("price_test_basic"));
@@ -895,8 +894,7 @@ async fn test_change_plan_upgrade_clears_pending_downgrade_before_stripe_update(
 
     let target: Option<String> = row.get("pending_downgrade_target_price_id");
     let from: Option<String> = row.get("pending_downgrade_from_price_id");
-    let expected_end: Option<chrono::DateTime<chrono::Utc>> =
-        row.get("pending_downgrade_expected_period_end");
+    let expected_end: Option<jiff::Timestamp> = row.get("pending_downgrade_expected_period_end");
     let status: Option<String> = row.get("pending_downgrade_status");
 
     assert!(
@@ -1015,7 +1013,7 @@ async fn test_webhook_accepts_when_any_v1_signature_matches() {
         "data": { "object": { "id": "sub_test_multi_v1" } }
     });
     let payload = webhook_payload.to_string();
-    let ts = chrono::Utc::now().timestamp();
+    let ts = jiff::Timestamp::now().as_second();
 
     let webhook_secret =
         std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_else(|_| "whsec_dummy".to_string());
@@ -1964,16 +1962,16 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
 #[serial(subscription_tests)]
 async fn test_proxy_blocks_for_house_of_stake_plan_credit_limit() {
     ensure_stripe_env_for_gating();
-    let now = Utc::now().with_nanosecond(0).unwrap();
-    let period_start = now - Duration::days(20);
-    let period_end = now + Duration::days(10);
+    let now = Timestamp::from_second(Timestamp::now().as_second()).unwrap();
+    let period_start = now - SignedDuration::from_hours(20 * 24);
+    let period_end = now + SignedDuration::from_hours(10 * 24);
     let subscription_id = format!("sub_chain_hos_proxy_limit_{}", Uuid::new_v4());
     let chain_sub = json!({
         "subscription_id": subscription_id,
         "price_id": "price_hos_basic",
         "last_lock_id": "lock_chain_hos_proxy_limit",
-        "start_ns": period_start.timestamp_nanos_opt().unwrap().to_string(),
-        "end_ns": period_end.timestamp_nanos_opt().unwrap().to_string(),
+        "start_ns": period_start.as_nanosecond().to_string(),
+        "end_ns": period_end.as_nanosecond().to_string(),
         "status": "Active",
         "cancel_at_period_end": false
     });
@@ -2644,10 +2642,10 @@ async fn last_cancelled_period_uses_most_recent_canceled_row() {
         .expect("user should exist");
 
     let client = db.pool().get().await.unwrap();
-    let older_row_period_end = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
-    let newer_row_period_end = Utc.with_ymd_and_hms(2026, 3, 19, 8, 0, 0).unwrap();
-    let older_updated_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-    let newer_updated_at = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
+    let older_row_period_end = "2026-05-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+    let newer_row_period_end = "2026-03-19T08:00:00Z".parse::<jiff::Timestamp>().unwrap();
+    let older_updated_at = "2026-01-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+    let newer_updated_at = "2026-01-02T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
 
     client
         .execute(
@@ -2698,10 +2696,10 @@ async fn last_cancelled_period_ignores_non_canceled_statuses() {
         .expect("user should exist");
 
     let client = db.pool().get().await.unwrap();
-    let canceled_end = Utc.with_ymd_and_hms(2026, 3, 19, 0, 0, 0).unwrap();
-    let active_end = Utc.with_ymd_and_hms(2027, 12, 31, 23, 59, 59).unwrap();
-    let incomplete_end = Utc.with_ymd_and_hms(2028, 1, 1, 0, 0, 0).unwrap();
-    let other_provider_canceled_end = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+    let canceled_end = "2026-03-19T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+    let active_end = "2027-12-31T23:59:59Z".parse::<jiff::Timestamp>().unwrap();
+    let incomplete_end = "2028-01-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+    let other_provider_canceled_end = "2030-01-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
 
     client
         .execute(
@@ -2819,7 +2817,7 @@ async fn active_to_canceled_transition_sets_free_plan_anchor() {
             .await
             .unwrap();
         let sid: String = row.get(0);
-        let new_end = Utc.with_ymd_and_hms(2026, 3, 22, 12, 0, 0).unwrap();
+        let new_end = "2026-03-22T12:00:00Z".parse::<jiff::Timestamp>().unwrap();
         client
             .execute(
                 "UPDATE subscriptions SET current_period_end = $2 WHERE subscription_id = $1",
@@ -2848,7 +2846,7 @@ async fn active_to_canceled_transition_sets_free_plan_anchor() {
         .await
         .unwrap();
 
-    let expected_end = Utc.with_ymd_and_hms(2026, 3, 22, 12, 0, 0).unwrap();
+    let expected_end = "2026-03-22T12:00:00Z".parse::<jiff::Timestamp>().unwrap();
     let got = db
         .subscription_repository()
         .last_cancelled_subscription_period_end_for_user(user.id)
@@ -3263,13 +3261,11 @@ async fn assert_house_of_stake_credits_for_effective_lock(
 ) {
     clear_proxy_env_for_local_wiremock();
     let chain_subscription_id = format!("sub_chain_hos_effective_credits_{}", Uuid::new_v4());
-    let period_start_ns = (Utc::now() - Duration::days(1))
-        .timestamp_nanos_opt()
-        .unwrap()
+    let period_start_ns = (Timestamp::now() - SignedDuration::from_hours(24))
+        .as_nanosecond()
         .to_string();
-    let period_end_ns = (Utc::now() + Duration::days(29))
-        .timestamp_nanos_opt()
-        .unwrap()
+    let period_end_ns = (Timestamp::now() + SignedDuration::from_hours(29 * 24))
+        .as_nanosecond()
         .to_string();
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -3453,16 +3449,16 @@ async fn test_house_of_stake_credits_zero_for_effective_lock_with_no_active_shar
 #[serial(subscription_tests)]
 async fn test_fixed_house_of_stake_renewal_refreshes_expired_local_period() {
     clear_proxy_env_for_local_wiremock();
-    let now = Utc::now().with_nanosecond(0).unwrap();
-    let period_start = now - Duration::days(20);
-    let period_end = now + Duration::days(10);
+    let now = Timestamp::from_second(Timestamp::now().as_second()).unwrap();
+    let period_start = now - SignedDuration::from_hours(20 * 24);
+    let period_end = now + SignedDuration::from_hours(10 * 24);
     let subscription_id = format!("sub_chain_hos_fixed_{}", Uuid::new_v4());
     let chain_sub = json!({
         "subscription_id": subscription_id,
         "price_id": "price_hos_starter",
         "last_lock_id": "lock_chain_hos_fixed",
-        "start_ns": period_start.timestamp_nanos_opt().unwrap().to_string(),
-        "end_ns": period_end.timestamp_nanos_opt().unwrap().to_string(),
+        "start_ns": period_start.as_nanosecond().to_string(),
+        "end_ns": period_end.as_nanosecond().to_string(),
         "status": "Active",
         "cancel_at_period_end": false
     });
@@ -3523,7 +3519,7 @@ async fn test_fixed_house_of_stake_renewal_refreshes_expired_local_period() {
         .unwrap()
         .unwrap();
     let client = db.pool().get().await.unwrap();
-    let stale_period_end = now - Duration::days(20);
+    let stale_period_end = now - SignedDuration::from_hours(20 * 24);
     client
         .execute(
             "UPDATE subscriptions
@@ -3559,11 +3555,11 @@ async fn test_fixed_house_of_stake_renewal_refreshes_expired_local_period() {
         .unwrap();
     assert_eq!(persisted.get::<_, String>("status"), "active");
     assert_eq!(
-        persisted.get::<_, Option<chrono::DateTime<Utc>>>("current_period_start"),
+        persisted.get::<_, Option<jiff::Timestamp>>("current_period_start"),
         Some(period_start)
     );
     assert_eq!(
-        persisted.get::<_, chrono::DateTime<Utc>>("current_period_end"),
+        persisted.get::<_, jiff::Timestamp>("current_period_end"),
         period_end
     );
     assert_eq!(mock.received_requests().await.unwrap().len(), 2);
@@ -3629,7 +3625,10 @@ async fn test_expired_house_of_stake_reconcile_failure_is_backed_off() {
     client
         .execute(
             "UPDATE subscriptions SET current_period_end = $2 WHERE user_id = $1",
-            &[&user.id, &(Utc::now() - Duration::days(1))],
+            &[
+                &user.id,
+                &(Timestamp::now() - SignedDuration::from_hours(24)),
+            ],
         )
         .await
         .unwrap();
@@ -3713,7 +3712,10 @@ async fn test_expired_house_of_stake_skipped_reconcile_is_canceled() {
     client
         .execute(
             "UPDATE subscriptions SET current_period_end = $2 WHERE user_id = $1",
-            &[&user.id, &(Utc::now() - Duration::days(1))],
+            &[
+                &user.id,
+                &(Timestamp::now() - SignedDuration::from_hours(24)),
+            ],
         )
         .await
         .unwrap();
@@ -4448,7 +4450,7 @@ async fn test_resume_subscription_provider_timeout_uses_older_migrated_legacy_sc
             None,
             None,
         ),
-        Utc::now() - Duration::hours(1),
+        Timestamp::now() - SignedDuration::from_hours(1),
     );
     // V36 reclassifies this untouched legacy UNKNOWN report as active because its score can
     // independently satisfy a newly configured threshold. A manually deactivated row remains
@@ -4460,7 +4462,7 @@ async fn test_resume_subscription_provider_timeout_uses_older_migrated_legacy_sc
             Some(99),
             Some("provider_invalid_response"),
         ),
-        Utc::now() - Duration::days(31),
+        Timestamp::now() - SignedDuration::from_hours(31 * 24),
     );
     let (server, db) = create_test_server_and_db(TestServerConfig {
         near_rpc_url: Some(mock.uri().to_string()),
@@ -4714,9 +4716,8 @@ async fn test_near_staking_sync_skipped_reason_when_upsert_blocked_by_active_str
 #[serial(subscription_tests)]
 async fn test_near_staking_sync_restores_expired_hos_history_when_active_stripe_exists() {
     clear_proxy_env_for_local_wiremock();
-    let past_ns = (Utc::now() - Duration::hours(1))
-        .timestamp_nanos_opt()
-        .expect("timestamp nanos")
+    let past_ns = (Timestamp::now() - SignedDuration::from_hours(1))
+        .as_nanosecond()
         .to_string();
     let chain_sub = json!({
         "subscription_id": "sub_on_chain_hos_expired_restore",
@@ -4815,7 +4816,7 @@ async fn test_near_staking_sync_restores_expired_hos_history_when_active_stripe_
         .await
         .expect("expired HoS history should be restored from chain");
     assert_eq!(row.get::<_, String>("status"), "canceled");
-    assert!(row.get::<_, chrono::DateTime<Utc>>("current_period_end") <= Utc::now());
+    assert!(row.get::<_, jiff::Timestamp>("current_period_end") <= Timestamp::now());
 
     let response = server
         .get("/v1/subscriptions?include_inactive=true")
@@ -4926,7 +4927,7 @@ async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null
         .unwrap();
     let cnt: i64 = row.get(0);
     let status: Option<String> = row.get(1);
-    let canceled_updated_at: Option<chrono::DateTime<Utc>> = row.get(2);
+    let canceled_updated_at: Option<jiff::Timestamp> = row.get(2);
     assert_eq!(cnt, 1, "HoS row should be preserved as history");
     assert_eq!(status.as_deref(), Some("canceled"));
 
@@ -4947,7 +4948,7 @@ async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null
     assert_eq!(subscriptions[0]["provider"], "house-of-stake");
     assert_eq!(subscriptions[0]["status"], "canceled");
 
-    let preserved_updated_at = Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap();
+    let preserved_updated_at = "2026-01-03T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
     client
         .execute(
             "UPDATE subscriptions SET updated_at = $1
@@ -4956,7 +4957,7 @@ async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null
         )
         .await
         .expect("seed stable canceled updated_at");
-    let updated_at_before_repeat_sync: chrono::DateTime<Utc> = client
+    let updated_at_before_repeat_sync: jiff::Timestamp = client
         .query_one(
             "SELECT updated_at FROM subscriptions
              WHERE user_id = $1 AND provider = 'house-of-stake'",
@@ -4983,7 +4984,7 @@ async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null
         "already-canceled HoS history should not be re-upserted"
     );
 
-    let updated_at: chrono::DateTime<Utc> = client
+    let updated_at: jiff::Timestamp = client
         .query_one(
             "SELECT updated_at FROM subscriptions
              WHERE user_id = $1 AND provider = 'house-of-stake'",
@@ -5006,14 +5007,14 @@ async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null
 #[serial(subscription_tests)]
 async fn test_near_staking_sync_falls_back_to_configured_prices_before_canceling_local_row() {
     clear_proxy_env_for_local_wiremock();
-    let period_start = Utc::now() - Duration::days(15);
-    let period_end = Utc::now() + Duration::days(15);
+    let period_start = Timestamp::now() - SignedDuration::from_hours(15 * 24);
+    let period_end = Timestamp::now() + SignedDuration::from_hours(15 * 24);
     let chain_sub = json!({
         "subscription_id": "sub_chain_hos_fallback",
         "price_id": "price_hos_pro",
         "last_lock_id": "lock_chain_hos_fixed_to_variable",
-        "start_ns": period_start.timestamp_nanos_opt().unwrap().to_string(),
-        "end_ns": period_end.timestamp_nanos_opt().unwrap().to_string(),
+        "start_ns": period_start.as_nanosecond().to_string(),
+        "end_ns": period_end.as_nanosecond().to_string(),
         "status": "Active",
         "cancel_at_period_end": false
     });
@@ -5150,15 +5151,13 @@ async fn test_near_staking_sync_falls_back_to_configured_prices_before_canceling
         snapshot.get::<_, String>("last_observed_stake_yocto"),
         "15000000000000000000000000"
     );
-    let snapshot_start: chrono::DateTime<Utc> = snapshot.get("period_start");
-    let snapshot_end: chrono::DateTime<Utc> = snapshot.get("period_end");
-    let observed_at: chrono::DateTime<Utc> = snapshot.get("observed_at");
-    let total_seconds = snapshot_end
-        .signed_duration_since(snapshot_start)
-        .num_seconds() as i128;
+    let snapshot_start: jiff::Timestamp = snapshot.get("period_start");
+    let snapshot_end: jiff::Timestamp = snapshot.get("period_end");
+    let observed_at: jiff::Timestamp = snapshot.get("observed_at");
+    let total_seconds = snapshot_end.duration_since(snapshot_start).as_secs() as i128;
     let remaining_seconds = snapshot_end
-        .signed_duration_since(observed_at)
-        .num_seconds()
+        .duration_since(observed_at)
+        .as_secs()
         .clamp(0, total_seconds as i64) as i128;
     let expected_limit =
         5_000_000_000_i128 + 10_000_000_000_i128 * remaining_seconds / total_seconds;
@@ -5196,13 +5195,13 @@ async fn test_near_staking_sync_falls_back_to_configured_prices_before_canceling
     assert_eq!(
         hos.get("period_start")
             .and_then(|x| x.as_str())
-            .and_then(|x| x.parse::<chrono::DateTime<Utc>>().ok()),
+            .and_then(|x| x.parse::<jiff::Timestamp>().ok()),
         Some(snapshot_start)
     );
     assert_eq!(
         hos.get("period_end")
             .and_then(|x| x.as_str())
-            .and_then(|x| x.parse::<chrono::DateTime<Utc>>().ok()),
+            .and_then(|x| x.parse::<jiff::Timestamp>().ok()),
         Some(snapshot_end)
     );
 }
@@ -5211,7 +5210,7 @@ async fn test_near_staking_sync_falls_back_to_configured_prices_before_canceling
 #[serial(subscription_tests)]
 async fn test_near_staking_sync_keeps_fixed_plan_when_credit_floor_seed_fails() {
     clear_proxy_env_for_local_wiremock();
-    let period_end = Utc::now() + Duration::days(15);
+    let period_end = Timestamp::now() + SignedDuration::from_hours(15 * 24);
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
@@ -5221,7 +5220,7 @@ async fn test_near_staking_sync_keeps_fixed_plan_when_credit_floor_seed_fails() 
                 "subscription_id": "sub_chain_hos_floor_seed_failure",
                 "price_id": "price_hos_pro",
                 "last_lock_id": "lock_chain_hos_floor_seed_failure",
-                "end_ns": period_end.timestamp_nanos_opt().unwrap().to_string(),
+                "end_ns": period_end.as_nanosecond().to_string(),
                 "status": "Active",
                 "cancel_at_period_end": false
             }),
@@ -5318,9 +5317,8 @@ async fn test_near_staking_sync_keeps_fixed_plan_when_credit_floor_seed_fails() 
 #[serial(subscription_tests)]
 async fn test_near_staking_sync_prefers_active_chain_subscription_over_expired() {
     clear_proxy_env_for_local_wiremock();
-    let past_ns = (Utc::now() - Duration::hours(1))
-        .timestamp_nanos_opt()
-        .expect("timestamp nanos")
+    let past_ns = (Timestamp::now() - SignedDuration::from_hours(1))
+        .as_nanosecond()
         .to_string();
     let expired_basic = json!({
         "subscription_id": "sub_chain_hos_expired_basic",
@@ -5418,11 +5416,11 @@ async fn test_near_staking_sync_prefers_active_chain_subscription_over_expired()
 #[serial(subscription_tests)]
 async fn test_expired_house_of_stake_reconcile_does_not_cancel_from_partial_probe() {
     clear_proxy_env_for_local_wiremock();
-    let expired_end = Utc::now() - Duration::hours(1);
+    let expired_end = Timestamp::now() - SignedDuration::from_hours(1);
     let expired_basic = json!({
         "subscription_id": "sub_chain_hos_expired_basic_partial",
         "price_id": "price_hos_basic",
-        "end_ns": expired_end.timestamp_nanos_opt().unwrap().to_string(),
+        "end_ns": expired_end.as_nanosecond().to_string(),
         "status": "Expired",
         "cancel_at_period_end": false
     });
@@ -5504,9 +5502,9 @@ async fn test_expired_house_of_stake_reconcile_does_not_cancel_from_partial_prob
         .unwrap();
     assert_eq!(row.get::<_, String>("status"), "active");
     assert_eq!(
-        row.get::<_, chrono::DateTime<Utc>>("current_period_end")
-            .timestamp_micros(),
-        expired_end.timestamp_micros()
+        row.get::<_, jiff::Timestamp>("current_period_end")
+            .as_microsecond(),
+        expired_end.as_microsecond()
     );
     // One successful basic-price probe plus five attempts for the failing pro price.
     assert_eq!(mock.received_requests().await.unwrap().len(), 6);
@@ -5568,8 +5566,8 @@ async fn test_near_staking_sync_cancels_active_stale_hos_and_preserves_canceled_
         .unwrap()
         .unwrap();
     let client = db.pool().get().await.unwrap();
-    let preserved_updated_at = Utc.with_ymd_and_hms(2026, 1, 4, 0, 0, 0).unwrap();
-    let period_end = Utc::now() + Duration::days(1);
+    let preserved_updated_at = "2026-01-04T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+    let period_end = Timestamp::now() + SignedDuration::from_hours(24);
     client
         .execute(
             "UPDATE subscriptions
@@ -5653,7 +5651,7 @@ async fn test_near_staking_sync_cancels_active_stale_hos_and_preserves_canceled_
         .find(|row| row.get::<_, String>("subscription_id") == "sub_local_hos_preserved_canceled")
         .expect("preserved canceled HoS row should remain");
     assert_eq!(
-        preserved_row.get::<_, chrono::DateTime<Utc>>("updated_at"),
+        preserved_row.get::<_, jiff::Timestamp>("updated_at"),
         preserved_updated_at,
         "sync must not re-touch already-canceled HoS history"
     );
@@ -5662,9 +5660,8 @@ async fn test_near_staking_sync_cancels_active_stale_hos_and_preserves_canceled_
 #[serial(subscription_tests)]
 async fn test_near_staking_sync_marks_expired_cancel_at_period_end_row_canceled() {
     clear_proxy_env_for_local_wiremock();
-    let past_ns = (Utc::now() - Duration::hours(1))
-        .timestamp_nanos_opt()
-        .expect("nanoseconds timestamp should be representable")
+    let past_ns = (Timestamp::now() - SignedDuration::from_hours(1))
+        .as_nanosecond()
         .to_string();
     let chain_sub = json!({
         "subscription_id": "sub_on_chain_hos_expired",
@@ -5844,7 +5841,7 @@ async fn test_near_staking_sync_clears_stale_pending_downgrade_fields() {
         .expect("load synced HoS row");
     let pd_target: Option<String> = row.get("pending_downgrade_target_price_id");
     let pd_from: Option<String> = row.get("pending_downgrade_from_price_id");
-    let pd_end: Option<chrono::DateTime<Utc>> = row.get("pending_downgrade_expected_period_end");
+    let pd_end: Option<jiff::Timestamp> = row.get("pending_downgrade_expected_period_end");
     let pd_status: Option<String> = row.get("pending_downgrade_status");
     assert!(
         pd_target.is_none() && pd_from.is_none() && pd_end.is_none() && pd_status.is_none(),

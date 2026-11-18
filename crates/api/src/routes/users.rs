@@ -5,7 +5,7 @@ use axum::{
     routing::{get, patch, post},
     Json, Router,
 };
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use services::logging::error_type;
 use services::tasks::{AccountDeletionTaskPayload, TaskId, TaskMessage, TaskPayload};
@@ -222,9 +222,9 @@ fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
 #[derive(Debug, Deserialize)]
 pub struct UsageTimeRangeQuery {
     /// Start of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
-    pub start: Option<DateTime<Utc>>,
+    pub start: Option<Timestamp>,
     /// End of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
-    pub end: Option<DateTime<Utc>>,
+    pub end: Option<Timestamp>,
 }
 
 /// Get current user's usage (all-time or within time range).
@@ -236,8 +236,8 @@ pub struct UsageTimeRangeQuery {
     path = "/v1/users/me/usage",
     tag = "Users",
     params(
-        ("start" = Option<DateTime<Utc>>, Query, description = "Start of time period (ISO 8601); use with end; interval [start, end)"),
-        ("end" = Option<DateTime<Utc>>, Query, description = "End of time period (ISO 8601); use with start; interval [start, end)")
+        ("start" = Option<Timestamp>, Query, description = "Start of time period (ISO 8601); use with end; interval [start, end)"),
+        ("end" = Option<Timestamp>, Query, description = "End of time period (ISO 8601); use with start; interval [start, end)")
     ),
     responses(
         (status = 200, description = "Current user usage", body = UserUsageResponse),

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -52,8 +52,8 @@ impl BiMetricsService for BiMetricsServiceImpl {
 
     async fn get_deployment_summary(
         &self,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
+        start_date: Option<Timestamp>,
+        end_date: Option<Timestamp>,
     ) -> anyhow::Result<DeploymentSummary> {
         self.repo.get_deployment_summary(start_date, end_date).await
     }

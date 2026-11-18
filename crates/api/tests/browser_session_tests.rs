@@ -150,10 +150,10 @@ async fn idle_deadline_is_enforced_without_background_extension() {
         .await
         .unwrap()
         .unwrap();
-    assert!(next.expires_at <= chrono::Utc::now() + chrono::Duration::minutes(1));
+    assert!(next.expires_at <= jiff::Timestamp::now() + jiff::SignedDuration::from_mins(1));
     assert_eq!(
-        next.absolute_expires_at.timestamp_micros(),
-        first.absolute_expires_at.timestamp_micros(),
+        next.absolute_expires_at.as_microsecond(),
+        first.absolute_expires_at.as_microsecond(),
     );
 
     client

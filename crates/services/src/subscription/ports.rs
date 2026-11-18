@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -56,21 +56,21 @@ pub struct Subscription {
     pub customer_id: String,
     pub price_id: String,
     pub status: String,
-    pub current_period_start: Option<DateTime<Utc>>,
-    pub current_period_end: DateTime<Utc>,
+    pub current_period_start: Option<Timestamp>,
+    pub current_period_end: Timestamp,
     pub cancel_at_period_end: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     /// Target price_id for a deferred downgrade intent.
     pub pending_downgrade_target_price_id: Option<String>,
     /// Snapshot of current price_id when the downgrade intent was created.
     pub pending_downgrade_from_price_id: Option<String>,
     /// Snapshot of current_period_end when the downgrade intent was created.
-    pub pending_downgrade_expected_period_end: Option<DateTime<Utc>>,
+    pub pending_downgrade_expected_period_end: Option<Timestamp>,
     /// Last downgrade intent status.
     pub pending_downgrade_status: Option<DowngradeIntentStatus>,
     /// Timestamp when the downgrade intent was last changed.
-    pub pending_downgrade_updated_at: Option<DateTime<Utc>>,
+    pub pending_downgrade_updated_at: Option<Timestamp>,
 }
 
 /// API response model with plan name resolved from `price_id` (HoS clients use `price_id` + `provider` for wallet flows).
@@ -83,10 +83,10 @@ pub struct SubscriptionWithPlan {
     pub price_id: String,
     pub plan: String, // Resolved from price_id
     pub status: String,
-    pub current_period_end: DateTime<Utc>,
+    pub current_period_end: Timestamp,
     pub cancel_at_period_end: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     /// Target plan name for a pending downgrade (resolved from price_id)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_downgrade_plan: Option<String>,
@@ -95,14 +95,14 @@ pub struct SubscriptionWithPlan {
     pub pending_downgrade_status: Option<DowngradeIntentStatus>,
     /// Expected period end when the downgrade will be checked
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_downgrade_period_end: Option<DateTime<Utc>>,
+    pub pending_downgrade_period_end: Option<Timestamp>,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillingPeriod {
-    pub start_at: DateTime<Utc>,
-    pub end_at: DateTime<Utc>,
+    pub start_at: Timestamp,
+    pub end_at: Timestamp,
 }
 
 /// Result of a plan-change request.
@@ -324,8 +324,8 @@ pub struct NearStakingSyncSummary {
 pub struct StripeCustomer {
     pub user_id: UserId,
     pub customer_id: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// Payment webhook event data
@@ -335,7 +335,7 @@ pub struct PaymentWebhook {
     pub provider: String,
     pub event_id: String,
     pub payload: serde_json::Value,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Result of storing a webhook event, with idempotency flag
@@ -582,7 +582,7 @@ pub struct StripeSubscriptionSnapshot {
     pub customer_id: String,
     pub price_id: String,
     pub status: String,
-    pub current_period_end: DateTime<Utc>,
+    pub current_period_end: Timestamp,
     pub cancel_at_period_end: bool,
     pub first_item_id: String,
 }
@@ -719,7 +719,7 @@ pub trait SubscriptionRepository: Send + Sync {
     async fn last_cancelled_subscription_period_end_for_user(
         &self,
         user_id: UserId,
-    ) -> anyhow::Result<Option<DateTime<Utc>>>;
+    ) -> anyhow::Result<Option<Timestamp>>;
 
     /// List subscriptions with pagination, optionally filtered by user_id.
     /// Returns (items, total_count).
@@ -775,7 +775,7 @@ pub struct CreditTransaction {
     pub r#type: String,
     /// Optional external reference (e.g. Stripe session id or admin reason).
     pub reference_id: Option<String>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[async_trait]
@@ -825,8 +825,8 @@ pub trait CreditsRepository: Send + Sync {
         &self,
         user_id: UserId,
         plan_credits_nano_usd: i64,
-        period_start: chrono::DateTime<chrono::Utc>,
-        period_end: chrono::DateTime<chrono::Utc>,
+        period_start: jiff::Timestamp,
+        period_end: jiff::Timestamp,
     ) -> anyhow::Result<()>;
 }
 
@@ -1310,7 +1310,7 @@ pub struct HouseOfStakeCreditSnapshot {
     pub last_observed_stake_yocto: String,
     /// Earned current-period limit retained by the snapshot, including while effective stake is zero.
     pub credit_limit_nano_usd: i64,
-    pub period_start: DateTime<Utc>,
-    pub period_end: DateTime<Utc>,
-    pub observed_at: DateTime<Utc>,
+    pub period_start: Timestamp,
+    pub period_end: Timestamp,
+    pub observed_at: Timestamp,
 }

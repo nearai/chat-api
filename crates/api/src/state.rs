@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -7,7 +7,7 @@ use url::Url;
 /// Cached NEAR balance entry for a given account
 #[derive(Debug, Clone)]
 pub struct NearBalanceCacheEntry {
-    pub last_checked_at: DateTime<Utc>,
+    pub last_checked_at: Timestamp,
     pub balance: u128,
 }
 
@@ -17,7 +17,7 @@ pub type NearBalanceCache = Arc<RwLock<HashMap<String, NearBalanceCacheEntry>>>;
 /// Cached model settings entry for a given model_id
 #[derive(Debug, Clone)]
 pub struct ModelSettingsCacheEntry {
-    pub last_checked_at: DateTime<Utc>,
+    pub last_checked_at: Timestamp,
     /// Whether the model exists in the admin models table
     pub exists: bool,
     /// Whether this model is public (visible/usable in responses)
@@ -32,7 +32,7 @@ pub type ModelSettingsCache = Arc<RwLock<HashMap<String, ModelSettingsCacheEntry
 /// Cached system configs entry (single global value)
 #[derive(Debug, Clone)]
 pub struct SystemConfigsCacheEntry {
-    pub last_checked_at: DateTime<Utc>,
+    pub last_checked_at: Timestamp,
     pub configs: Option<services::system_configs::ports::SystemConfigs>,
 }
 

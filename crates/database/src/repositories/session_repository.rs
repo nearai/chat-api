@@ -1,6 +1,6 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use services::{
     auth::ports::{SessionRepository, UserSession},
     SessionId, UserId,
@@ -35,13 +35,13 @@ impl SessionRepository for PostgresSessionRepository {
 
         let client = self.pool.get().await?;
 
-        let created_at = Utc::now();
+        let created_at = Timestamp::now();
         // During rollout, legacy consumers retain their existing lifetime.
         let expires_at = created_at
             + if config::enforce_short_sessions() {
-                Duration::minutes(15)
+                SignedDuration::from_mins(15)
             } else {
-                Duration::days(30)
+                SignedDuration::from_hours(30 * 24)
             };
 
         tracing::debug!("Session expiry set to: {}", expires_at);

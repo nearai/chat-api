@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use axum::{routing::get, Json, Router};
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::Serialize;
 use services::conversation::ports::ConversationService;
 use services::logging::error_type;
@@ -87,7 +87,7 @@ impl TaskExecutor for DefaultTaskExecutor {
             payload.dry_run
         );
 
-        let cutoff = Utc::now() - Duration::days(payload.grace_days);
+        let cutoff = Timestamp::now() - SignedDuration::from_hours((payload.grace_days) * 24);
         let mut offset: i64 = 0;
         let batch_size: i64 = 200;
         let mut total_users = 0usize;

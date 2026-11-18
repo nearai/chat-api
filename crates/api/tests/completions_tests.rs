@@ -5,13 +5,13 @@ use api::routes::api::{
     USER_BANNED_ERROR_MESSAGE,
 };
 use axum_test::TestServer;
-use chrono::Duration;
 use common::{
     clear_subscription_plans, create_test_server, create_test_server_and_db,
     create_test_server_with_config, insert_test_subscription, mock_login,
     restrictive_rate_limit_config, set_subscription_plans, TestServerConfig,
 };
 use futures::future::join_all;
+use jiff::SignedDuration;
 use serde_json::json;
 use serial_test::serial;
 use services::system_configs::ports::{RateLimitConfig, WindowLimit};
@@ -238,10 +238,10 @@ async fn test_chat_completions_token_limit_blocks_request_when_usage_exceeds_lim
         rate_limit_config: Some(RateLimitConfig {
             max_concurrent: 10,
             max_requests_per_window: 100,
-            window_duration: Duration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![],
             token_window_limits: vec![WindowLimit {
-                window_duration: Duration::seconds(60),
+                window_duration: SignedDuration::from_secs(60),
                 limit: 100,
             }],
             cost_window_limits: vec![],
@@ -297,11 +297,11 @@ async fn test_chat_completions_cost_limit_blocks_request_when_usage_exceeds_limi
         rate_limit_config: Some(RateLimitConfig {
             max_concurrent: 10,
             max_requests_per_window: 100,
-            window_duration: Duration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![],
             token_window_limits: vec![],
             cost_window_limits: vec![WindowLimit {
-                window_duration: Duration::seconds(60),
+                window_duration: SignedDuration::from_secs(60),
                 limit: 1_000,
             }],
         }),
@@ -601,10 +601,10 @@ async fn test_image_generations_token_limit_blocks_request_when_usage_exceeds_li
         rate_limit_config: Some(RateLimitConfig {
             max_concurrent: 10,
             max_requests_per_window: 100,
-            window_duration: Duration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![],
             token_window_limits: vec![WindowLimit {
-                window_duration: Duration::seconds(60),
+                window_duration: SignedDuration::from_secs(60),
                 limit: 100,
             }],
             cost_window_limits: vec![],
@@ -661,11 +661,11 @@ async fn test_image_generations_cost_limit_blocks_request_when_usage_exceeds_lim
         rate_limit_config: Some(RateLimitConfig {
             max_concurrent: 10,
             max_requests_per_window: 100,
-            window_duration: Duration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![],
             token_window_limits: vec![],
             cost_window_limits: vec![WindowLimit {
-                window_duration: Duration::seconds(60),
+                window_duration: SignedDuration::from_secs(60),
                 limit: 1_000,
             }],
         }),
@@ -829,10 +829,10 @@ async fn test_image_edits_token_limit_blocks_request_when_usage_exceeds_limit() 
         rate_limit_config: Some(RateLimitConfig {
             max_concurrent: 10,
             max_requests_per_window: 100,
-            window_duration: Duration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![],
             token_window_limits: vec![WindowLimit {
-                window_duration: Duration::seconds(60),
+                window_duration: SignedDuration::from_secs(60),
                 limit: 100,
             }],
             cost_window_limits: vec![],
@@ -888,11 +888,11 @@ async fn test_image_edits_cost_limit_blocks_request_when_usage_exceeds_limit() {
         rate_limit_config: Some(RateLimitConfig {
             max_concurrent: 10,
             max_requests_per_window: 100,
-            window_duration: Duration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![],
             token_window_limits: vec![],
             cost_window_limits: vec![WindowLimit {
-                window_duration: Duration::seconds(60),
+                window_duration: SignedDuration::from_secs(60),
                 limit: 1_000,
             }],
         }),
