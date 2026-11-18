@@ -534,7 +534,7 @@ pub async fn create_api_key(
     // Parse expiration if provided
     let expires_at = if let Some(expires_str) = request.expires_at {
         Some(
-            services::timestamps::parse_rfc3339(&expires_str)
+            services::timestamps::parse_timestamp(&expires_str)
                 .ok_or_else(|| ApiError::bad_request("Invalid expiration timestamp format"))?,
         )
     } else {
@@ -706,7 +706,7 @@ pub async fn get_instance_usage(
     // Parse optional date parameters
     let start_date = if let Some(start_str) = params.start_date {
         Some(
-            services::timestamps::parse_rfc3339(&start_str)
+            services::timestamps::parse_timestamp(&start_str)
                 .ok_or_else(|| ApiError::bad_request("Invalid start_date format"))?,
         )
     } else {
@@ -715,7 +715,7 @@ pub async fn get_instance_usage(
 
     let end_date = if let Some(end_str) = params.end_date {
         Some(
-            services::timestamps::parse_rfc3339(&end_str)
+            services::timestamps::parse_timestamp(&end_str)
                 .ok_or_else(|| ApiError::bad_request("Invalid end_date format"))?,
         )
     } else {

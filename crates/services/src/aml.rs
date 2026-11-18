@@ -826,7 +826,7 @@ fn normalize_lukka_response(
     let checked_at = report
         .as_ref()
         .and_then(|r| r.report_time.as_deref())
-        .and_then(crate::timestamps::parse_rfc3339)
+        .and_then(crate::timestamps::parse_timestamp)
         .unwrap_or_else(Timestamp::now);
 
     AmlCheckResult {
@@ -870,7 +870,7 @@ fn unknown_lukka_response(
         result.checked_at = report
             .report_time
             .as_deref()
-            .and_then(crate::timestamps::parse_rfc3339)
+            .and_then(crate::timestamps::parse_timestamp)
             .unwrap_or(result.checked_at);
     }
     result.score = cscore.and_then(|section| section.cscore);

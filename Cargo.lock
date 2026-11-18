@@ -4265,7 +4265,6 @@ dependencies = [
  "sha2 0.10.9",
  "stripe_client",
  "thiserror 2.0.21",
- "time",
  "tokio",
  "tokio-postgres",
  "tokio-stream",
