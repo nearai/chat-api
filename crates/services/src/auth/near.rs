@@ -166,31 +166,7 @@ impl NearAuthService {
             return Ok((user_id, false));
         }
 
-        // Create new user with NEAR account ID as email placeholder
-        // NEAR accounts don't have emails, so we use account_id@near as placeholder
-        let placeholder_email = format!("{}@near", account_id);
-
-        tracing::info!("No existing user found, creating new user for NEAR account");
-
-        let user = self
-            .user_repository
-            .create_user(
-                placeholder_email,
-                Some(account_id.to_string()), // Use account ID as name
-                None,
-            )
-            .await?;
-
-        tracing::info!("Created new user: user_id={}", user.id);
-
-        // Link the NEAR account
-        self.user_repository
-            .link_oauth_account(user.id, OAuthProvider::Near, account_id.to_string())
-            .await?;
-
-        tracing::info!("Successfully linked NEAR account to user_id={}", user.id);
-
-        Ok((user.id, true))
+        Err(super::ports::SignupsClosed.into())
     }
 
     pub async fn verify_and_authenticate(

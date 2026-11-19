@@ -358,6 +358,10 @@ async fn test_email_auth_normalizes_email_case_across_request_and_verify() {
     let mixed_case_email = normalized_email.to_uppercase();
     let ip = unique_ip();
     cleanup_email_auth_state(&db, &normalized_email).await;
+    db.user_repository()
+        .create_user(normalized_email.clone(), None, None)
+        .await
+        .unwrap();
 
     let request_response = request_email_code(&server, &mixed_case_email, &ip).await;
     assert_eq!(request_response.status_code(), 204);
@@ -399,6 +403,10 @@ async fn test_request_email_code_invalidates_previous_challenge() {
     let email = unique_email("email-auth-resend");
     let ip = unique_ip();
     cleanup_email_auth_state(&db, &email).await;
+    db.user_repository()
+        .create_user(email.clone(), None, None)
+        .await
+        .unwrap();
 
     let first = request_email_code(&server, &email, &ip).await;
     assert_eq!(first.status_code(), 204);
@@ -470,6 +478,10 @@ async fn test_verify_email_code_cannot_be_replayed() {
     let email = unique_email("email-auth-replay");
     let ip = unique_ip();
     cleanup_email_auth_state(&db, &email).await;
+    db.user_repository()
+        .create_user(email.clone(), None, None)
+        .await
+        .unwrap();
 
     let request_response = request_email_code(&server, &email, &ip).await;
     assert_eq!(request_response.status_code(), 204);
@@ -866,6 +878,10 @@ async fn test_concurrent_verify_only_allows_one_success() {
     let email = unique_email("email-auth-concurrent");
     let ip = unique_ip();
     cleanup_email_auth_state(&db, &email).await;
+    db.user_repository()
+        .create_user(email.clone(), None, None)
+        .await
+        .unwrap();
 
     let request_response = request_email_code(&server, &email, &ip).await;
     assert_eq!(request_response.status_code(), 204);
@@ -917,4 +933,54 @@ async fn test_concurrent_verify_only_allows_one_success() {
         .expect("count active sessions");
     let session_count: i64 = row.get(0);
     assert_eq!(session_count, 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_registration_restriction_preserves_existing_email_login() {
+    let resend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "id": "email_registration" })),
+        )
+        .mount(&resend)
+        .await;
+    mount_turnstile_success(&resend).await;
+    set_email_auth_env();
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        email_resend_base_url: Some(resend.uri()),
+        email_auth_enabled: Some(true),
+        ..Default::default()
+    })
+    .await;
+
+    let existing = unique_email("registration-existing");
+    let new = unique_email("registration-new");
+    let users = db.user_repository();
+    users
+        .create_user(existing.clone(), None, None)
+        .await
+        .unwrap();
+
+    for (email, exists) in [(&existing, true), (&new, false)] {
+        let ip = unique_ip();
+        assert_eq!(
+            request_email_code(&server, email, &ip).await.status_code(),
+            204
+        );
+        set_latest_challenge_code(&db, email, "123456").await;
+
+        let response = verify_email_code(&server, email, "123456", &ip).await;
+        let body = response.json::<serde_json::Value>();
+        if exists {
+            response.assert_status_ok();
+            assert_eq!(body["is_new_user"], false);
+        } else {
+            response.assert_status_forbidden();
+            assert_eq!(body["code"], "service_signups_closed");
+            assert!(users.get_user_by_email(email).await.unwrap().is_none());
+        }
+    }
 }

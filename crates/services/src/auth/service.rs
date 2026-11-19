@@ -294,37 +294,7 @@ impl OAuthServiceImpl {
 
             (existing_user.id, false)
         } else {
-            match self
-                .user_repository
-                .create_user(
-                    user_info.email.clone(),
-                    user_info.name.clone(),
-                    user_info.avatar_url.clone(),
-                )
-                .await
-            {
-                Ok(user) => (user.id, true),
-                Err(create_err) => {
-                    // Race: another request created this email concurrently.
-                    // Only merge if the OAuth email is verified — unverified emails
-                    // must not silently take over an existing account.
-                    if let Some(existing_user) = self
-                        .user_repository
-                        .get_user_by_email(&user_info.email)
-                        .await?
-                    {
-                        if user_info.email_verified {
-                            (existing_user.id, false)
-                        } else {
-                            // Email already taken by another account; refuse to merge.
-                            // The real account holder should use their original auth path.
-                            return Err(create_err);
-                        }
-                    } else {
-                        return Err(create_err);
-                    }
-                }
-            }
+            return Err(super::ports::SignupsClosed.into());
         };
 
         if let Err(link_err) = self
@@ -422,7 +392,18 @@ impl OAuthServiceImpl {
             }
         };
 
-        let (user_id, is_new_user) = self.find_or_create_user_from_oauth(&user_info).await?;
+        let (user_id, is_new_user) = self
+            .find_or_create_user_from_oauth(&user_info)
+            .await
+            .map_err(|error| {
+                if error.is::<super::ports::SignupsClosed>() {
+                    error.context(super::ports::OAuthSignupClosed {
+                        frontend_callback: oauth_state.frontend_callback.clone(),
+                    })
+                } else {
+                    error
+                }
+            })?;
 
         let oauth_tokens = OAuthTokens {
             access_token: access_token.to_string(),
@@ -528,20 +509,7 @@ impl EmailAuthServiceImpl {
             return Ok((existing_user.id, false));
         }
 
-        match self
-            .user_repository
-            .create_user(email.to_string(), None, None)
-            .await
-        {
-            Ok(user) => Ok((user.id, true)),
-            Err(create_err) => {
-                if let Some(existing_user) = self.user_repository.get_user_by_email(email).await? {
-                    Ok((existing_user.id, false))
-                } else {
-                    Err(create_err)
-                }
-            }
-        }
+        Err(super::ports::SignupsClosed.into())
     }
 
     fn generate_verification_code(&self) -> String {
