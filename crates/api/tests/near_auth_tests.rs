@@ -32,27 +32,34 @@ async fn near_auth_returns_bad_request_for_over_long_public_key() {
 }
 
 #[tokio::test]
-async fn near_login_preserves_existing_users_and_rejects_new_accounts() {
+async fn near_login_supports_existing_and_new_accounts() {
     use common::{create_test_server_and_db, TestServerConfig};
     use near_kit::{signer::SecretKey, standards::nep413};
     use services::{
-        auth::{
-            near::{NearAuthService, SignedMessage},
-            ports::SignupsClosed,
-        },
+        auth::near::{NearAuthService, SignedMessage},
         user::ports::{OAuthProvider, UserRepository},
     };
     use uuid::Uuid;
     use wiremock::{matchers::body_partial_json, Mock, MockServer, ResponseTemplate};
 
     let rpc = MockServer::start().await;
-    Mock::given(body_partial_json(json!({"method":"EXPERIMENTAL_view_access_key"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "jsonrpc":"2.0", "id":1,
-            "result":{"block_hash":"11111111111111111111111111111111","block_height":1,"nonce":0,"permission":"FullAccess"}
-        })))
-        .expect(2)
-        .mount(&rpc).await;
+    Mock::given(body_partial_json(json!({
+        "method": "EXPERIMENTAL_view_access_key"
+    })))
+    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "block_hash": "11111111111111111111111111111111",
+            "block_height": 1,
+            "nonce": 0,
+            "permission": "FullAccess"
+        }
+    })))
+    .expect(2)
+    .mount(&rpc)
+    .await;
+
     let (_, db) = create_test_server_and_db(TestServerConfig::default()).await;
     let auth = NearAuthService::new(
         db.session_repository(),
@@ -60,7 +67,9 @@ async fn near_login_preserves_existing_users_and_rejects_new_accounts() {
         db.near_nonce_repository(),
         rpc.uri().parse().unwrap(),
     );
+
     let key = SecretKey::ed25519_from_bytes([37; 32]);
+
     for existing in [false, true] {
         let account = format!("registration-{}.testnet", Uuid::new_v4().simple());
         let email = format!("{account}@near");
@@ -91,19 +100,25 @@ async fn near_login_preserves_existing_users_and_rejects_new_accounts() {
             signature: key.sign(nep413::serialize_message(&payload).as_bytes()),
             state: None,
         };
+
         let result = auth.verify_and_authenticate(message, payload).await;
+
         if let Some(user) = user {
             let (session, is_new) = result.unwrap();
+
             assert_eq!(session.user_id, user.id);
             assert!(!is_new);
         } else {
-            assert!(result.unwrap_err().is::<SignupsClosed>());
-            assert!(db
+            let (session, is_new) = result.unwrap();
+            let created = db
                 .user_repository()
                 .get_user_by_email(&email)
                 .await
                 .unwrap()
-                .is_none());
+                .unwrap();
+
+            assert!(is_new);
+            assert_eq!(session.user_id, created.id);
         }
     }
 }

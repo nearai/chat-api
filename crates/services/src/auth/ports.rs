@@ -125,16 +125,6 @@ pub struct EmailAuthSuccess {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("New account registrations are closed")]
-pub struct SignupsClosed;
-
-#[derive(Debug, thiserror::Error)]
-#[error("OAuth signup is closed")]
-pub struct OAuthSignupClosed {
-    pub frontend_callback: Option<String>,
-}
-
-#[derive(Debug, thiserror::Error)]
 pub enum VerifyEmailCodeError {
     #[error("Email authentication is disabled")]
     Disabled,

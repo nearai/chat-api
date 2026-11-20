@@ -350,9 +350,10 @@ async fn test_create_subscription_requires_auth() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_closed_subscriptions_block_create_subscription_not_configured() {
+async fn test_create_subscription_not_configured() {
     let server = create_test_server().await;
 
+    // Ensure subscriptions are not configured
     clear_subscription_plans(&server).await;
 
     let user_email = "test_create_not_configured@example.com";
@@ -377,18 +378,20 @@ async fn test_closed_subscriptions_block_create_subscription_not_configured() {
         .json(&request_body)
         .await;
 
-    assert_eq!(response.status_code(), 403, "{}", response.text());
+    // Should return 503 when not configured
     assert_eq!(
-        response.json::<serde_json::Value>()["code"],
-        "service_subscriptions_closed"
+        response.status_code(),
+        503,
+        "Should return 503 when Stripe is not configured"
     );
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_closed_subscriptions_block_create_subscription_invalid_provider() {
+async fn test_create_subscription_invalid_provider() {
     let server = create_test_server().await;
 
+    // Configure subscription plans with Stripe provider
     set_subscription_plans(
         &server,
         json!({
@@ -421,18 +424,20 @@ async fn test_closed_subscriptions_block_create_subscription_invalid_provider() 
         .json(&request_body)
         .await;
 
-    assert_eq!(response.status_code(), 403, "{}", response.text());
+    // Should return 400 for unsupported provider
     assert_eq!(
-        response.json::<serde_json::Value>()["code"],
-        "service_subscriptions_closed"
+        response.status_code(),
+        400,
+        "Should return 400 for invalid/unsupported provider"
     );
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_closed_subscriptions_block_create_subscription_invalid_plan() {
+async fn test_create_subscription_invalid_plan() {
     let server = create_test_server().await;
 
+    // Configure subscription plans with Stripe provider
     set_subscription_plans(
         &server,
         json!({
@@ -464,16 +469,17 @@ async fn test_closed_subscriptions_block_create_subscription_invalid_plan() {
         .json(&request_body)
         .await;
 
-    assert_eq!(response.status_code(), 403, "{}", response.text());
+    // Should return 400 for invalid plan
     assert_eq!(
-        response.json::<serde_json::Value>()["code"],
-        "service_subscriptions_closed"
+        response.status_code(),
+        400,
+        "Should return 400 for invalid plan"
     );
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_closed_subscriptions_block_create_subscription_instance_limit_exceeded() {
+async fn test_create_subscription_instance_limit_exceeded() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
     ensure_stripe_env_for_gating();
 
@@ -486,6 +492,7 @@ async fn test_closed_subscriptions_block_create_subscription_instance_limit_exce
     )
     .await;
 
+    // User had Pro (5 instances), cancelled; instances remain. Resubscribing to Starter (max 1).
     let user_email = "test_create_instance_limit@example.com";
     let user_token = mock_login(&server, user_email).await;
     cleanup_user_subscriptions(&db, user_email).await;
@@ -511,10 +518,22 @@ async fn test_closed_subscriptions_block_create_subscription_instance_limit_exce
         .json(&request_body)
         .await;
 
-    assert_eq!(response.status_code(), 403, "{}", response.text());
     assert_eq!(
-        response.json::<serde_json::Value>()["code"],
-        "service_subscriptions_closed"
+        response.status_code(),
+        400,
+        "Should return 400 when instance count exceeds plan limit before checkout"
+    );
+
+    let body: serde_json::Value = response.json();
+    let message = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("detail").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    assert!(
+        message.contains("3") && message.contains("1"),
+        "Error message should include current (3) and max (1) instance counts, got: {}",
+        message
     );
 }
 
@@ -2860,7 +2879,8 @@ async fn active_to_canceled_transition_sets_free_plan_anchor() {
 // Test clock tests
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_closed_subscriptions_block_create_subscription_with_test_clock_disabled() {
+async fn test_create_subscription_with_test_clock_disabled() {
+    // Set to "false" BEFORE creating server - dotenvy won't overwrite existing vars
     std::env::set_var("STRIPE_TEST_CLOCK_ENABLED", "false");
 
     let server = create_test_server().await;
@@ -2897,10 +2917,19 @@ async fn test_closed_subscriptions_block_create_subscription_with_test_clock_dis
         .json(&request_body)
         .await;
 
-    assert_eq!(response.status_code(), 403, "{}", response.text());
+    // Should return 400 Bad Request when test_clock_id provided but feature disabled
     assert_eq!(
-        response.json::<serde_json::Value>()["code"],
-        "service_subscriptions_closed"
+        response.status_code(),
+        400,
+        "Should return 400 when test_clock_id provided but STRIPE_TEST_CLOCK_ENABLED is false"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error_msg = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error_msg.contains("Test clock feature is not enabled"),
+        "Error should mention test clock not enabled, got: {}",
+        error_msg
     );
 }
 
@@ -3794,7 +3823,7 @@ fn test_change_plan_outcome_unit_variants_preserve_legacy_string_shape() {
 }
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_closed_subscriptions_block_house_of_stake_subscription() {
+async fn test_create_subscription_house_of_stake_returns_flat_json() {
     clear_proxy_env_for_local_wiremock();
     let near_mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -3851,16 +3880,54 @@ async fn test_closed_subscriptions_block_house_of_stake_subscription() {
         }))
         .await;
 
-    assert_eq!(response.status_code(), 403, "{}", response.text());
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
     assert_eq!(
-        response.json::<serde_json::Value>()["code"],
-        "service_subscriptions_closed"
+        body.get("kind").and_then(|x| x.as_str()),
+        Some("house_of_stake")
     );
+    assert_eq!(
+        body.get("price_id").and_then(|x| x.as_str()),
+        Some("price_hos_basic")
+    );
+    assert_eq!(
+        body.get("contract_id").and_then(|x| x.as_str()),
+        Some("staking.testnet")
+    );
+    assert_eq!(
+        body.get("network_id").and_then(|x| x.as_str()),
+        Some("testnet")
+    );
+    assert_eq!(
+        body.get("attached_deposit_yocto").and_then(|x| x.as_str()),
+        Some("1000000000000000000000000")
+    );
+    assert_eq!(
+        body.pointer("/storage/method_name")
+            .and_then(|x| x.as_str()),
+        Some("storage_deposit")
+    );
+    assert_eq!(
+        body.pointer("/storage/required_deposit_yocto")
+            .and_then(|x| x.as_str()),
+        Some("1250000000000000000000")
+    );
+    assert!(body.pointer("/aml/checked_at").is_some());
+    assert_eq!(
+        body.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+        Some("UNKNOWN")
+    );
+    assert!(body.pointer("/aml/score").is_none());
+    assert!(body.pointer("/aml/report_id").is_none());
+    assert!(body.pointer("/aml/reason").is_none());
+    assert!(body.pointer("/aml/provider").is_none());
+    assert!(body.pointer("/aml/account_id").is_none());
+    assert!(body.pointer("/aml/address_type").is_none());
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_closed_subscriptions_block_create_subscription_house_of_stake_requires_near_wallet() {
+async fn test_create_subscription_house_of_stake_requires_near_wallet() {
     let (server, _) = create_test_server_and_db(TestServerConfig {
         near_staking_contract_id: Some("staking.testnet".to_string()),
         ..Default::default()
@@ -3896,11 +3963,7 @@ async fn test_closed_subscriptions_block_create_subscription_house_of_stake_requ
         }))
         .await;
 
-    assert_eq!(response.status_code(), 403, "{}", response.text());
-    assert_eq!(
-        response.json::<serde_json::Value>()["code"],
-        "service_subscriptions_closed"
-    );
+    assert_eq!(response.status_code(), 403);
 }
 
 #[tokio::test]

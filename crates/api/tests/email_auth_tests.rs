@@ -937,7 +937,7 @@ async fn test_concurrent_verify_only_allows_one_success() {
 
 #[tokio::test]
 #[serial]
-async fn test_registration_restriction_preserves_existing_email_login() {
+async fn test_email_signup_and_existing_login_remain_available() {
     let resend = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/emails"))
@@ -974,13 +974,8 @@ async fn test_registration_restriction_preserves_existing_email_login() {
 
         let response = verify_email_code(&server, email, "123456", &ip).await;
         let body = response.json::<serde_json::Value>();
-        if exists {
-            response.assert_status_ok();
-            assert_eq!(body["is_new_user"], false);
-        } else {
-            response.assert_status_forbidden();
-            assert_eq!(body["code"], "service_signups_closed");
-            assert!(users.get_user_by_email(email).await.unwrap().is_none());
-        }
+        response.assert_status_ok();
+        assert_eq!(body["is_new_user"], !exists);
+        assert!(users.get_user_by_email(email).await.unwrap().is_some());
     }
 }

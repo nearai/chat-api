@@ -254,7 +254,7 @@ pub struct CreatePortalSessionResponse {
         (status = 200, description = "Stripe: flat `{ \"checkout_url\": \"...\" }`. HoS: `{ \"kind\": \"house_of_stake\", \"contract_id\": \"...\", \"price_id\": \"...\", \"network_id\": \"...\" }`.", body = CreateSubscriptionResponse),
         (status = 400, description = "Invalid plan or bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "New subscriptions are closed", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "House-of-Stake requires a linked NEAR wallet", body = crate::error::ApiErrorResponse),
         (status = 409, description = "Active subscription already exists", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
         (status = 503, description = "Billing not configured (Stripe or House-of-Stake)", body = crate::error::ApiErrorResponse)
@@ -268,7 +268,6 @@ pub async fn create_subscription(
     Extension(user): Extension<AuthenticatedUser>,
     Json(req): Json<CreateSubscriptionRequest>,
 ) -> Result<Json<CreateSubscriptionResponse>, ApiError> {
-    super::service_restrictions::require_new_subscriptions_allowed()?;
     tracing::info!(
         "Creating subscription for user_id={}, provider={}, plan={}",
         user.user_id,

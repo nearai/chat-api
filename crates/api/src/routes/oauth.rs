@@ -168,15 +168,6 @@ fn build_oauth_frontend_code_redirect(
     code: &str,
     state: &str,
 ) -> Result<String, url::ParseError> {
-    let mut url = oauth_frontend_callback_url(frontend_callback_url)?;
-    url.query_pairs_mut()
-        .clear()
-        .append_pair("code", code)
-        .append_pair("state", state);
-    Ok(url.to_string())
-}
-
-fn oauth_frontend_callback_url(frontend_callback_url: &str) -> Result<Url, url::ParseError> {
     let mut url = Url::parse(frontend_callback_url)?;
 
     if !is_mobile_callback_base(&url) {
@@ -191,7 +182,12 @@ fn oauth_frontend_callback_url(frontend_callback_url: &str) -> Result<Url, url::
         url.set_path(&callback_path);
     }
 
-    Ok(url)
+    url.query_pairs_mut()
+        .clear()
+        .append_pair("code", code)
+        .append_pair("state", state);
+
+    Ok(url.to_string())
 }
 
 fn validate_frontend_origin(raw_url: &str) -> Result<Url, FrontendCallbackValidationError> {
@@ -487,9 +483,6 @@ fn email_verify_error_to_api_error(error: VerifyEmailCodeError) -> ApiError {
         }
         VerifyEmailCodeError::RateLimited => {
             ApiError::too_many_requests("Too many verification attempts. Please try again later")
-        }
-        VerifyEmailCodeError::Internal(err) if err.is::<services::auth::ports::SignupsClosed>() => {
-            super::service_restrictions::signups_closed_error()
         }
         VerifyEmailCodeError::Internal(err) => {
             tracing::error!("Email verification failed: {}", error_type(&err));
@@ -1020,55 +1013,19 @@ pub async fn oauth_callback(
 
     // The provider and frontend handoff mode are determined only from the
     // server-side state stored at OAuth initiation.
-    let callback = match app_state
+    let callback = app_state
         .oauth_service
         .handle_callback_unified(params.code.clone(), params.state.clone())
         .await
-    {
-        Ok(callback) => callback,
-        Err(e) => {
+        .map_err(|e| {
             tracing::error!(
                 state_present,
                 state_len,
                 error_type = error_type(&e),
                 "OAuth callback failed"
             );
-            if e.is::<services::auth::ports::SignupsClosed>() {
-                if let Some(callback) = e
-                    .downcast_ref::<services::auth::ports::OAuthSignupClosed>()
-                    .and_then(|error| error.frontend_callback.as_deref())
-                {
-                    let validated = validate_frontend_callback_url(
-                        callback,
-                        app_state
-                            .frontend_callback_allowed_origins
-                            .as_deref()
-                            .map(Vec::as_slice),
-                    )
-                    .map_err(|_| ApiError::bad_request("Invalid frontend_callback"))?;
-                    let mut url = oauth_frontend_callback_url(&validated)
-                        .map_err(|_| ApiError::bad_request("Invalid frontend_callback"))?;
-                    if !is_mobile_callback_base(&url) {
-                        url.query_pairs_mut()
-                            .clear()
-                            .append_pair("oauth_error", "service_signups_closed");
-                        let mut headers = HeaderMap::new();
-                        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-                        headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-                        headers.insert(
-                            LOCATION,
-                            url.as_str()
-                                .parse()
-                                .map_err(|_| ApiError::bad_request("Invalid callback URL"))?,
-                        );
-                        return Ok((StatusCode::FOUND, headers));
-                    }
-                }
-                return Err(super::service_restrictions::signups_closed_error());
-            }
-            return Err(ApiError::oauth_failed());
-        }
-    };
+            ApiError::oauth_failed()
+        })?;
 
     tracing::info!(
         "OAuth callback processed successfully - user_id: {}, provider: {:?}",
@@ -1625,9 +1582,6 @@ pub async fn near_auth(
         .authenticate_near(signed_message, payload)
         .await
         .map_err(|e| {
-            if e.is::<services::auth::ports::SignupsClosed>() {
-                return super::service_restrictions::signups_closed_error();
-            }
             tracing::error!("NEAR authentication failed: {}", error_type(&e));
             ApiError::unauthorized(e.to_string())
         })?;
