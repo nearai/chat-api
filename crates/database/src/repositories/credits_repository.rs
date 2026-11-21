@@ -3,7 +3,7 @@
 
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use services::subscription::ports::{CreditTransaction, CreditsRepository};
 use services::UserId;
 
@@ -202,8 +202,8 @@ impl CreditsRepository for PostgresCreditsRepository {
         &self,
         user_id: UserId,
         plan_credits_nano_usd: i64,
-        period_start: DateTime<Utc>,
-        period_end: DateTime<Utc>,
+        period_start: Timestamp,
+        period_end: Timestamp,
     ) -> anyhow::Result<()> {
         let mut client = self.pool.get().await?;
         let txn = client.transaction().await?;
@@ -224,7 +224,7 @@ impl CreditsRepository for PostgresCreditsRepository {
             Some(r) => (
                 r.get::<_, i64>("total_nano_usd"),
                 r.get::<_, i64>("spent_nano_usd"),
-                r.get::<_, Option<DateTime<Utc>>>("last_reconciled_period_start"),
+                r.get::<_, Option<Timestamp>>("last_reconciled_period_start"),
                 r.get::<_, i64>("last_reconciled_over_plan_nano_usd"),
             ),
             None => return Ok(()), // no purchased pool

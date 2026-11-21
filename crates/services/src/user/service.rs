@@ -1,6 +1,6 @@
 use crate::logging::error_type;
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -275,12 +275,12 @@ impl UserService for UserServiceImpl {
             }
         };
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         if let Some(report) = active_reports
             .iter()
             .find(|report| {
-                now.signed_duration_since(report.created_at)
-                    < Duration::days(self.aml_service.report_refresh_days())
+                now.duration_since(report.created_at)
+                    < SignedDuration::from_hours(24 * self.aml_service.report_refresh_days())
                     && self.aml_service.has_usable_policy_signal(&report.result)
             })
             .cloned()
@@ -359,7 +359,7 @@ impl UserService for UserServiceImpl {
         user_id: UserId,
         ban_type: BanType,
         reason: Option<String>,
-        duration: Duration,
+        duration: SignedDuration,
     ) -> anyhow::Result<()> {
         // Avoid creating duplicate active bans for the same user.
         // This keeps the user_bans table from accumulating redundant rows
@@ -373,13 +373,13 @@ impl UserService for UserServiceImpl {
             return Ok(());
         }
 
-        let expires_at = Some(Utc::now() + duration);
+        let expires_at = Some(Timestamp::now() + duration);
 
         tracing::warn!(
             "Banning user: user_id={}, ban_type={}, duration_secs={}",
             user_id,
             ban_type,
-            duration.num_seconds()
+            duration.as_secs()
         );
 
         self.user_repository

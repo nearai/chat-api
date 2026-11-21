@@ -4,7 +4,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
+use jiff::Timestamp;
 use services::logging::error_type;
 use services::{SessionId, UserId};
 use sha2::{Digest, Sha256};
@@ -159,21 +159,21 @@ async fn authenticate_session_by_token(
     );
 
     // Check if session is expired
-    let now = Utc::now();
+    let now = Timestamp::now();
     if session.expires_at <= now {
-        let time_expired = now.signed_duration_since(session.expires_at);
+        let time_expired = now.duration_since(session.expires_at);
         tracing::warn!(
             "Session expired: user_id={}, expired {} seconds ago",
             session.user_id,
-            time_expired.num_seconds()
+            time_expired.as_secs()
         );
         return Err(ApiError::session_expired());
     }
 
-    let time_until_expiry = session.expires_at.signed_duration_since(now);
+    let time_until_expiry = session.expires_at.duration_since(now);
     tracing::debug!(
         "Session valid for {} more seconds",
-        time_until_expiry.num_seconds()
+        time_until_expiry.as_secs()
     );
 
     tracing::info!(

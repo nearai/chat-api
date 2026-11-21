@@ -58,7 +58,7 @@ impl From<services::user::ports::AccountDeletion> for UserAccountDeletionRespons
             id: deletion.id,
             user_id: deletion.user_id,
             status: deletion.status.as_str().to_string(),
-            requested_at: deletion.requested_at.to_rfc3339(),
+            requested_at: services::timestamps::format_utc(deletion.requested_at),
         }
     }
 }
@@ -77,8 +77,8 @@ impl From<services::user::ports::User> for UserResponse {
             email: user.email,
             name: user.name,
             avatar_url: user.avatar_url,
-            created_at: user.created_at.to_rfc3339(),
-            updated_at: user.updated_at.to_rfc3339(),
+            created_at: services::timestamps::format_utc(user.created_at),
+            updated_at: services::timestamps::format_utc(user.updated_at),
         }
     }
 }
@@ -92,7 +92,7 @@ impl From<services::user::ports::LinkedOAuthAccount> for LinkedAccountResponse {
         };
         Self {
             provider: provider.to_string(),
-            linked_at: account.linked_at.to_rfc3339(),
+            linked_at: services::timestamps::format_utc(account.linked_at),
         }
     }
 }
@@ -548,15 +548,15 @@ impl AdminUserResponse {
             email: u.user.email,
             name: u.user.name,
             avatar_url: u.user.avatar_url,
-            created_at: u.user.created_at.to_rfc3339(),
-            updated_at: u.user.updated_at.to_rfc3339(),
+            created_at: services::timestamps::format_utc(u.user.created_at),
+            updated_at: services::timestamps::format_utc(u.user.updated_at),
             subscription_status: u.subscription_status,
             subscription_plan_name,
             agent_count: u.agent_count,
             total_spent_nano: u.total_spent_nano,
             agent_spent_nano: u.agent_spent_nano,
             agent_token_usage: u.agent_token_usage,
-            last_activity_at: u.last_activity_at.map(|t| t.to_rfc3339()),
+            last_activity_at: u.last_activity_at.map(services::timestamps::format_utc),
             purchased_credits_nano: u.purchased_credits_nano,
             spent_purchased_credits_nano: u.spent_purchased_credits_nano,
         }
@@ -600,7 +600,7 @@ impl From<services::system_configs::ports::RateLimitConfig> for RateLimitConfig 
         Self {
             max_concurrent: config.max_concurrent,
             max_requests_per_window: config.max_requests_per_window,
-            window_duration_seconds: u64::try_from(config.window_duration.num_seconds())
+            window_duration_seconds: u64::try_from(config.window_duration.as_secs())
                 .unwrap_or(u64::MAX),
             window_limits: config.window_limits.into_iter().map(Into::into).collect(),
             token_window_limits: config
@@ -620,7 +620,7 @@ impl From<services::system_configs::ports::RateLimitConfig> for RateLimitConfig 
 impl From<services::system_configs::ports::WindowLimit> for WindowLimit {
     fn from(limit: services::system_configs::ports::WindowLimit) -> Self {
         Self {
-            window_duration_seconds: u64::try_from(limit.window_duration.num_seconds())
+            window_duration_seconds: u64::try_from(limit.window_duration.as_secs())
                 .unwrap_or(u64::MAX),
             limit: limit.limit,
         }
@@ -631,7 +631,7 @@ impl TryFrom<RateLimitConfig> for services::system_configs::ports::RateLimitConf
     type Error = String;
 
     fn try_from(api_config: RateLimitConfig) -> Result<Self, Self::Error> {
-        use chrono::Duration;
+        use jiff::SignedDuration;
 
         let window_duration_seconds =
             i64::try_from(api_config.window_duration_seconds).map_err(|_| {
@@ -662,7 +662,7 @@ impl TryFrom<RateLimitConfig> for services::system_configs::ports::RateLimitConf
         Ok(Self {
             max_concurrent: api_config.max_concurrent,
             max_requests_per_window: api_config.max_requests_per_window,
-            window_duration: Duration::seconds(window_duration_seconds),
+            window_duration: SignedDuration::from_secs(window_duration_seconds),
             window_limits: window_limits?,
             token_window_limits: token_window_limits?,
             cost_window_limits: cost_window_limits?,
@@ -674,7 +674,7 @@ impl TryFrom<WindowLimit> for services::system_configs::ports::WindowLimit {
     type Error = String;
 
     fn try_from(api_limit: WindowLimit) -> Result<Self, Self::Error> {
-        use chrono::Duration;
+        use jiff::SignedDuration;
 
         let window_duration_seconds =
             i64::try_from(api_limit.window_duration_seconds).map_err(|_| {
@@ -686,7 +686,7 @@ impl TryFrom<WindowLimit> for services::system_configs::ports::WindowLimit {
             })?;
 
         Ok(Self {
-            window_duration: Duration::seconds(window_duration_seconds),
+            window_duration: SignedDuration::from_secs(window_duration_seconds),
             limit: api_limit.limit,
         })
     }
@@ -1002,8 +1002,8 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
             service_type: inst.service_type,
             agent_api_base_url: None,
             last_usage_at: None,
-            created_at: inst.created_at.to_rfc3339(),
-            updated_at: inst.updated_at.to_rfc3339(),
+            created_at: services::timestamps::format_utc(inst.created_at),
+            updated_at: services::timestamps::format_utc(inst.updated_at),
         }
     }
 }
@@ -1032,7 +1032,7 @@ pub fn instance_response_for_admin(
 /// Build InstanceResponse for admin list endpoint with optional last_usage_at from agent_balance.
 pub fn instance_response_for_admin_with_usage(
     inst: services::agent::ports::AgentInstance,
-    last_usage_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_usage_at: Option<jiff::Timestamp>,
 ) -> InstanceResponse {
     let status = status_from_db(&inst.status);
     InstanceResponse {
@@ -1045,9 +1045,9 @@ pub fn instance_response_for_admin_with_usage(
         status,
         ssh_command: None,
         service_type: inst.service_type,
-        last_usage_at: last_usage_at.map(|t| t.to_rfc3339()),
-        created_at: inst.created_at.to_rfc3339(),
-        updated_at: inst.updated_at.to_rfc3339(),
+        last_usage_at: last_usage_at.map(services::timestamps::format_utc),
+        created_at: services::timestamps::format_utc(inst.created_at),
+        updated_at: services::timestamps::format_utc(inst.updated_at),
     }
 }
 
@@ -1072,8 +1072,8 @@ pub fn instance_response_with_enrichment(
         service_type: inst.service_type,
         agent_api_base_url: None,
         last_usage_at: None,
-        created_at: inst.created_at.to_rfc3339(),
-        updated_at: inst.updated_at.to_rfc3339(),
+        created_at: services::timestamps::format_utc(inst.created_at),
+        updated_at: services::timestamps::format_utc(inst.updated_at),
     }
 }
 
@@ -1144,11 +1144,11 @@ impl From<services::agent::ports::AgentApiKey> for ApiKeyResponse {
             id: key.id.to_string(),
             name: key.name,
             spend_limit: key.spend_limit.map(format_nano_dollars),
-            expires_at: key.expires_at.map(|e| e.to_rfc3339()),
-            last_used_at: key.last_used_at.map(|u| u.to_rfc3339()),
+            expires_at: key.expires_at.map(services::timestamps::format_utc),
+            last_used_at: key.last_used_at.map(services::timestamps::format_utc),
             is_active: key.is_active,
-            created_at: key.created_at.to_rfc3339(),
-            updated_at: key.updated_at.to_rfc3339(),
+            created_at: services::timestamps::format_utc(key.created_at),
+            updated_at: services::timestamps::format_utc(key.updated_at),
         }
     }
 }
@@ -1188,7 +1188,7 @@ impl From<services::agent::ports::UsageLogEntry> for UsageResponse {
             total_cost: format_nano_dollars(usage.total_cost),
             model_id: usage.model_id,
             request_type: usage.request_type,
-            created_at: usage.created_at.to_rfc3339(),
+            created_at: services::timestamps::format_utc(usage.created_at),
         }
     }
 }
@@ -1229,13 +1229,13 @@ impl BalanceResponse {
             total_spent: format_nano_dollars(balance.total_spent),
             total_requests: balance.total_requests,
             total_tokens: balance.total_tokens,
-            last_usage_at: balance.last_usage_at.map(|u| u.to_rfc3339()),
-            updated_at: balance.updated_at.to_rfc3339(),
+            last_usage_at: balance.last_usage_at.map(services::timestamps::format_utc),
+            updated_at: services::timestamps::format_utc(balance.updated_at),
             period_spent: format_nano_dollars(period_usage.cost_nano_usd),
             period_requests: period_usage.request_count,
             period_tokens: period_usage.token_sum,
-            period_start_at: billing_period.start_at.to_rfc3339(),
-            period_end_at: billing_period.end_at.to_rfc3339(),
+            period_start_at: services::timestamps::format_utc(billing_period.start_at),
+            period_end_at: services::timestamps::format_utc(billing_period.end_at),
         }
     }
 }

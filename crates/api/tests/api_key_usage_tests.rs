@@ -77,6 +77,53 @@ fn hash_agent_api_key(key: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+#[tokio::test]
+async fn stored_key_expiry_at_timestamp_boundary() {
+    use services::agent::ports::AgentRepository;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let (_, instance_id, id, key) =
+        create_bound_agent_api_key(&server, &db, "expiry-boundary@example.test", None).await;
+    let repo = db.agent_repository();
+    assert_eq!(
+        repo.get_api_key_by_id(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        None
+    );
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .execute(
+            "UPDATE agent_api_keys SET expires_at = '9999-12-31 00:00:00+00' WHERE id = $1",
+            &[&id],
+        )
+        .await
+        .unwrap();
+
+    let hash = hash_agent_api_key(&key);
+    let expected = Some(jiff::Timestamp::MAX);
+    assert_eq!(
+        repo.get_api_key_by_hash(&hash)
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        expected
+    );
+    let (_, joined_key) = repo
+        .get_instance_by_api_key_hash(&hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(joined_key.expires_at, expected);
+    let (keys, _) = repo.list_instance_keys(instance_id, 10, 0).await.unwrap();
+    assert_eq!(keys[0].expires_at, expected);
+}
+
 /// Test that the dual auth middleware provides both user and API key extensions
 /// This verifies that both AuthenticatedUser and AuthenticatedApiKey can be extracted
 #[tokio::test]

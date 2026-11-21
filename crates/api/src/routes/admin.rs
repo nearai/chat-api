@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use services::agent::ports::{AgentInstance, AgentServiceError};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
@@ -423,7 +423,7 @@ pub async fn admin_credit_history(
             amount_nano_usd: t.amount,
             kind: t.r#type,
             reference_id: t.reference_id,
-            created_at: t.created_at.to_rfc3339(),
+            created_at: services::timestamps::format_utc(t.created_at),
         })
         .collect();
 
@@ -596,9 +596,9 @@ async fn build_price_id_to_plan_name(
 #[derive(Debug, Deserialize)]
 pub struct AnalyticsQuery {
     /// Start of the time period (ISO 8601 timestamp)
-    pub start: DateTime<Utc>,
+    pub start: Timestamp,
     /// End of the time period (ISO 8601 timestamp)
-    pub end: DateTime<Utc>,
+    pub end: Timestamp,
 }
 
 /// Get analytics summary
@@ -610,8 +610,8 @@ pub struct AnalyticsQuery {
     path = "/v1/admin/analytics",
     tag = "Admin",
     params(
-        ("start" = DateTime<Utc>, Query, description = "Start of time period (ISO 8601)"),
-        ("end" = DateTime<Utc>, Query, description = "End of time period (ISO 8601)")
+        ("start" = Timestamp, Query, description = "Start of time period (ISO 8601)"),
+        ("end" = Timestamp, Query, description = "End of time period (ISO 8601)")
     ),
     responses(
         (status = 200, description = "Analytics retrieved", body = AnalyticsSummary),
@@ -664,9 +664,9 @@ pub struct UserActivityResponse {
 #[derive(Debug, Deserialize)]
 pub struct TopUsersQuery {
     /// Start of the time period (ISO 8601 timestamp)
-    pub start: DateTime<Utc>,
+    pub start: Timestamp,
     /// End of the time period (ISO 8601 timestamp)
-    pub end: DateTime<Utc>,
+    pub end: Timestamp,
     /// Maximum number of users to return (default: 10)
     #[serde(default = "default_top_users_limit")]
     pub limit: i64,
@@ -785,8 +785,8 @@ pub async fn admin_list_subscriptions(
     path = "/v1/admin/analytics/top-users",
     tag = "Admin",
     params(
-        ("start" = DateTime<Utc>, Query, description = "Start of time period (ISO 8601)"),
-        ("end" = DateTime<Utc>, Query, description = "End of time period (ISO 8601)"),
+        ("start" = Timestamp, Query, description = "Start of time period (ISO 8601)"),
+        ("end" = Timestamp, Query, description = "End of time period (ISO 8601)"),
         ("limit" = Option<i64>, Query, description = "Maximum number of users to return (default: 10)")
     ),
     responses(
@@ -854,9 +854,9 @@ pub struct TopUsageQuery {
     #[serde(default = "default_top_usage_limit")]
     pub limit: i64,
     /// Start of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
-    pub start: Option<DateTime<Utc>>,
+    pub start: Option<Timestamp>,
     /// End of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
-    pub end: Option<DateTime<Utc>>,
+    pub end: Option<Timestamp>,
 }
 
 fn default_usage_rank_by() -> String {
@@ -871,9 +871,9 @@ fn default_top_usage_limit() -> i64 {
 #[derive(Debug, Deserialize)]
 pub struct UsageByUserQuery {
     /// Start of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
-    pub start: Option<DateTime<Utc>>,
+    pub start: Option<Timestamp>,
     /// End of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
-    pub end: Option<DateTime<Utc>>,
+    pub end: Option<Timestamp>,
 }
 
 /// Get usage for a single user by ID (all-time or within time range).
@@ -885,8 +885,8 @@ pub struct UsageByUserQuery {
     tag = "Admin",
     params(
         ("user_id" = uuid::Uuid, Path, description = "User ID"),
-        ("start" = Option<DateTime<Utc>>, Query, description = "Start of time period (ISO 8601); use with end; interval [start, end)"),
-        ("end" = Option<DateTime<Utc>>, Query, description = "End of time period (ISO 8601); use with start; interval [start, end)")
+        ("start" = Option<Timestamp>, Query, description = "Start of time period (ISO 8601); use with end; interval [start, end)"),
+        ("end" = Option<Timestamp>, Query, description = "End of time period (ISO 8601); use with start; interval [start, end)")
     ),
     responses(
         (status = 200, description = "Usage retrieved", body = crate::models::UserUsageResponse),
@@ -950,8 +950,8 @@ pub async fn get_usage_by_user_id(
     params(
         ("rank_by" = Option<String>, Query, description = "Rank by 'token' or 'cost' (default: token)"),
         ("limit" = Option<i64>, Query, description = "Max users to return (default: 100)"),
-        ("start" = Option<DateTime<Utc>>, Query, description = "Start of time period (ISO 8601); use with end; interval [start, end)"),
-        ("end" = Option<DateTime<Utc>>, Query, description = "End of time period (ISO 8601); use with start; interval [start, end)")
+        ("start" = Option<Timestamp>, Query, description = "Start of time period (ISO 8601); use with end; interval [start, end)"),
+        ("end" = Option<Timestamp>, Query, description = "End of time period (ISO 8601); use with start; interval [start, end)")
     ),
     responses(
         (status = 200, description = "Top usage list", body = TopUsageResponse),
@@ -2124,12 +2124,12 @@ pub struct AdminAmlReportResponse {
     pub risk_level: services::aml::AmlRiskLevel,
     pub score: Option<i64>,
     pub report_id: Option<String>,
-    pub checked_at: DateTime<Utc>,
+    pub checked_at: Timestamp,
     pub reason: Option<String>,
     pub result: services::aml::AmlCheckResult,
     pub active: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl From<services::aml::AmlReportRecord> for AdminAmlReportResponse {
@@ -2167,7 +2167,7 @@ pub struct AdminAmlAllowlistEntryResponse {
     pub account_id: String,
     pub reason: Option<String>,
     pub created_by: Option<UserId>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 impl From<services::aml::AmlAccountAllowlistEntry> for AdminAmlAllowlistEntryResponse {
@@ -2640,8 +2640,8 @@ pub struct BiDeploymentQuery {
     #[serde(rename = "type")]
     pub instance_type: Option<String>,
     pub status: Option<String>,
-    pub start_date: Option<DateTime<Utc>>,
-    pub end_date: Option<DateTime<Utc>>,
+    pub start_date: Option<Timestamp>,
+    pub end_date: Option<Timestamp>,
     /// Substring search on agent name, user email, or user name (case-insensitive)
     pub q: Option<String>,
     /// Sort by: created_at, updated_at, instance_type, status, user_email, user_name, name, total_spent_nano, total_tokens
@@ -2686,15 +2686,15 @@ impl BiDeploymentQuery {
 /// Query parameters for BI deployment summary
 #[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct BiSummaryQuery {
-    pub start_date: Option<DateTime<Utc>>,
-    pub end_date: Option<DateTime<Utc>>,
+    pub start_date: Option<Timestamp>,
+    pub end_date: Option<Timestamp>,
 }
 
 /// Query parameters for BI usage aggregation
 #[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct BiUsageQuery {
-    pub start_date: Option<DateTime<Utc>>,
-    pub end_date: Option<DateTime<Utc>>,
+    pub start_date: Option<Timestamp>,
+    pub end_date: Option<Timestamp>,
     pub user_id: Option<Uuid>,
     pub instance_id: Option<Uuid>,
     #[serde(rename = "type")]
@@ -2710,8 +2710,8 @@ fn default_group_by() -> UsageGroupBy {
 /// Query parameters for BI top consumers
 #[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct BiTopConsumersQuery {
-    pub start_date: Option<DateTime<Utc>>,
-    pub end_date: Option<DateTime<Utc>>,
+    pub start_date: Option<Timestamp>,
+    pub end_date: Option<Timestamp>,
     #[serde(rename = "type")]
     pub instance_type: Option<String>,
     #[serde(default = "default_bi_rank_by")]
@@ -2759,10 +2759,7 @@ pub struct BiStatusHistoryResponse {
 }
 
 /// Validate optional date range: start_date must be before end_date when both are provided.
-fn validate_date_range(
-    start: Option<DateTime<Utc>>,
-    end: Option<DateTime<Utc>>,
-) -> Result<(), ApiError> {
+fn validate_date_range(start: Option<Timestamp>, end: Option<Timestamp>) -> Result<(), ApiError> {
     if let (Some(s), Some(e)) = (start, end) {
         if s >= e {
             return Err(ApiError::bad_request("start_date must be before end_date"));

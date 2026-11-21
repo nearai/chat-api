@@ -7,7 +7,7 @@ pub async fn get_job(
     let client = state.db_pool.get().await.map_err(internal)?;
     let row=client.query_opt("SELECT id,status,mode,scope,actions,progress,cursor,created_at,started_at,completed_at,last_error_class,last_error_message FROM database_encryption_jobs WHERE id=$1",&[&id]).await.map_err(internal)?.ok_or_else(||bad("job not found"))?;
     Ok(Json(
-        json!({"job_id":row.get::<_,Uuid>(0),"status":row.get::<_,String>(1),"mode":row.get::<_,String>(2),"scope":row.get::<_,Value>(3),"actions":row.get::<_,Value>(4),"progress":row.get::<_,Value>(5),"cursor":row.get::<_,Value>(6),"created_at":row.get::<_,chrono::DateTime<chrono::Utc>>(7),"started_at":row.get::<_,Option<chrono::DateTime<chrono::Utc>>>(8),"completed_at":row.get::<_,Option<chrono::DateTime<chrono::Utc>>>(9),"last_error_class":row.get::<_,Option<String>>(10),"last_error_message":row.get::<_,Option<String>>(11)}),
+        json!({"job_id":row.get::<_,Uuid>(0),"status":row.get::<_,String>(1),"mode":row.get::<_,String>(2),"scope":row.get::<_,Value>(3),"actions":row.get::<_,Value>(4),"progress":row.get::<_,Value>(5),"cursor":row.get::<_,Value>(6),"created_at":row.get::<_,jiff::Timestamp>(7),"started_at":row.get::<_,Option<jiff::Timestamp>>(8),"completed_at":row.get::<_,Option<jiff::Timestamp>>(9),"last_error_class":row.get::<_,Option<String>>(10),"last_error_message":row.get::<_,Option<String>>(11)}),
     ))
 }
 

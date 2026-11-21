@@ -2,7 +2,7 @@
 
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use services::analytics::CheckAndRecordActivityRequest;
 use services::{
     analytics::{
@@ -97,7 +97,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                 &[
                     &request.user_id,
                     &activity_type,
-                    &request.window_duration.num_seconds(),
+                    &request.window_duration.as_secs(),
                     &(request.limit as i64),
                     &metadata,
                 ],
@@ -117,7 +117,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         &self,
         user_id: UserId,
         activity_type: ActivityType,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
         let activity_type = activity_type.as_str();
@@ -134,7 +134,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                   AND activity_type = $2
                   AND created_at >= window_start.start_time
                 "#,
-                &[&user_id, &activity_type, &window_duration.num_seconds()],
+                &[&user_id, &activity_type, &window_duration.as_secs()],
             )
             .await?;
 
@@ -143,8 +143,8 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
 
     async fn get_analytics_summary(
         &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
+        start: Timestamp,
+        end: Timestamp,
     ) -> anyhow::Result<AnalyticsSummary> {
         let client = self.pool.get().await?;
 
@@ -269,14 +269,14 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         })
     }
 
-    async fn get_daily_active_users(&self, date: DateTime<Utc>) -> anyhow::Result<i64> {
+    async fn get_daily_active_users(&self, date: Timestamp) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
 
-        let start = date.date_naive().and_hms_opt(0, 0, 0).unwrap();
-        let end = start + Duration::days(1);
-
-        let start_utc = DateTime::<Utc>::from_naive_utc_and_offset(start, Utc);
-        let end_utc = DateTime::<Utc>::from_naive_utc_and_offset(end, Utc);
+        let start_utc = date
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .start_of_day()?
+            .timestamp();
+        let end_utc = start_utc.checked_add(SignedDuration::from_hours(24))?;
 
         let row = client
             .query_one(
@@ -291,11 +291,11 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         Ok(row.get(0))
     }
 
-    async fn get_weekly_active_users(&self, date: DateTime<Utc>) -> anyhow::Result<i64> {
+    async fn get_weekly_active_users(&self, date: Timestamp) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
 
         let end = date;
-        let start = end - Duration::days(7);
+        let start = end.checked_sub(SignedDuration::from_hours(7 * 24))?;
 
         let row = client
             .query_one(
@@ -310,11 +310,11 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         Ok(row.get(0))
     }
 
-    async fn get_monthly_active_users(&self, date: DateTime<Utc>) -> anyhow::Result<i64> {
+    async fn get_monthly_active_users(&self, date: Timestamp) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
 
         let end = date;
-        let start = end - Duration::days(30);
+        let start = end.checked_sub(SignedDuration::from_hours(30 * 24))?;
 
         let row = client
             .query_one(
@@ -370,8 +370,8 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
 
     async fn get_top_active_users(
         &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
+        start: Timestamp,
+        end: Timestamp,
         limit: i64,
     ) -> anyhow::Result<Vec<TopActiveUser>> {
         let client = self.pool.get().await?;

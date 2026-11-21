@@ -3,8 +3,8 @@ use crate::agent::ports::{AgentService, MockAgentRepository};
 use crate::agent::service::AgentServiceImpl;
 use crate::system_configs::ports::{PartialSystemConfigs, SystemConfigs, SystemConfigsService};
 use async_trait::async_trait;
-use chrono::Utc;
 use config::AgentManager;
+use jiff::Timestamp;
 use std::sync::Arc;
 use wiremock::matchers::{bearer_token, body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -73,8 +73,8 @@ fn instance(owner: UserId, manager_url: &str) -> AgentInstance {
         agent_api_base_url: Some(manager_url.to_string()),
         service_type: None,
         status: "active".to_string(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 

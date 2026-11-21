@@ -1,27 +1,27 @@
 use async_trait::async_trait;
-use chrono::Duration;
+use jiff::SignedDuration;
 use serde::{de::Deserializer, Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt;
 
-/// Helper module for serializing/deserializing Duration as seconds
+/// Helper module for serializing/deserializing SignedDuration as seconds
 mod serde_duration_seconds {
     use super::*;
 
-    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(duration: &SignedDuration, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let seconds = duration.num_seconds();
+        let seconds = duration.as_secs();
         serializer.serialize_i64(seconds)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<SignedDuration, D::Error>
     where
         D: Deserializer<'de>,
     {
         let seconds = i64::deserialize(deserializer)?;
-        Ok(Duration::seconds(seconds))
+        Ok(SignedDuration::from_secs(seconds))
     }
 }
 
@@ -45,7 +45,7 @@ impl fmt::Display for SystemKey {
 pub struct WindowLimit {
     /// Duration of the time window for the limit
     #[serde(with = "serde_duration_seconds")]
-    pub window_duration: Duration,
+    pub window_duration: SignedDuration,
     /// Maximum number of requests allowed in this window
     pub limit: usize,
 }
@@ -59,7 +59,7 @@ pub struct RateLimitConfig {
     pub max_requests_per_window: usize,
     /// Duration of the short-term rate limit window
     #[serde(with = "serde_duration_seconds")]
-    pub window_duration: Duration,
+    pub window_duration: SignedDuration,
     /// Sliding window limits based on activity logs
     /// Each limit applies independently
     pub window_limits: Vec<WindowLimit>,
@@ -163,9 +163,9 @@ impl Default for RateLimitConfig {
         Self {
             max_concurrent: 5,
             max_requests_per_window: 5,
-            window_duration: Duration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![WindowLimit {
-                window_duration: Duration::days(1),
+                window_duration: SignedDuration::from_hours(24),
                 limit: 1500,
             }],
             token_window_limits: vec![],

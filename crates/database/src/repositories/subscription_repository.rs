@@ -74,9 +74,9 @@ impl PostgresSubscriptionRepository {
             .pending_downgrade_status
             .map(DowngradeIntentStatus::as_str);
 
-        let pending_downgrade_updated_at: Option<chrono::DateTime<chrono::Utc>> =
+        let pending_downgrade_updated_at: Option<jiff::Timestamp> =
             if pending_downgrade_status.is_some() {
-                Some(chrono::Utc::now())
+                Some(jiff::Timestamp::now())
             } else {
                 None
             };
@@ -257,7 +257,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
     async fn last_cancelled_subscription_period_end_for_user(
         &self,
         user_id: UserId,
-    ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    ) -> anyhow::Result<Option<jiff::Timestamp>> {
         let client = self.pool.get().await?;
         // Use the most recently canceled row (by updated_at), not MAX(period_end),
         // so stale rows with far-future period ends do not override the latest cancellation boundary.
@@ -270,7 +270,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                 &[&user_id],
             )
             .await?;
-        Ok(row.map(|r| r.get::<_, chrono::DateTime<chrono::Utc>>("current_period_end")))
+        Ok(row.map(|r| r.get::<_, jiff::Timestamp>("current_period_end")))
     }
 
     async fn list_subscriptions(

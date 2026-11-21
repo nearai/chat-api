@@ -8,7 +8,7 @@ pub mod ports;
 pub use ports::*;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use std::sync::Arc;
 
 use crate::UserId;
@@ -36,24 +36,24 @@ pub trait AnalyticsServiceTrait: Send + Sync {
         &self,
         user_id: UserId,
         activity_type: ActivityType,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> Result<i64, AnalyticsError>;
 
     /// Get analytics summary for a time period
     async fn get_analytics_summary(
         &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
+        start: Timestamp,
+        end: Timestamp,
     ) -> Result<AnalyticsSummary, AnalyticsError>;
 
     /// Get daily active users count
-    async fn get_daily_active_users(&self, date: DateTime<Utc>) -> Result<i64, AnalyticsError>;
+    async fn get_daily_active_users(&self, date: Timestamp) -> Result<i64, AnalyticsError>;
 
     /// Get weekly active users count
-    async fn get_weekly_active_users(&self, date: DateTime<Utc>) -> Result<i64, AnalyticsError>;
+    async fn get_weekly_active_users(&self, date: Timestamp) -> Result<i64, AnalyticsError>;
 
     /// Get monthly active users count
-    async fn get_monthly_active_users(&self, date: DateTime<Utc>) -> Result<i64, AnalyticsError>;
+    async fn get_monthly_active_users(&self, date: Timestamp) -> Result<i64, AnalyticsError>;
 
     /// Get activity history for a user
     async fn get_user_activity(
@@ -66,8 +66,8 @@ pub trait AnalyticsServiceTrait: Send + Sync {
     /// Get top active users in a time period
     async fn get_top_active_users(
         &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
+        start: Timestamp,
+        end: Timestamp,
         limit: i64,
     ) -> Result<Vec<TopActiveUser>, AnalyticsError>;
 }
@@ -106,7 +106,7 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
         &self,
         user_id: UserId,
         activity_type: ActivityType,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> Result<i64, AnalyticsError> {
         self.repository
             .check_activity_count(user_id, activity_type, window_duration)
@@ -116,8 +116,8 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
 
     async fn get_analytics_summary(
         &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
+        start: Timestamp,
+        end: Timestamp,
     ) -> Result<AnalyticsSummary, AnalyticsError> {
         self.repository
             .get_analytics_summary(start, end)
@@ -125,21 +125,21 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }
 
-    async fn get_daily_active_users(&self, date: DateTime<Utc>) -> Result<i64, AnalyticsError> {
+    async fn get_daily_active_users(&self, date: Timestamp) -> Result<i64, AnalyticsError> {
         self.repository
             .get_daily_active_users(date)
             .await
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }
 
-    async fn get_weekly_active_users(&self, date: DateTime<Utc>) -> Result<i64, AnalyticsError> {
+    async fn get_weekly_active_users(&self, date: Timestamp) -> Result<i64, AnalyticsError> {
         self.repository
             .get_weekly_active_users(date)
             .await
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }
 
-    async fn get_monthly_active_users(&self, date: DateTime<Utc>) -> Result<i64, AnalyticsError> {
+    async fn get_monthly_active_users(&self, date: Timestamp) -> Result<i64, AnalyticsError> {
         self.repository
             .get_monthly_active_users(date)
             .await
@@ -160,8 +160,8 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
 
     async fn get_top_active_users(
         &self,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
+        start: Timestamp,
+        end: Timestamp,
         limit: i64,
     ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
         self.repository

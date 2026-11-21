@@ -1,12 +1,12 @@
 mod common;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use common::{
     clear_credits_config, create_test_server, create_test_server_and_db, mock_login,
     set_credits_config, set_hos_credits_config, set_multi_provider_credits_config,
     set_subscription_plans, TestServerConfig,
 };
+use jiff::Timestamp;
 use serde_json::json;
 use serial_test::serial;
 use services::subscription::ports::{
@@ -168,10 +168,7 @@ fn near_rpc_call_function_body(result_json: &serde_json::Value) -> serde_json::V
 }
 
 fn near_rpc_hos_credit_purchase_respond(req: &wiremock::Request) -> ResponseTemplate {
-    let created_ns = Utc::now()
-        .timestamp_nanos_opt()
-        .expect("current timestamp should fit nanoseconds")
-        .to_string();
+    let created_ns = Timestamp::now().as_nanosecond().to_string();
     near_rpc_hos_credit_purchase_respond_with_created_ns(req, &created_ns)
 }
 

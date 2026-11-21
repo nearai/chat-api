@@ -1,6 +1,6 @@
 use crate::logging::error_type;
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use near_kit::{
     signer::{PublicKey, Signature},
     standards::nep413::{self, NonceValidation, SignMessageParams, VerifyOptions},
@@ -43,7 +43,7 @@ fn validate_nonce_timestamp(nonce_timestamp_ms: u64) -> anyhow::Result<()> {
 
     let nonce_time = i64::try_from(nonce_timestamp_ms)
         .ok()
-        .and_then(DateTime::from_timestamp_millis)
+        .and_then(|ms| Timestamp::from_millisecond(ms).ok())
         .ok_or_else(|| {
             tracing::warn!(
                 "NEAR signature has invalid timestamp (out of range): {}ms",
@@ -52,16 +52,16 @@ fn validate_nonce_timestamp(nonce_timestamp_ms: u64) -> anyhow::Result<()> {
             anyhow::anyhow!("Invalid signature timestamp: timestamp out of range")
         })?;
 
-    let age = Utc::now().signed_duration_since(nonce_time);
-    if age > Duration::milliseconds(MAX_NONCE_AGE_MS as i64) {
+    let age = Timestamp::now().duration_since(nonce_time);
+    if age > SignedDuration::from_millis(MAX_NONCE_AGE_MS as i64) {
         tracing::warn!(
             "NEAR signature expired: age={}ms, max_age={}ms",
-            age.num_milliseconds(),
+            age.as_millis(),
             MAX_NONCE_AGE_MS
         );
         return Err(anyhow::anyhow!("Signature expired"));
     }
-    if age < Duration::zero() {
+    if age < SignedDuration::ZERO {
         tracing::warn!("NEAR signature has future timestamp");
         return Err(anyhow::anyhow!(
             "Invalid signature timestamp: timestamp is in the future"
@@ -266,7 +266,7 @@ async fn verify_wallet_control(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use jiff::Timestamp;
 
     #[test]
     fn nep413_hash_matches_wallet_fixtures_with_and_without_callback() {
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_future_timestamp_should_fail() {
-        let future_ms = (Utc::now().timestamp_millis() + 3600 * 1000) as u64;
+        let future_ms = (Timestamp::now().as_millisecond() + 3600 * 1000) as u64;
         let result = validate_nonce_timestamp(future_ms);
         assert_eq!(
             result.unwrap_err().to_string(),
@@ -430,14 +430,15 @@ mod tests {
 
     #[test]
     fn test_expired_timestamp_should_fail() {
-        let expired_ms = (Utc::now().timestamp_millis() - (MAX_NONCE_AGE_MS as i64 + 1000)) as u64;
+        let expired_ms =
+            (Timestamp::now().as_millisecond() - (MAX_NONCE_AGE_MS as i64 + 1000)) as u64;
         let result = validate_nonce_timestamp(expired_ms);
         assert_eq!(result.unwrap_err().to_string(), "Signature expired");
     }
 
     #[test]
     fn test_valid_recent_timestamp_should_succeed() {
-        let recent_ms = (Utc::now().timestamp_millis() - 60 * 1000) as u64;
+        let recent_ms = (Timestamp::now().as_millisecond() - 60 * 1000) as u64;
         let result = validate_nonce_timestamp(recent_ms);
         assert!(
             result.is_ok(),

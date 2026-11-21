@@ -1,7 +1,7 @@
 //! In-memory cache for model pricing from cloud-api (GET /v1/model/{model_name}).
 //! Used to compute cost in nano-dollars from token usage for rate limiting and analytics.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use services::logging::error_type;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -136,7 +136,7 @@ fn cache_read_nano_per_token(model_name: &str, price: Option<&DecimalPrice>) -> 
 #[derive(Clone)]
 struct CacheEntry {
     pricing: ModelPricing,
-    fetched_at: DateTime<Utc>,
+    fetched_at: Timestamp,
 }
 
 /// Thread-safe in-memory cache for model pricing with TTL.
@@ -169,12 +169,12 @@ impl ModelPricingCache {
             return None;
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         {
             let cache = self.cache.read().await;
             if let Some(entry) = cache.get(model_name) {
-                let age = now.signed_duration_since(entry.fetched_at);
-                if age.num_seconds() >= 0 && age.num_seconds() < self.ttl_secs {
+                let age = now.duration_since(entry.fetched_at);
+                if age.as_secs() >= 0 && age.as_secs() < self.ttl_secs {
                     debug!(
                         "Model pricing cache hit: model_name={}",
                         if model_name.len() > 32 {

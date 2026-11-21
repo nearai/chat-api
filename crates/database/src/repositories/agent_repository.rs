@@ -1,7 +1,8 @@
 use crate::agent_secrets;
+use crate::bounded_timestamp::BoundedTimestamp;
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use services::agent::ports::{
     AgentApiKey, AgentInstance, AgentRepository, CreateInstanceParams, InstanceBalance,
     UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE,
@@ -12,6 +13,23 @@ use uuid::Uuid;
 
 pub struct PostgresAgentRepository {
     pool: DbPool,
+}
+
+fn agent_api_key_from_row(row: &tokio_postgres::Row) -> anyhow::Result<AgentApiKey> {
+    Ok(AgentApiKey {
+        id: row.get(0),
+        instance_id: row.get(1),
+        user_id: row.get(2),
+        name: row.get(3),
+        spend_limit: row.get(4),
+        expires_at: row
+            .try_get::<_, Option<BoundedTimestamp>>("expires_at")?
+            .map(|t| t.0),
+        last_used_at: row.get(6),
+        is_active: row.get(7),
+        created_at: row.get(8),
+        updated_at: row.get(9),
+    })
 }
 
 /// Replace existing token query parameters without rewriting other URL components.
@@ -365,7 +383,9 @@ impl AgentRepository for PostgresAgentRepository {
                 user_id: r.get(15),
                 name: r.get(16),
                 spend_limit: r.get(17),
-                expires_at: r.get(18),
+                expires_at: r
+                    .try_get::<_, Option<BoundedTimestamp>>("expires_at")?
+                    .map(|t| t.0),
                 last_used_at: r.get(19),
                 is_active: r.get(20),
                 created_at: r.get(21),
@@ -714,7 +734,7 @@ impl AgentRepository for PostgresAgentRepository {
         key_hash: String,
         name: String,
         spend_limit: Option<i64>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> anyhow::Result<AgentApiKey> {
         let client = self.pool.get().await?;
 
@@ -736,20 +756,7 @@ impl AgentRepository for PostgresAgentRepository {
             )
             .await?;
 
-        let api_key = AgentApiKey {
-            id: row.get(0),
-            instance_id: row.get(1),
-            user_id: row.get(2),
-            name: row.get(3),
-            spend_limit: row.get(4),
-            expires_at: row.get(5),
-            last_used_at: row.get(6),
-            is_active: row.get(7),
-            created_at: row.get(8),
-            updated_at: row.get(9),
-        };
-
-        Ok(api_key)
+        agent_api_key_from_row(&row)
     }
 
     async fn create_unbound_api_key(
@@ -758,7 +765,7 @@ impl AgentRepository for PostgresAgentRepository {
         key_hash: String,
         name: String,
         spend_limit: Option<i64>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> anyhow::Result<AgentApiKey> {
         tracing::debug!("Creating unbound API key in DB: user_id={}", user_id);
 
@@ -774,20 +781,7 @@ impl AgentRepository for PostgresAgentRepository {
             )
             .await?;
 
-        let api_key = AgentApiKey {
-            id: row.get(0),
-            instance_id: row.get(1),
-            user_id: row.get(2),
-            name: row.get(3),
-            spend_limit: row.get(4),
-            expires_at: row.get(5),
-            last_used_at: row.get(6),
-            is_active: row.get(7),
-            created_at: row.get(8),
-            updated_at: row.get(9),
-        };
-
-        Ok(api_key)
+        agent_api_key_from_row(&row)
     }
 
     async fn bind_api_key_to_instance(
@@ -826,18 +820,7 @@ impl AgentRepository for PostgresAgentRepository {
             )
             .await?;
 
-        Ok(row.map(|r| AgentApiKey {
-            id: r.get(0),
-            instance_id: r.get(1),
-            user_id: r.get(2),
-            name: r.get(3),
-            spend_limit: r.get(4),
-            expires_at: r.get(5),
-            last_used_at: r.get(6),
-            is_active: r.get(7),
-            created_at: r.get(8),
-            updated_at: r.get(9),
-        }))
+        row.as_ref().map(agent_api_key_from_row).transpose()
     }
 
     async fn get_api_key_by_id(&self, api_key_id: Uuid) -> anyhow::Result<Option<AgentApiKey>> {
@@ -853,18 +836,7 @@ impl AgentRepository for PostgresAgentRepository {
             )
             .await?;
 
-        Ok(row.map(|r| AgentApiKey {
-            id: r.get(0),
-            instance_id: r.get(1),
-            user_id: r.get(2),
-            name: r.get(3),
-            spend_limit: r.get(4),
-            expires_at: r.get(5),
-            last_used_at: r.get(6),
-            is_active: r.get(7),
-            created_at: r.get(8),
-            updated_at: r.get(9),
-        }))
+        row.as_ref().map(agent_api_key_from_row).transpose()
     }
 
     async fn get_api_key_total_spend(&self, api_key_id: Uuid) -> anyhow::Result<i64> {
@@ -913,20 +885,9 @@ impl AgentRepository for PostgresAgentRepository {
             .await?;
 
         let keys = rows
-            .into_iter()
-            .map(|r| AgentApiKey {
-                id: r.get(0),
-                instance_id: r.get(1),
-                user_id: r.get(2),
-                name: r.get(3),
-                spend_limit: r.get(4),
-                expires_at: r.get(5),
-                last_used_at: r.get(6),
-                is_active: r.get(7),
-                created_at: r.get(8),
-                updated_at: r.get(9),
-            })
-            .collect();
+            .iter()
+            .map(agent_api_key_from_row)
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         Ok((keys, total))
     }
@@ -960,8 +921,8 @@ impl AgentRepository for PostgresAgentRepository {
     async fn get_instance_usage(
         &self,
         instance_id: Uuid,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
+        start_date: Option<Timestamp>,
+        end_date: Option<Timestamp>,
         limit: i64,
         offset: i64,
     ) -> anyhow::Result<(Vec<UsageLogEntry>, i64)> {
@@ -1288,7 +1249,7 @@ impl AgentRepository for PostgresAgentRepository {
         offset: i64,
     ) -> anyhow::Result<(
         Vec<AgentInstance>,
-        std::collections::HashMap<Uuid, DateTime<Utc>>,
+        std::collections::HashMap<Uuid, Timestamp>,
         i64,
     )> {
         let client = self.pool.get().await?;
@@ -1316,7 +1277,7 @@ impl AgentRepository for PostgresAgentRepository {
             .into_iter()
             .map(|r| -> anyhow::Result<_> {
                 let id: Uuid = r.get(0);
-                let last_usage: Option<DateTime<Utc>> = r.get(13);
+                let last_usage: Option<Timestamp> = r.get(13);
                 if let Some(ts) = last_usage {
                     usage_map.insert(id, ts);
                 }

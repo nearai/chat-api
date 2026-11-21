@@ -1,6 +1,6 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
@@ -49,7 +49,7 @@ impl std::fmt::Display for TaskId {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleSpec {
-    At(DateTime<Utc>),
+    At(Timestamp),
     Cron(String),
 }
 
@@ -72,7 +72,7 @@ impl ScheduleSpec {
 
     pub fn to_aws_expression(&self) -> String {
         match self {
-            Self::At(at) => format!("at({})", at.format("%Y-%m-%dT%H:%M:%S")),
+            Self::At(at) => format!("at({})", at.strftime("%Y-%m-%dT%H:%M:%S")),
             Self::Cron(expr) => expr.clone(),
         }
     }
@@ -207,9 +207,7 @@ mod tests {
 
     #[test]
     fn test_schedule_to_aws_expression() {
-        let at = chrono::DateTime::parse_from_rfc3339("2026-03-18T10:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let at = "2026-03-18T10:00:00Z".parse::<jiff::Timestamp>().unwrap();
         assert_eq!(
             ScheduleSpec::At(at).to_aws_expression(),
             "at(2026-03-18T10:00:00)"

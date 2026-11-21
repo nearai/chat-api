@@ -16,13 +16,13 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
-use chrono::{Duration, Utc};
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use futures::stream;
 use http::{
     header::{CONTENT_ENCODING, CONTENT_LENGTH},
     HeaderValue,
 };
+use jiff::{SignedDuration, Timestamp};
 use multer::Multipart;
 use near_kit::{AccountId, Near};
 use serde::{Deserialize, Serialize};
@@ -51,15 +51,15 @@ const MIN_NEAR_BALANCE: u128 = 1_000_000_000_000_000_000_000_000;
 /// Duration of user ban after NEAR balance check fails (in seconds)
 const NEAR_BALANCE_BAN_DURATION_SECS: i64 = 60 * 60;
 
-/// Duration to cache NEAR balance checks in memory (in seconds)
+/// SignedDuration to cache NEAR balance checks in memory (in seconds)
 const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 
-/// Duration to cache model settings needed by /v1/responses in memory (in seconds)
+/// SignedDuration to cache model settings needed by /v1/responses in memory (in seconds)
 const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 const MODEL_SETTINGS_CACHE_MAX_ENTRIES: usize = 1024;
 const MODEL_SETTINGS_CACHE_MAX_KEY_BYTES: usize = 256;
 
-/// Duration to cache system configs in memory (in seconds)
+/// SignedDuration to cache system configs in memory (in seconds)
 const SYSTEM_CONFIGS_CACHE_TTL_SECS: i64 = 60;
 
 /// Fallback defaults for `model: "auto"` routing when no `auto_route` system config is set
@@ -380,8 +380,8 @@ pub struct ConversationShareResponse {
     pub recipient: Option<ShareRecipientPayload>,
     pub group_id: Option<Uuid>,
     pub org_email_pattern: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -418,8 +418,8 @@ pub struct ShareGroupResponse {
     pub id: Uuid,
     pub name: String,
     pub members: Vec<ShareRecipientPayload>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 impl From<ShareRecipientPayload> for ShareRecipient {
@@ -2893,12 +2893,12 @@ async fn ensure_near_balance_for_near_user(
     {
         let cache = state.near_balance_cache.read().await;
         if let Some(entry) = cache.get(&account_id_str) {
-            let age = Utc::now().signed_duration_since(entry.last_checked_at);
-            if age.num_seconds() >= 0 && age.num_seconds() < NEAR_BALANCE_CACHE_TTL_SECS {
+            let age = Timestamp::now().duration_since(entry.last_checked_at);
+            if age.as_secs() >= 0 && age.as_secs() < NEAR_BALANCE_CACHE_TTL_SECS {
                 tracing::debug!(
                     "Using cached NEAR balance for user_id={} (age={}s)",
                     user.user_id,
-                    age.num_seconds()
+                    age.as_secs()
                 );
 
                 // We only treat cached values as authoritative if they meet the minimum balance.
@@ -2966,7 +2966,7 @@ async fn ensure_near_balance_for_near_user(
                     "NEAR balance {} is below required minimum {}",
                     balance, MIN_NEAR_BALANCE
                 )),
-                Duration::seconds(NEAR_BALANCE_BAN_DURATION_SECS),
+                SignedDuration::from_secs(NEAR_BALANCE_BAN_DURATION_SECS),
             )
             .await
         {
@@ -2989,7 +2989,7 @@ async fn ensure_near_balance_for_near_user(
         cache.insert(
             account_id_str.clone(),
             crate::state::NearBalanceCacheEntry {
-                last_checked_at: Utc::now(),
+                last_checked_at: Timestamp::now(),
                 balance,
             },
         );
@@ -3511,8 +3511,8 @@ async fn get_system_configs_cached(
     {
         let cache = state.system_configs_cache.read().await;
         if let Some(entry) = cache.as_ref() {
-            let age = Utc::now().signed_duration_since(entry.last_checked_at);
-            if age.num_seconds() >= 0 && age.num_seconds() < SYSTEM_CONFIGS_CACHE_TTL_SECS {
+            let age = Timestamp::now().duration_since(entry.last_checked_at);
+            if age.as_secs() >= 0 && age.as_secs() < SYSTEM_CONFIGS_CACHE_TTL_SECS {
                 return entry.configs.clone();
             }
         }
@@ -3535,7 +3535,7 @@ async fn get_system_configs_cached(
     {
         let mut cache = state.system_configs_cache.write().await;
         *cache = Some(crate::state::SystemConfigsCacheEntry {
-            last_checked_at: Utc::now(),
+            last_checked_at: Timestamp::now(),
             configs: configs.clone(),
         });
     }
@@ -3591,8 +3591,8 @@ fn cache_model_settings(
     cache.retain(|_, cached| {
         let age = entry
             .last_checked_at
-            .signed_duration_since(cached.last_checked_at)
-            .num_seconds();
+            .duration_since(cached.last_checked_at)
+            .as_secs();
         (0..MODEL_SETTINGS_CACHE_TTL_SECS).contains(&age)
     });
     if cache.len() >= MODEL_SETTINGS_CACHE_MAX_ENTRIES && !cache.contains_key(model_id) {
@@ -3622,8 +3622,8 @@ async fn get_model_settings_with_cache(
     if model_id.len() <= MODEL_SETTINGS_CACHE_MAX_KEY_BYTES {
         let cache = state.model_settings_cache.read().await;
         if let Some(entry) = cache.get(model_id) {
-            let age = Utc::now().signed_duration_since(entry.last_checked_at);
-            if age.num_seconds() >= 0 && age.num_seconds() < MODEL_SETTINGS_CACHE_TTL_SECS {
+            let age = Timestamp::now().duration_since(entry.last_checked_at);
+            if age.as_secs() >= 0 && age.as_secs() < MODEL_SETTINGS_CACHE_TTL_SECS {
                 model_settings_cache_hit = Some(true);
 
                 if !entry.public {
@@ -3658,7 +3658,7 @@ async fn get_model_settings_with_cache(
                         &mut cache,
                         model_id,
                         crate::state::ModelSettingsCacheEntry {
-                            last_checked_at: Utc::now(),
+                            last_checked_at: Timestamp::now(),
                             exists: true,
                             public: model.settings.public,
                             system_prompt: model.settings.system_prompt.clone(),
@@ -3692,7 +3692,7 @@ async fn get_model_settings_with_cache(
                         &mut cache,
                         model_id,
                         crate::state::ModelSettingsCacheEntry {
-                            last_checked_at: Utc::now(),
+                            last_checked_at: Timestamp::now(),
                             exists: false, // Not in DB but allowed with defaults
                             public: MODEL_PUBLIC_DEFAULT, // true by default
                             system_prompt: None,
@@ -6059,7 +6059,7 @@ mod model_settings_cache_bounds_tests {
 
     #[test]
     fn arbitrary_model_ids_cannot_exceed_capacity_and_expired_entries_are_removed() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut cache = std::collections::HashMap::new();
         let entry = |last_checked_at| crate::state::ModelSettingsCacheEntry {
             last_checked_at,
@@ -6084,7 +6084,7 @@ mod model_settings_cache_bounds_tests {
         cache_model_settings(
             &mut cache,
             "after-expiry",
-            entry(now + chrono::Duration::seconds(60)),
+            entry(now + jiff::SignedDuration::from_secs(60)),
         );
         assert_eq!(cache.len(), 1);
         assert!(cache.contains_key("after-expiry"));

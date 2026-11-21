@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use uuid::Uuid;
 
 use crate::UserId;
@@ -74,14 +74,14 @@ pub trait UserUsageRepository: Send + Sync {
     async fn get_token_usage_sum(
         &self,
         user_id: UserId,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> anyhow::Result<i64>;
 
     /// Sum of cost_nano_usd for the user in the sliding window (NULL treated as 0).
     async fn get_cost_usage_sum(
         &self,
         user_id: UserId,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> anyhow::Result<i64>;
 
     /// Usage for a single user (token sum, image count, cost).
@@ -90,16 +90,16 @@ pub trait UserUsageRepository: Send + Sync {
     async fn get_usage_by_user_id(
         &self,
         user_id: UserId,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<Option<UserUsageSummary>>;
 
     /// Usage for a single instance within an optional [start, end) time range.
     async fn get_instance_usage_summary(
         &self,
         instance_id: Uuid,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<InstanceUsageSummary>;
 
     /// Top N users by usage, ordered by token_sum or cost_nano_usd.
@@ -108,8 +108,8 @@ pub trait UserUsageRepository: Send + Sync {
         &self,
         limit: i64,
         rank_by: UsageRankBy,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<Vec<UserUsageSummary>>;
 }
 
@@ -137,29 +137,29 @@ pub trait UserUsageService: Send + Sync {
     async fn get_token_usage_sum(
         &self,
         user_id: UserId,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> anyhow::Result<i64>;
 
     async fn get_cost_usage_sum(
         &self,
         user_id: UserId,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> anyhow::Result<i64>;
 
     /// Usage for a single user. When start/end are Some, filters to [start, end). When both None, all-time.
     async fn get_usage_by_user_id(
         &self,
         user_id: UserId,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<Option<UserUsageSummary>>;
 
     /// Usage for a single instance within an optional [start, end) time range.
     async fn get_instance_usage_summary(
         &self,
         instance_id: Uuid,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<InstanceUsageSummary>;
 
     /// Top N users by usage, ordered by token or cost. Optional [start, end) time range.
@@ -167,7 +167,7 @@ pub trait UserUsageService: Send + Sync {
         &self,
         limit: i64,
         rank_by: UsageRankBy,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<Vec<UserUsageSummary>>;
 }

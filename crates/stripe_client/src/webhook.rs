@@ -1,6 +1,6 @@
 use crate::error::StripeWebhookError;
-use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use jiff::Timestamp;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
@@ -30,7 +30,7 @@ impl StripeWebhookVerifier {
         raw_body: &[u8],
         stripe_signature: &str,
         secret: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<VerifiedStripeWebhook, StripeWebhookError> {
         if secret.trim().is_empty() {
             return Err(StripeWebhookError::MissingSecret);
@@ -51,8 +51,8 @@ impl StripeWebhookVerifier {
             return Err(StripeWebhookError::SignatureMismatch);
         }
 
-        let timestamp_age = now
-            .timestamp()
+        let seconds = now.as_second() - i64::from(now.subsec_nanosecond() < 0);
+        let timestamp_age = seconds
             .checked_sub(header.timestamp)
             .and_then(i64::checked_abs)
             .ok_or(StripeWebhookError::TimestampOutsideTolerance)?;
@@ -129,7 +129,6 @@ fn secure_hex_eq(expected: &[u8], candidate_hex: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn sign(secret: &str, timestamp: i64, payload: &[u8]) -> String {
         let sig = compute_signature(secret, timestamp, payload);
@@ -143,7 +142,7 @@ mod tests {
         let ts = 1_700_000_000;
         let sig = sign("whsec_test", ts, payload);
         let header = format!("t={ts},v1={sig}");
-        let now = Utc.timestamp_opt(ts + 10, 0).unwrap();
+        let now = Timestamp::new(ts + 10, 0).unwrap();
 
         assert!(verifier.verify(payload, &header, "whsec_test", now).is_ok());
     }
@@ -155,7 +154,7 @@ mod tests {
         let ts = 1_700_000_000;
         let sig = sign("whsec_test", ts, payload);
         let header = format!("t={ts},v1=deadbeef,v1={sig}");
-        let now = Utc.timestamp_opt(ts + 10, 0).unwrap();
+        let now = Timestamp::new(ts + 10, 0).unwrap();
 
         assert!(verifier.verify(payload, &header, "whsec_test", now).is_ok());
     }
@@ -167,7 +166,7 @@ mod tests {
         let ts = 1_700_000_000;
         let sig = sign("whsec_test", ts, payload);
         let header = format!("t={ts},v1={sig}");
-        let now = Utc.timestamp_opt(ts + 301, 0).unwrap();
+        let now = Timestamp::new(ts + 301, 0).unwrap();
 
         let err = verifier
             .verify(payload, &header, "whsec_test", now)
@@ -182,7 +181,7 @@ mod tests {
         let ts = 1_700_000_000;
         let sig = sign("whsec_test", ts, payload);
         let header = format!("t={ts},v1={sig}");
-        let now = Utc.timestamp_opt(ts + 300, 0).unwrap();
+        let now = Timestamp::new(ts + 300, 0).unwrap();
 
         assert!(verifier.verify(payload, &header, "whsec_test", now).is_ok());
     }
@@ -194,7 +193,7 @@ mod tests {
         let ts = 1_700_000_000;
         let sig = sign("whsec_test", ts, payload);
         let header = format!("t={ts},v1={sig}");
-        let now = Utc.timestamp_opt(ts - 301, 0).unwrap();
+        let now = Timestamp::new(ts - 301, 0).unwrap();
 
         assert!(matches!(
             verifier.verify(payload, &header, "whsec_test", now),
@@ -206,7 +205,7 @@ mod tests {
     fn rejects_blank_secret_even_with_matching_signature() {
         let payload = b"{}";
         let ts = 1_700_000_000;
-        let now = Utc.timestamp_opt(ts, 0).unwrap();
+        let now = Timestamp::new(ts, 0).unwrap();
         for secret in ["", "   "] {
             let header = format!("t={ts},v1={}", sign(secret, ts, payload));
             assert!(matches!(
@@ -221,7 +220,7 @@ mod tests {
         let payload = b"{}";
         let ts = 1_700_000_000;
         let header = format!("t={ts},v1={}", sign("whsec_test", ts, payload));
-        let now = Utc.timestamp_opt(ts - 300, 0).unwrap();
+        let now = Timestamp::new(ts - 300, 0).unwrap();
         assert!(StripeWebhookVerifier::default()
             .verify(payload, &header, "whsec_test", now)
             .is_ok());
@@ -233,7 +232,7 @@ mod tests {
         let payload = br#"{"id":"evt_1"}"#;
         let ts = 1_700_000_000;
         let header = format!("t={ts},v1={}", sign("whsec_other", ts, payload));
-        let now = Utc.timestamp_opt(ts + 10, 0).unwrap();
+        let now = Timestamp::new(ts + 10, 0).unwrap();
 
         let err = verifier
             .verify(payload, &header, "whsec_test", now)
@@ -245,7 +244,7 @@ mod tests {
     fn rejects_invalid_signature_header() {
         let verifier = StripeWebhookVerifier::default();
         let payload = br#"{"id":"evt_1"}"#;
-        let now = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+        let now = Timestamp::new(1_700_000_010, 0).unwrap();
 
         let err = verifier
             .verify(payload, "t=1700000000,v1", "whsec_test", now)
@@ -258,7 +257,7 @@ mod tests {
         let verifier = StripeWebhookVerifier::default();
         let payload = br#"{"id":"evt_1"}"#;
         let sig = sign("whsec_test", 1_700_000_000, payload);
-        let now = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+        let now = Timestamp::new(1_700_000_010, 0).unwrap();
 
         let err = verifier
             .verify(payload, &format!("v1={sig}"), "whsec_test", now)
@@ -270,7 +269,7 @@ mod tests {
     fn rejects_missing_v1_signature() {
         let verifier = StripeWebhookVerifier::default();
         let payload = br#"{"id":"evt_1"}"#;
-        let now = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+        let now = Timestamp::new(1_700_000_010, 0).unwrap();
 
         let err = verifier
             .verify(payload, "t=1700000000", "whsec_test", now)
@@ -282,7 +281,7 @@ mod tests {
     fn rejects_invalid_signature_encoding() {
         let verifier = StripeWebhookVerifier::default();
         let payload = br#"{"id":"evt_1"}"#;
-        let now = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+        let now = Timestamp::new(1_700_000_010, 0).unwrap();
 
         let err = verifier
             .verify(payload, "t=1700000000,v1=not_hex", "whsec_test", now)
@@ -297,7 +296,7 @@ mod tests {
         let ts = i64::MIN;
         let sig = sign("whsec_test", ts, payload);
         let header = format!("t={ts},v1={sig}");
-        let now = Utc.timestamp_opt(0, 0).unwrap();
+        let now = Timestamp::new(0, 0).unwrap();
 
         let err = verifier
             .verify(payload, &header, "whsec_test", now)

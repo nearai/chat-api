@@ -1,7 +1,7 @@
 use crate::pool::DbPool;
 use anyhow::Context;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use services::auth::ports::{
     EmailVerificationChallenge, EmailVerificationChallengeRepository,
     EmailVerificationChallengeStatus,
@@ -57,7 +57,7 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
         email: &str,
         code_mac: &str,
         ip_address: &str,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> anyhow::Result<EmailVerificationChallenge> {
         let parsed_ip: IpAddr = ip_address.parse()?;
         let mut client = self.pool.get().await?;
@@ -133,7 +133,7 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
     async fn count_recent_challenges_for_email(
         &self,
         email: &str,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> anyhow::Result<u64> {
         let client = self.pool.get().await?;
         let row = client
@@ -153,7 +153,7 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
     async fn count_recent_challenges_for_ip(
         &self,
         ip_address: &str,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> anyhow::Result<u64> {
         let client = self.pool.get().await?;
         let parsed_ip: IpAddr = ip_address.parse()?;
@@ -176,7 +176,7 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
     async fn count_recent_failed_verifications_for_email(
         &self,
         email: &str,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> anyhow::Result<u64> {
         let client = self.pool.get().await?;
         let row = client
@@ -196,7 +196,7 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
     async fn count_recent_failed_verifications_for_ip(
         &self,
         ip_address: &str,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> anyhow::Result<u64> {
         let client = self.pool.get().await?;
         let parsed_ip: IpAddr = ip_address.parse()?;

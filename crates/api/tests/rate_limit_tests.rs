@@ -1,11 +1,11 @@
 mod common;
 
-use chrono::Duration;
 use common::{
     create_test_server_and_db, create_test_server_with_config, insert_test_subscription,
     mock_login, restrictive_rate_limit_config, TestServerConfig,
 };
 use futures::future::join_all;
+use jiff::SignedDuration;
 use serde_json::json;
 use services::system_configs::ports::{RateLimitConfig, WindowLimit};
 use services::user::ports::UserRepository;
@@ -254,10 +254,10 @@ async fn test_token_limit_blocks_request_when_usage_exceeds_limit() {
         rate_limit_config: Some(RateLimitConfig {
             max_concurrent: 10,
             max_requests_per_window: 100,
-            window_duration: Duration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![],
             token_window_limits: vec![WindowLimit {
-                window_duration: Duration::seconds(60),
+                window_duration: SignedDuration::from_secs(60),
                 limit: 100,
             }],
             cost_window_limits: vec![],
@@ -316,11 +316,11 @@ async fn test_cost_limit_blocks_request_when_usage_exceeds_limit() {
         rate_limit_config: Some(RateLimitConfig {
             max_concurrent: 10,
             max_requests_per_window: 100,
-            window_duration: Duration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![],
             token_window_limits: vec![],
             cost_window_limits: vec![WindowLimit {
-                window_duration: Duration::seconds(60),
+                window_duration: SignedDuration::from_secs(60),
                 limit: 1_000, // nano-USD
             }],
         }),

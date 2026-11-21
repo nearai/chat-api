@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use uuid::Uuid;
 
 use crate::types::{SessionId, UserId};
@@ -20,7 +20,7 @@ pub struct OAuthState {
     /// Secret for the provider authorization-code exchange, independent of the
     /// browser's frontend callback verifier. Debug output is redacted by oauth2.
     pub provider_code_verifier: Option<PkceCodeVerifier>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ pub struct OAuthCallbackCode {
     pub session_id: SessionId,
     pub code_challenge: String,
     pub is_new_user: bool,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -60,7 +60,7 @@ pub enum OAuthCodeExchangeError {
 pub struct OAuthTokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
 }
 
 /// Represents user information from OAuth provider
@@ -79,8 +79,8 @@ pub struct OAuthUserInfo {
 pub struct UserSession {
     pub session_id: SessionId,
     pub user_id: UserId,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
     /// The actual session token (only populated on creation, not on retrieval)
     pub token: Option<String>,
 }
@@ -114,8 +114,8 @@ pub struct EmailVerificationChallenge {
     pub status: EmailVerificationChallengeStatus,
     pub attempt_count: i32,
     pub provider_message_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -204,7 +204,7 @@ pub trait EmailVerificationChallengeRepository: Send + Sync {
         email: &str,
         code_mac: &str,
         ip_address: &str,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> anyhow::Result<EmailVerificationChallenge>;
 
     async fn mark_challenge_sent(
@@ -218,13 +218,13 @@ pub trait EmailVerificationChallengeRepository: Send + Sync {
     async fn count_recent_challenges_for_email(
         &self,
         email: &str,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> anyhow::Result<u64>;
 
     async fn count_recent_challenges_for_ip(
         &self,
         ip_address: &str,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> anyhow::Result<u64>;
 
     /// Counts verification failures for an email in the time window by summing `attempt_count`.
@@ -232,7 +232,7 @@ pub trait EmailVerificationChallengeRepository: Send + Sync {
     async fn count_recent_failed_verifications_for_email(
         &self,
         email: &str,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> anyhow::Result<u64>;
 
     /// Counts verification failures for an IP in the time window by summing `attempt_count`.
@@ -240,7 +240,7 @@ pub trait EmailVerificationChallengeRepository: Send + Sync {
     async fn count_recent_failed_verifications_for_ip(
         &self,
         ip_address: &str,
-        since: DateTime<Utc>,
+        since: Timestamp,
     ) -> anyhow::Result<u64>;
 
     async fn get_latest_active_sent_challenge(

@@ -2,7 +2,7 @@ use crate::{
     pool::DbPool,
     repositories::session_repository::{generate_session_token, hash_session_token},
 };
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use rand::RngCore;
 use services::{auth::ports::UserSession, SessionId};
 
@@ -11,8 +11,8 @@ pub struct BrowserCredentials {
     pub token: String,
     pub refresh_token: String,
     pub session_id: SessionId,
-    pub expires_at: DateTime<Utc>,
-    pub absolute_expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
+    pub absolute_expires_at: Timestamp,
 }
 
 fn refresh_secret() -> String {
@@ -21,11 +21,11 @@ fn refresh_secret() -> String {
     hex::encode(bytes)
 }
 
-fn idle_duration(client: &str) -> Duration {
+fn idle_duration(client: &str) -> SignedDuration {
     if client == "admin" {
-        Duration::minutes(30)
+        SignedDuration::from_mins(30)
     } else {
-        Duration::days(7)
+        SignedDuration::from_hours(7 * 24)
     }
 }
 
@@ -43,15 +43,15 @@ impl BrowserSessionRepository {
         anyhow::ensure!(matches!(client_kind, "user" | "admin"), "Invalid client");
         let mut client = self.0.get().await?;
         let tx = client.transaction().await?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         let absolute = now
             + if client_kind == "admin" {
-                Duration::hours(8)
+                SignedDuration::from_hours(8)
             } else {
-                Duration::days(30)
+                SignedDuration::from_hours(30 * 24)
             };
         let idle = now + idle_duration(client_kind);
-        let expires = now + Duration::minutes(15);
+        let expires = now + SignedDuration::from_mins(15);
         let token = generate_session_token();
         let refresh = refresh_secret();
         let initial_hash = hash_session_token(
@@ -128,9 +128,9 @@ impl BrowserSessionRepository {
             return Ok(None);
         };
         let id: SessionId = row.get(0);
-        let absolute: DateTime<Utc> = row.get(1);
-        let idle: DateTime<Utc> = row.get(2);
-        let now = Utc::now();
+        let absolute: Timestamp = row.get(1);
+        let idle: Timestamp = row.get(2);
+        let now = Timestamp::now();
         let consumed: bool = tx
             .query_one(
                 "SELECT consumed FROM browser_refresh_tokens WHERE token_hash = $1",
@@ -151,7 +151,9 @@ impl BrowserSessionRepository {
         } else {
             idle
         };
-        let expires = (now + Duration::minutes(15)).min(idle).min(absolute);
+        let expires = (now + SignedDuration::from_mins(15))
+            .min(idle)
+            .min(absolute);
         let token = generate_session_token();
         let refresh = refresh_secret();
 

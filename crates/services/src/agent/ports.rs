@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -73,8 +73,8 @@ pub struct AgentInstance {
     pub service_type: Option<String>,
     /// DB-tracked status: active, stopped, deleted, provisioning, error
     pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl AgentInstance {
@@ -96,11 +96,11 @@ pub struct AgentApiKey {
     pub name: String,
     /// Optional lifetime spend cap in nano-dollars for this key.
     pub spend_limit: Option<i64>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
+    pub last_used_at: Option<Timestamp>,
     pub is_active: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -188,7 +188,7 @@ pub struct UsageLogEntry {
     pub total_cost: i64,  // nano-dollars
     pub model_id: String,
     pub request_type: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Instance balance snapshot (cached aggregate)
@@ -198,8 +198,8 @@ pub struct InstanceBalance {
     pub total_spent: i64, // nano-dollars
     pub total_requests: i64,
     pub total_tokens: i64,
-    pub last_usage_at: Option<DateTime<Utc>>,
-    pub updated_at: DateTime<Utc>,
+    pub last_usage_at: Option<Timestamp>,
+    pub updated_at: Timestamp,
 }
 
 /// Helper for cost calculations (in nano-dollars)
@@ -332,7 +332,7 @@ pub trait AgentRepository: Send + Sync {
         key_hash: String,
         name: String,
         spend_limit: Option<i64>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> anyhow::Result<AgentApiKey>;
 
     /// Create an unbound API key (instance_id = NULL)
@@ -342,7 +342,7 @@ pub trait AgentRepository: Send + Sync {
         key_hash: String,
         name: String,
         spend_limit: Option<i64>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> anyhow::Result<AgentApiKey>;
 
     /// Bind an unbound API key to an instance
@@ -373,8 +373,8 @@ pub trait AgentRepository: Send + Sync {
     async fn get_instance_usage(
         &self,
         instance_id: Uuid,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
+        start_date: Option<Timestamp>,
+        end_date: Option<Timestamp>,
         limit: i64,
         offset: i64,
     ) -> anyhow::Result<(Vec<UsageLogEntry>, i64)>;
@@ -402,7 +402,7 @@ pub trait AgentRepository: Send + Sync {
         offset: i64,
     ) -> anyhow::Result<(
         Vec<AgentInstance>,
-        std::collections::HashMap<Uuid, DateTime<Utc>>,
+        std::collections::HashMap<Uuid, Timestamp>,
         i64,
     )>;
 
@@ -579,7 +579,7 @@ pub trait AgentService: Send + Sync {
         user_id: UserId,
         name: String,
         spend_limit: Option<i64>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError>;
 
     /// Create an unbound API key (pre-deployment key without instance_id)
@@ -591,7 +591,7 @@ pub trait AgentService: Send + Sync {
         user_id: UserId,
         name: String,
         spend_limit: Option<i64>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError>;
 
     /// Bind an unbound API key to an instance
@@ -626,8 +626,8 @@ pub trait AgentService: Send + Sync {
         &self,
         instance_id: Uuid,
         user_id: UserId,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
+        start_date: Option<Timestamp>,
+        end_date: Option<Timestamp>,
         limit: i64,
         offset: i64,
     ) -> anyhow::Result<(Vec<UsageLogEntry>, i64)>;

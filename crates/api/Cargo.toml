@@ -30,7 +30,7 @@ tower-http = { version = "0.6", features = ["cors", "fs"] }
 uuid = { version = "1.5", features = ["v4"] }
 url = "2.5"
 urlencoding = "2.1"
-chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "0.2.46", default-features = false, features = ["std", "serde"] }
 sha2 = "0.10"
 bytes = "1.5"
 http = "1.0"
@@ -40,7 +40,7 @@ zstd = "0.14.3"
 # For TypedHeader support
 headers = "0.4"
 # OpenAPI documentation generation
-utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
+utoipa = { version = "6", features = ["axum_extras", "jiff_0_2", "uuid"] }
 utoipa-swagger-ui = { version = "10.0.2", features = ["axum"] }
 
 # Internal dependencies
@@ -76,7 +76,7 @@ aws-smithy-http-client = "1.1.4"
 [dev-dependencies]
 syn = { version = "2", features = ["full", "visit"] }
 serde_json = "1.0"
-chrono = "0.4"
+jiff = { version = "0.2.46", default-features = false, features = ["std", "serde"] }
 tokio = { version = "1", features = ["full"] }
 axum-test = "18"
 dotenvy = "0.15"

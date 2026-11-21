@@ -2,7 +2,7 @@
 
 use crate::subscription::ports::{DowngradeIntentStatus, Subscription};
 use crate::UserId;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use near_kit::{AccountId, Near};
 use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -406,7 +406,7 @@ pub fn subscription_row_from_chain(
     };
 
     let cancel_at_period_end = chain.cancel_at_period_end;
-    if status == "active" && current_period_end <= Utc::now() {
+    if status == "active" && current_period_end <= Timestamp::now() {
         status = "canceled".to_string();
     }
 
@@ -455,13 +455,13 @@ pub fn subscription_row_from_chain(
         current_period_start,
         current_period_end,
         cancel_at_period_end,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         pending_downgrade_target_price_id: pd_target,
         pending_downgrade_from_price_id: pd_from,
         pending_downgrade_expected_period_end: pd_end,
         pending_downgrade_status: pd_status,
-        pending_downgrade_updated_at: pd_status.map(|_| Utc::now()),
+        pending_downgrade_updated_at: pd_status.map(|_| Timestamp::now()),
     })
 }
 
@@ -473,10 +473,10 @@ fn pending_downgrade_price_id(chain: &NearStakingSubscription) -> Option<String>
         .or_else(|| chain.pending_downgrade_price_id.clone())
 }
 
-fn ts_ns_to_datetime(ns: u64) -> Result<DateTime<Utc>, String> {
+fn ts_ns_to_datetime(ns: u64) -> Result<Timestamp, String> {
     let secs = (ns / 1_000_000_000) as i64;
     let nsec = (ns % 1_000_000_000) as u32;
-    DateTime::from_timestamp(secs, nsec).ok_or_else(|| "timestamp out of range".to_string())
+    Timestamp::new(secs, nsec as i32).map_err(|_| "timestamp out of range".to_string())
 }
 
 #[cfg(test)]
@@ -718,9 +718,8 @@ mod tests {
 
     #[test]
     fn subscription_row_marks_cancel_at_period_end_row_canceled_after_period_end() {
-        let past_end_ns = (Utc::now() - chrono::Duration::hours(1))
-            .timestamp_nanos_opt()
-            .expect("timestamp nanos")
+        let past_end_ns = (Timestamp::now() - jiff::SignedDuration::from_hours(1))
+            .as_nanosecond()
             .to_string();
         let chain = chain_subscription(json!({
             "subscription_id": "sub_hos_expired",
@@ -738,9 +737,8 @@ mod tests {
 
     #[test]
     fn subscription_row_marks_active_row_canceled_after_period_end() {
-        let past_end_ns = (Utc::now() - chrono::Duration::hours(1))
-            .timestamp_nanos_opt()
-            .expect("timestamp nanos")
+        let past_end_ns = (Timestamp::now() - jiff::SignedDuration::from_hours(1))
+            .as_nanosecond()
             .to_string();
         let chain = chain_subscription(json!({
             "subscription_id": "sub_hos_expired",
@@ -758,9 +756,8 @@ mod tests {
 
     #[test]
     fn subscription_row_reads_pending_update_downgrade_price_id() {
-        let future_end_ns = (Utc::now() + chrono::Duration::hours(1))
-            .timestamp_nanos_opt()
-            .expect("timestamp nanos")
+        let future_end_ns = (Timestamp::now() + jiff::SignedDuration::from_hours(1))
+            .as_nanosecond()
             .to_string();
         let chain = chain_subscription(json!({
             "subscription_id": "sub_hos_pending",
@@ -794,9 +791,8 @@ mod tests {
 
     #[test]
     fn subscription_row_clears_pending_update_for_canceled_status() {
-        let future_end_ns = (Utc::now() + chrono::Duration::hours(1))
-            .timestamp_nanos_opt()
-            .expect("timestamp nanos")
+        let future_end_ns = (Timestamp::now() + jiff::SignedDuration::from_hours(1))
+            .as_nanosecond()
             .to_string();
         let chain = chain_subscription(json!({
             "subscription_id": "sub_hos_canceled_pending",
@@ -822,9 +818,8 @@ mod tests {
 
     #[test]
     fn subscription_row_reads_pending_update_stake_only_apply_ns() {
-        let future_end_ns = (Utc::now() + chrono::Duration::hours(2))
-            .timestamp_nanos_opt()
-            .expect("timestamp nanos");
+        let future_end_ns =
+            (Timestamp::now() + jiff::SignedDuration::from_hours(2)).as_nanosecond();
         let chain = chain_subscription(json!({
             "subscription_id": "sub_hos_pending_stake_only",
             "price_id": "price_hos_pro",
@@ -859,9 +854,8 @@ mod tests {
 
     #[test]
     fn subscription_row_reads_legacy_pending_downgrade_price_id() {
-        let future_end_ns = (Utc::now() + chrono::Duration::hours(1))
-            .timestamp_nanos_opt()
-            .expect("timestamp nanos")
+        let future_end_ns = (Timestamp::now() + jiff::SignedDuration::from_hours(1))
+            .as_nanosecond()
             .to_string();
         let chain = chain_subscription(json!({
             "subscription_id": "sub_hos_pending_legacy",

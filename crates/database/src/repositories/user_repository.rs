@@ -1,6 +1,6 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use services::user::ports::{
     AccountDeletion, AccountDeletionError, AccountDeletionRequestResult, AccountDeletionStatus,
     BanType, LinkedOAuthAccount, OAuthProvider, User, UserRepository,
@@ -1035,7 +1035,7 @@ impl UserRepository for PostgresUserRepository {
         user_id: UserId,
         ban_type: BanType,
         reason: Option<String>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> anyhow::Result<()> {
         let mut client = self.pool.get().await?;
 

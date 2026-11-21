@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -20,7 +20,7 @@ pub struct UserWithStats {
     pub total_spent_nano: i64,
     pub agent_spent_nano: i64,
     pub agent_token_usage: i64,
-    pub last_activity_at: Option<DateTime<Utc>>,
+    pub last_activity_at: Option<Timestamp>,
     /// Total purchased+granted credits (nano-USD), from user_credits.total_nano_usd.
     pub purchased_credits_nano: i64,
     /// Spent portion of purchased credits (nano-USD), from user_credits.spent_nano_usd.
@@ -97,8 +97,8 @@ pub struct DeploymentRecord {
     pub instance_id: String,
     pub instance_type: String, // openclaw | ironclaw
     pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     /// Total spend for this instance (nano USD) from usage events
     pub total_spent_nano: i64,
     /// Total tokens used for this instance from usage events
@@ -164,7 +164,7 @@ pub struct StatusChangeRecord {
     pub changed_by_user_avatar_url: Option<String>,
     /// Optional audit reason attached to the status change.
     pub change_reason: Option<String>,
-    pub changed_at: DateTime<Utc>,
+    pub changed_at: Timestamp,
 }
 
 /// Grouping dimension for usage aggregation
@@ -321,8 +321,8 @@ pub enum DeploymentsSortOrder {
 pub struct DeploymentFilter {
     pub instance_type: Option<String>,
     pub status: Option<String>,
-    pub start_date: Option<DateTime<Utc>>,
-    pub end_date: Option<DateTime<Utc>>,
+    pub start_date: Option<Timestamp>,
+    pub end_date: Option<Timestamp>,
     pub search: Option<String>,
     pub sort_by: DeploymentsSortBy,
     pub sort_order: DeploymentsSortOrder,
@@ -349,8 +349,8 @@ impl Default for DeploymentFilter {
 /// Filter parameters for usage queries
 #[derive(Debug, Clone)]
 pub struct UsageFilter {
-    pub start_date: Option<DateTime<Utc>>,
-    pub end_date: Option<DateTime<Utc>>,
+    pub start_date: Option<Timestamp>,
+    pub end_date: Option<Timestamp>,
     pub user_id: Option<UserId>,
     pub instance_id: Option<Uuid>,
     pub instance_type: Option<String>,
@@ -361,8 +361,8 @@ pub struct UsageFilter {
 /// Filter parameters for top consumer queries
 #[derive(Debug, Clone)]
 pub struct TopConsumerFilter {
-    pub start_date: Option<DateTime<Utc>>,
-    pub end_date: Option<DateTime<Utc>>,
+    pub start_date: Option<Timestamp>,
+    pub end_date: Option<Timestamp>,
     pub instance_type: Option<String>,
     pub rank_by: UsageRankBy,
     pub group_by: TopConsumerGroupBy,
@@ -381,8 +381,8 @@ pub trait BiMetricsRepository: Send + Sync {
     /// Get deployment summary counts
     async fn get_deployment_summary(
         &self,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
+        start_date: Option<Timestamp>,
+        end_date: Option<Timestamp>,
     ) -> anyhow::Result<DeploymentSummary>;
 
     /// Get status change history for a specific instance
@@ -429,8 +429,8 @@ pub trait BiMetricsService: Send + Sync {
 
     async fn get_deployment_summary(
         &self,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
+        start_date: Option<Timestamp>,
+        end_date: Option<Timestamp>,
     ) -> anyhow::Result<DeploymentSummary>;
 
     async fn get_status_history(
