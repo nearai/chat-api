@@ -423,6 +423,7 @@ pub async fn create_test_server_with_state(
                 aml_service,
                 aml_report_repo,
                 stripe_secret_key: config.stripe.secret_key.clone(),
+                refund_execution_enabled: config.stripe.refund_execution_enabled,
                 stripe_webhook_secret: config.stripe.webhook_secret.clone(),
                 near_rpc_url,
                 near_staking_contract_id,

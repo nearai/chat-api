@@ -296,6 +296,7 @@ async fn run() -> anyhow::Result<()> {
                 as Arc<dyn services::user_usage::UserUsageRepository>,
             agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
             stripe_secret_key: config.stripe.secret_key.clone(),
+            refund_execution_enabled: config.stripe.refund_execution_enabled,
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
             agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
             aml_service,

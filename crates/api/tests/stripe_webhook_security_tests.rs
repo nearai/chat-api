@@ -14,6 +14,7 @@ async fn webhook_rejects_incomplete_configuration_without_storing_event() {
                 secret_key: api_key.into(),
                 webhook_secret: secret.into(),
                 test_clock_enabled: false,
+                refund_execution_enabled: false,
             }),
             ..Default::default()
         })

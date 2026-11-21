@@ -616,6 +616,36 @@ pub struct StripeCreateCreditsCheckoutParams {
 
 #[async_trait]
 pub trait StripeClientPort: Send + Sync {
+    async fn refund_evidence(
+        &self,
+        invoice: &str,
+        subscription: &str,
+        customer: &str,
+    ) -> Result<stripe_client::refunds::RefundEvidence, SubscriptionError> {
+        let _ = (invoice, subscription, customer);
+        Err(SubscriptionError::NotConfigured)
+    }
+    async fn create_sunset_refund(
+        &self,
+        charge: &str,
+        amount: i64,
+        operation: &str,
+        attempt: &str,
+    ) -> Result<stripe_client::refunds::StripeRefund, SubscriptionError> {
+        let _ = (charge, amount, operation, attempt);
+        Err(SubscriptionError::NotConfigured)
+    }
+
+    async fn refund_preview_invoices(
+        &self,
+        subscription_id: &str,
+        customer_id: &str,
+        starting_after: Option<&str>,
+    ) -> Result<super::refund_preview::RefundInvoicePage, SubscriptionError> {
+        let _ = (subscription_id, customer_id, starting_after);
+        Err(SubscriptionError::NotConfigured)
+    }
+
     async fn verify_webhook_signature(
         &self,
         payload: &[u8],
@@ -1185,6 +1215,31 @@ pub trait SubscriptionService: Send + Sync {
         user_id: UserId,
         model_id: &str,
     ) -> Result<(), SubscriptionError>;
+
+    async fn admin_prepare_refund(
+        &self,
+        request: super::refunds::PrepareRefund,
+        actor: crate::UserId,
+    ) -> super::refunds::Result<super::refunds::RefundOperation>;
+    async fn admin_list_refunds(
+        &self,
+        subscription: Option<String>,
+        limit: i64,
+        offset: i64,
+    ) -> super::refunds::Result<super::refunds::RefundList>;
+    async fn admin_refund_action(
+        &self,
+        id: uuid::Uuid,
+        action: super::refunds::Action,
+        confirmation: Option<super::refunds::RefundConfirmation>,
+        actor: crate::UserId,
+    ) -> super::refunds::Result<super::refunds::RefundOperation>;
+
+    async fn admin_refund_preview(
+        &self,
+        subscription_id: &str,
+        request: super::refund_preview::RefundPreviewRequest,
+    ) -> Result<super::refund_preview::RefundPreview, SubscriptionError>;
 
     /// Admin only: List subscriptions with pagination, optionally filtered by user_id.
     async fn admin_list_subscriptions(
