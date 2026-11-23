@@ -237,14 +237,19 @@ async fn run() -> anyhow::Result<()> {
     // Initialize agent service
     tracing::info!("Initializing agent service...");
     let agent_repo = db.agent_repository();
-    let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
-        agent_repo.clone(),
-        config.agent.managers.clone(),
-        config.agent.nearai_api_url.clone(),
-        system_configs_service.clone()
-            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
-        config.agent.channel_relay_url.clone(),
-    ));
+    let agent_service = Arc::new(
+        services::agent::AgentServiceImpl::new(
+            agent_repo.clone(),
+            config.agent.managers.clone(),
+            config.agent.nearai_api_url.clone(),
+            system_configs_service.clone()
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+            config.agent.channel_relay_url.clone(),
+        )
+        .with_backup_export_create_enabled(config.agent.backup_export_create_enabled)
+        .with_backup_export_before(config.agent.backup_export_before.as_deref())
+        .expect("Invalid backup export configuration"),
+    );
 
     // Initialize agent proxy service
     tracing::info!("Initializing agent proxy service...");

@@ -142,8 +142,11 @@ pub enum AgentBackupError {
     InstanceNotFound,
     #[error("Access denied")]
     AccessDenied,
-    /// Agent manager rejected the request; the message is meant for the instance owner.
-    #[error("Invalid backup request")]
+    #[error("Historical backup downloads are not configured")]
+    ExportUnavailable,
+    #[error("New backup exports are disabled")]
+    CreationDisabled,
+    #[error("{0}")]
     InvalidRequest(String),
     #[error("Backup not found")]
     BackupNotFound,
@@ -151,6 +154,40 @@ pub enum AgentBackupError {
     BackupNotReady,
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
+}
+
+/// Pagination is applied after filtering eligible historical backups.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct BackupListOptions {
+    pub limit: u32,
+    pub offset: u64,
+}
+
+impl Default for BackupListOptions {
+    fn default() -> Self {
+        Self {
+            limit: 100,
+            offset: 0,
+        }
+    }
+}
+
+/// Owner-visible metadata for an eligible historical backup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct BackupSummary {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub size_bytes: u64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct BackupList {
+    pub export_before: DateTime<Utc>,
+    pub backups: Vec<BackupSummary>,
 }
 
 /// Presigned download link for a finished backup.
@@ -530,6 +567,14 @@ pub trait AgentService: Send + Sync {
         user_id: UserId,
         export_ssh_pubkey: Option<String>,
     ) -> Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>, AgentBackupError>;
+
+    /// List ready backups created strictly before the configured cutoff for the owner.
+    async fn list_backups(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+        options: BackupListOptions,
+    ) -> Result<BackupList, AgentBackupError>;
 
     /// Presigned download link for a finished backup of the instance.
     async fn get_backup_download(

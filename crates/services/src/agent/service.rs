@@ -14,8 +14,8 @@ use super::backup;
 use super::ports::{
     is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentApiKeyAuthError,
     AgentApiKeyCreationError, AgentBackupError, AgentInstance, AgentRepository, AgentService,
-    AgentServiceError, BackupDownload, CreateInstanceParams, InstanceBalance, UpgradeAvailability,
-    UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE, VALID_SERVICE_TYPES,
+    AgentServiceError, BackupDownload, BackupList, CreateInstanceParams, InstanceBalance,
+    UpgradeAvailability, UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE, VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
@@ -240,6 +240,8 @@ struct SaveInstanceParams {
 }
 
 pub struct AgentServiceImpl {
+    backup_export_before: Option<chrono::DateTime<chrono::Utc>>,
+    backup_export_create_enabled: bool,
     repository: Arc<dyn AgentRepository>,
     http_client: Client,
     /// Agent manager endpoints (URL + token pairs)
@@ -330,6 +332,8 @@ impl AgentServiceImpl {
             .unwrap_or_else(|_| Client::new());
 
         Self {
+            backup_export_before: None,
+            backup_export_create_enabled: false,
             repository,
             http_client,
             managers,
@@ -338,6 +342,37 @@ impl AgentServiceImpl {
             system_configs_service,
             channel_relay_url,
         }
+    }
+
+    /// Enable fresh backup creation and downloads independent of the historical cutoff.
+    pub fn with_backup_export_create_enabled(mut self, enabled: bool) -> Self {
+        self.backup_export_create_enabled = enabled;
+        self
+    }
+
+    /// Configure historical downloads with timezone-bearing, millisecond-precision cutoffs.
+    pub fn with_backup_export_before(mut self, value: Option<&str>) -> anyhow::Result<Self> {
+        self.backup_export_before = value
+            .map(|value| {
+                let value = value.trim();
+                if value.split_once('.').is_some_and(|(_, fraction)| {
+                    fraction.bytes().take_while(u8::is_ascii_digit).count() > 3
+                }) {
+                    return Err(anyhow!(
+                        "AGENT_BACKUP_EXPORT_BEFORE must have at most 3 fractional-second digits"
+                    ));
+                }
+
+                chrono::DateTime::parse_from_rfc3339(value)
+                    .map(|value| value.with_timezone(&chrono::Utc))
+                    .map_err(|_| {
+                        anyhow!(
+                            "AGENT_BACKUP_EXPORT_BEFORE must be an RFC 3339 timestamp with a timezone"
+                        )
+                    })
+            })
+            .transpose()?;
+        Ok(self)
     }
 
     /// Pick the next manager in round-robin order for new instance creation.
@@ -2273,6 +2308,11 @@ impl AgentService for AgentServiceImpl {
     ) -> Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>, AgentBackupError> {
         let instance =
             backup::load_owned_instance(self.repository.as_ref(), instance_id, user_id).await?;
+        if !self.backup_export_create_enabled {
+            return Err(AgentBackupError::CreationDisabled);
+        }
+        let export_ssh_pubkey = backup::validate_export_ssh_pubkey(export_ssh_pubkey.as_deref())
+            .map_err(|message| AgentBackupError::InvalidRequest(message.to_string()))?;
         let manager = self.resolve_manager(&instance)?;
         let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
         tracing::info!(%instance_id, "Starting backup export");
@@ -2285,14 +2325,22 @@ impl AgentService for AgentServiceImpl {
         backup::start_backup_export(&self.http_client, target, export_ssh_pubkey).await
     }
 
-    async fn get_backup_download(
+    async fn list_backups(
         &self,
         instance_id: Uuid,
         user_id: UserId,
-        backup_id: &str,
-    ) -> Result<BackupDownload, AgentBackupError> {
+        options: super::ports::BackupListOptions,
+    ) -> Result<BackupList, AgentBackupError> {
         let instance =
             backup::load_owned_instance(self.repository.as_ref(), instance_id, user_id).await?;
+        if !(1..=1000).contains(&options.limit) || options.offset > 9_007_199_254_740_991 {
+            return Err(AgentBackupError::InvalidRequest(
+                "limit must be 1–1000 and offset must be a non-negative safe integer".to_string(),
+            ));
+        }
+        let cutoff = self
+            .backup_export_before
+            .ok_or(AgentBackupError::ExportUnavailable)?;
         let manager = self.resolve_manager(&instance)?;
         let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
         let target = backup::ManagerTarget {
@@ -2301,7 +2349,38 @@ impl AgentService for AgentServiceImpl {
             instance_name: &instance.name,
             instance_id,
         };
-        backup::fetch_backup_download(&self.http_client, target, backup_id).await
+
+        backup::fetch_backup_list(&self.http_client, target, cutoff, options).await
+    }
+
+    async fn get_backup_download(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+        backup_id: &str,
+    ) -> Result<BackupDownload, AgentBackupError> {
+        let instance =
+            backup::load_owned_instance(self.repository.as_ref(), instance_id, user_id).await?;
+        if !backup::is_valid_backup_id(backup_id) {
+            return Err(AgentBackupError::BackupNotFound);
+        }
+        let cutoff = if self.backup_export_create_enabled {
+            None
+        } else {
+            Some(
+                self.backup_export_before
+                    .ok_or(AgentBackupError::ExportUnavailable)?,
+            )
+        };
+        let manager = self.resolve_manager(&instance)?;
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
+        let target = backup::ManagerTarget {
+            base_url: &manager.url,
+            bearer_token: &bearer_token,
+            instance_name: &instance.name,
+            instance_id,
+        };
+        backup::fetch_backup_download(&self.http_client, target, backup_id, cutoff).await
     }
 
     async fn check_upgrade_available(
