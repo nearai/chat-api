@@ -1,11 +1,13 @@
 #![cfg(feature = "test")]
 mod common;
 
-use chrono::{Duration, Utc};
 use services::auth::ports::{OAuthRepository, OAuthState};
 use services::user::ports::OAuthProvider;
+use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
+// Jiff timestamps require a checked conversion from SystemTime.
+#[allow(clippy::unnecessary_fallible_conversions)]
 fn state(age: Duration) -> OAuthState {
     OAuthState {
         state: Uuid::new_v4().to_string(),
@@ -14,7 +16,7 @@ fn state(age: Duration) -> OAuthState {
         frontend_callback: Some("https://app.example.com".into()),
         frontend_code_challenge: "A".repeat(43),
         frontend_state: "B".repeat(43),
-        created_at: Utc::now() - age,
+        created_at: (SystemTime::now() - age).try_into().unwrap(),
         provider_code_verifier: None,
     }
 }
@@ -24,7 +26,7 @@ fn state(age: Duration) -> OAuthState {
 async fn oauth_state_is_one_time_and_expired_state_is_deleted_but_not_returned() {
     let (_, db) = common::create_test_server_and_db(Default::default()).await;
     let repo = db.oauth_repository();
-    let recent = state(Duration::minutes(9));
+    let recent = state(Duration::from_secs(9 * 60));
     repo.store_oauth_state(&recent).await.unwrap();
     assert!(repo
         .consume_oauth_state(&recent.state)
@@ -36,7 +38,10 @@ async fn oauth_state_is_one_time_and_expired_state_is_deleted_but_not_returned()
         .await
         .unwrap()
         .is_none());
-    for age in [Duration::minutes(10), Duration::days(30)] {
+    for age in [
+        Duration::from_secs(10 * 60),
+        Duration::from_secs(30 * 86400),
+    ] {
         let expired = state(age);
         repo.store_oauth_state(&expired).await.unwrap();
         assert!(repo
@@ -64,9 +69,9 @@ async fn oauth_state_is_one_time_and_expired_state_is_deleted_but_not_returned()
 async fn starting_login_cleans_up_abandoned_expired_states() {
     let (_, db) = common::create_test_server_and_db(Default::default()).await;
     let repo = db.oauth_repository();
-    let abandoned = state(Duration::days(1));
+    let abandoned = state(Duration::from_secs(86400));
     repo.store_oauth_state(&abandoned).await.unwrap();
-    let recent = state(Duration::zero());
+    let recent = state(Duration::ZERO);
     repo.store_oauth_state(&recent).await.unwrap();
     let client = db.pool().get().await.unwrap();
     assert_eq!(
@@ -154,7 +159,7 @@ async fn google_and_github_share_an_initiation_limit() {
 async fn cleanup_skips_rows_locked_by_another_request() {
     let (_, db) = common::create_test_server_and_db(Default::default()).await;
     let repo = db.oauth_repository();
-    let expired = state(Duration::days(1));
+    let expired = state(Duration::from_secs(86400));
     repo.store_oauth_state(&expired).await.unwrap();
     let mut client = db.pool().get().await.unwrap();
     let tx = client.transaction().await.unwrap();
@@ -164,7 +169,7 @@ async fn cleanup_skips_rows_locked_by_another_request() {
     )
     .await
     .unwrap();
-    let recent = state(Duration::zero());
+    let recent = state(Duration::ZERO);
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
         repo.store_oauth_state(&recent),

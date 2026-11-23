@@ -77,6 +77,7 @@ use utoipa::OpenApi;
         crate::routes::admin::admin_list_all_instances,
         crate::routes::admin::admin_delete_instance,
         crate::routes::admin::admin_update_instance_credentials,
+        crate::routes::admin::admin_update_instance_name,
         crate::routes::admin::admin_start_instance,
         crate::routes::admin::admin_stop_instance,
         crate::routes::admin::admin_restart_instance,
