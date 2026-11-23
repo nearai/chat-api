@@ -1302,6 +1302,20 @@ impl AgentRepository for PostgresAgentRepository {
         Ok((instances, usage_map, total))
     }
 
+    async fn update_instance_name(&self, instance_id: Uuid, name: &str) -> anyhow::Result<bool> {
+        let client = self.pool.get().await?;
+        let updated = client
+            .execute(
+                "UPDATE agent_instances
+                 SET name = $1, updated_at = NOW()
+                 WHERE id = $2 AND status != 'deleted'",
+                &[&name, &instance_id],
+            )
+            .await?;
+
+        Ok(updated == 1)
+    }
+
     async fn update_instance_token(
         &self,
         instance_id: Uuid,

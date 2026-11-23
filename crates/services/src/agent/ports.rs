@@ -406,6 +406,10 @@ pub trait AgentRepository: Send + Sync {
         i64,
     )>;
 
+    /// Correct the stored name without changing the instance's other metadata.
+    /// Returns false when the instance is missing or deleted.
+    async fn update_instance_name(&self, instance_id: Uuid, name: &str) -> anyhow::Result<bool>;
+
     /// Atomically replace an instance's token and existing token query parameters in its URLs.
     /// Encrypt updated credentials without reading the old instance token.
     /// Returns false when the instance is missing or deleted.

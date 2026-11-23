@@ -1542,6 +1542,116 @@ pub async fn admin_list_all_instances(
     }))
 }
 
+/// The name used to address an existing agent instance.
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateInstanceNameRequest {
+    /// Existing agent name to store. Must match the name used by the agent manager.
+    #[schema(min_length = 1, max_length = 255)]
+    pub name: String,
+}
+
+/// Correct the stored agent name. This does not rename the running agent or change its URLs.
+/// Lifecycle and attestation requests use this name to address the agent.
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/agents/instances/{id}/name",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Database instance UUID")
+    ),
+    request_body = UpdateInstanceNameRequest,
+    responses(
+        (status = 204, description = "Stored instance name updated"),
+        (
+            status = 400,
+            description = "Invalid instance ID or name payload",
+            body = crate::error::ApiErrorResponse,
+        ),
+        (
+            status = 401,
+            description = "Unauthorized",
+            body = crate::error::ApiErrorResponse,
+        ),
+        (
+            status = 403,
+            description = "Forbidden - admin only",
+            body = crate::error::ApiErrorResponse,
+        ),
+        (
+            status = 404,
+            description = "Instance not found or deleted",
+            body = crate::error::ApiErrorResponse,
+        ),
+        (
+            status = 500,
+            description = "Failed to update instance name",
+            body = crate::error::ApiErrorResponse,
+        )
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_update_instance_name(
+    State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+    payload: Result<
+        Json<serde_json::Map<String, serde_json::Value>>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Result<StatusCode, ApiError> {
+    let instance_id = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    let invalid_payload =
+        || ApiError::bad_request("Expected a JSON object containing only a string name");
+    let Json(payload) = payload.map_err(|_| invalid_payload())?;
+    let request: UpdateInstanceNameRequest =
+        serde_json::from_value(serde_json::Value::Object(payload))
+            .map_err(|_| invalid_payload())?;
+    let name = &request.name;
+
+    if name.trim().is_empty() || name.chars().count() > 255 {
+        return Err(ApiError::bad_request(
+            "name must be nonblank and at most 255 characters",
+        ));
+    }
+
+    if name.trim() != name
+        || name.chars().any(char::is_control)
+        || name.contains(['/', '\\'])
+        || name == "."
+        || name.contains("..")
+    {
+        return Err(ApiError::bad_request("name contains invalid characters"));
+    }
+
+    let updated = app_state
+        .agent_repository
+        .update_instance_name(instance_id, name)
+        .await
+        .map_err(|_| {
+            tracing::error!(
+                %instance_id,
+                admin_user_id = %admin.user_id,
+                "Failed to update instance name"
+            );
+            ApiError::internal_server_error("Failed to update instance name")
+        })?;
+
+    if !updated {
+        return Err(ApiError::not_found("Instance not found"));
+    }
+
+    tracing::info!(
+        %instance_id,
+        admin_user_id = %admin.user_id,
+        "Admin updated instance name"
+    );
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Credentials that an administrator can replace in chat-api's instance record.
 #[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -3259,6 +3369,7 @@ pub fn create_admin_router() -> Router<AppState> {
                 .route("/instances", get(admin_list_all_instances))
                 .route("/instances/sync-status", post(admin_sync_agent_status))
                 .route("/instances/{id}", delete(admin_delete_instance))
+                .route("/instances/{id}/name", patch(admin_update_instance_name))
                 .route(
                     "/instances/{id}/credentials",
                     patch(admin_update_instance_credentials),
