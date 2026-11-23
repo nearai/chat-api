@@ -527,6 +527,7 @@ async fn run() -> anyhow::Result<()> {
                 as Arc<dyn services::system_configs::ports::SystemConfigsService>,
             config.agent.channel_relay_url.clone(),
         )
+        .with_backup_export_create_enabled(config.agent.backup_export_create_enabled)
         .with_backup_export_before(config.agent.backup_export_before.as_deref())
         .expect("Invalid backup export configuration"),
     );

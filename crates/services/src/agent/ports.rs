@@ -144,12 +144,33 @@ pub enum AgentBackupError {
     AccessDenied,
     #[error("Historical backup downloads are not configured")]
     ExportUnavailable,
+    #[error("New backup exports are disabled")]
+    CreationDisabled,
+    #[error("{0}")]
+    InvalidRequest(String),
     #[error("Backup not found")]
     BackupNotFound,
     #[error("Backup is not ready")]
     BackupNotReady,
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
+}
+
+/// Pagination is applied after filtering eligible historical backups.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct BackupListOptions {
+    pub limit: u32,
+    pub offset: u64,
+}
+
+impl Default for BackupListOptions {
+    fn default() -> Self {
+        Self {
+            limit: 100,
+            offset: 0,
+        }
+    }
 }
 
 /// Owner-visible metadata for an eligible historical backup.
@@ -538,11 +559,21 @@ pub trait AgentService: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<UpgradeAvailability>;
 
+    /// Start a backup on the instance's manager and stream its SSE events unchanged.
+    /// `export_ssh_pubkey` adds an extra recipient the owner can decrypt the archive with.
+    async fn export_backup_stream(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+        export_ssh_pubkey: Option<String>,
+    ) -> Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>, AgentBackupError>;
+
     /// List ready backups created strictly before the configured cutoff for the owner.
     async fn list_backups(
         &self,
         instance_id: Uuid,
         user_id: UserId,
+        options: BackupListOptions,
     ) -> Result<BackupList, AgentBackupError>;
 
     /// Presigned download link for a finished backup of the instance.

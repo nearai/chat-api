@@ -50,9 +50,14 @@ async fn fixture() -> Fixture {
 }
 
 async fn fixture_with_cutoff(cutoff: Option<&str>) -> Fixture {
+    fixture_with_options(cutoff, false).await
+}
+
+async fn fixture_with_options(cutoff: Option<&str>, create_enabled: bool) -> Fixture {
     let manager = MockServer::start().await;
     let (server, db, _state) = create_test_server_with_state(TestServerConfig {
         backup_export_before: cutoff.map(str::to_owned),
+        backup_export_create_enabled: create_enabled,
         agent_managers: Some(vec![config::AgentManager {
             url: manager.uri(),
             token: "test-manager-token".into(),
@@ -104,7 +109,7 @@ fn bearer(token: &str) -> String {
 }
 
 #[tokio::test]
-async fn owner_export_creation_is_retired_without_calling_manager() {
+async fn owner_export_creation_is_disabled_without_calling_manager() {
     let f = fixture().await;
 
     f.server
@@ -179,7 +184,10 @@ async fn list_and_download_apply_cutoff_and_hide_storage_metadata() {
 
     let list = f
         .server
-        .get(&format!("/v1/agents/instances/{}/backups", f.instance.id))
+        .get(&format!(
+            "/v1/agents/instances/{}/backups?limit=1&offset=0",
+            f.instance.id
+        ))
         .add_header(AUTHORIZATION, bearer(&f.owner_token))
         .await;
     list.assert_status_ok();
@@ -187,6 +195,18 @@ async fn list_and_download_apply_cutoff_and_hide_storage_metadata() {
     assert_eq!(body["backups"].as_array().unwrap().len(), 1);
     assert_eq!(body["backups"][0]["id"], "OLD");
     assert!(body["backups"][0].get("s3_key").is_none());
+    let requests = f.manager.received_requests().await.unwrap();
+    let list_request = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/backups"))
+        .unwrap();
+    let params: std::collections::HashMap<_, _> = list_request.url.query_pairs().collect();
+    assert_eq!(params.get("limit").map(|value| value.as_ref()), Some("1"));
+    assert_eq!(params.get("offset").map(|value| value.as_ref()), Some("0"));
+    assert_eq!(
+        params.get("status").map(|value| value.as_ref()),
+        Some("ready")
+    );
 
     f.server
         .get(&f.download_url("OLD"))
@@ -257,6 +277,89 @@ async fn backup_routes_require_authentication() {
         .post(&f.export_url())
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
+
+    f.assert_manager_untouched().await;
+}
+
+#[tokio::test]
+async fn enabled_fresh_export_streams_and_downloads_without_historical_cutoff() {
+    let f = fixture_with_options(None, true).await;
+    Mock::given(method("POST"))
+        .and(path("/auth/login"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "session_token": SESSION_TOKEN })),
+        )
+        .mount(&f.manager)
+        .await;
+    let events = "event: backup_complete\ndata: {\"backup_id\":\"NEW\"}\n\n";
+    Mock::given(method("POST"))
+        .and(path(f.manager_path("backup")))
+        .and(bearer_token(SESSION_TOKEN))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(events),
+        )
+        .expect(1)
+        .mount(&f.manager)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(f.manager_path("backups/NEW")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "NEW", "instance_name": f.instance.name, "created_at": "2026-11-02T00:00:00Z",
+            "size_bytes": 123, "status": "ready"
+        })))
+        .mount(&f.manager)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(f.manager_path("backups/NEW/download")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "url": "https://storage.example/new", "expires_in": 3600
+        })))
+        .expect(1)
+        .mount(&f.manager)
+        .await;
+
+    let response = f
+        .server
+        .post(&f.export_url())
+        .add_header(AUTHORIZATION, bearer(&f.owner_token))
+        .json(&json!({}))
+        .await;
+
+    response.assert_status_ok();
+    assert_eq!(response.text(), events);
+    f.server
+        .get(&f.download_url("NEW"))
+        .add_header(AUTHORIZATION, bearer(&f.owner_token))
+        .await
+        .assert_status_ok();
+    f.server
+        .get(&format!("/v1/agents/instances/{}/backups", f.instance.id))
+        .add_header(AUTHORIZATION, bearer(&f.owner_token))
+        .await
+        .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn list_rejects_invalid_pagination_without_manager_calls() {
+    let f = fixture().await;
+    for query in [
+        "limit=0",
+        "limit=1001",
+        "limit=-1",
+        "offset=-1",
+        "offset=9007199254740992",
+    ] {
+        f.server
+            .get(&format!(
+                "/v1/agents/instances/{}/backups?{query}",
+                f.instance.id
+            ))
+            .add_header(AUTHORIZATION, bearer(&f.owner_token))
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+    }
 
     f.assert_manager_untouched().await;
 }

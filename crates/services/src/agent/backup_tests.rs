@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::ports::{AgentService, MockAgentRepository};
+use crate::agent::ports::{AgentService, BackupListOptions, MockAgentRepository};
 use crate::agent::service::AgentServiceImpl;
 use crate::system_configs::ports::{PartialSystemConfigs, SystemConfigs, SystemConfigsService};
 use async_trait::async_trait;
@@ -125,7 +125,7 @@ async fn list_filters_by_instant_status_and_instance_and_sorts_newest_first() {
     let inst = instance(owner, &server.uri());
 
     let result = service(&server, inst.clone())
-        .list_backups(inst.id, owner)
+        .list_backups(inst.id, owner, BackupListOptions::default())
         .await
         .unwrap();
 
@@ -270,7 +270,9 @@ async fn missing_cutoff_and_non_owner_make_no_manager_calls() {
         .unwrap();
 
     assert!(matches!(
-        service.list_backups(inst.id, owner).await,
+        service
+            .list_backups(inst.id, owner, BackupListOptions::default())
+            .await,
         Err(AgentBackupError::ExportUnavailable)
     ));
     assert!(matches!(
@@ -279,7 +281,9 @@ async fn missing_cutoff_and_non_owner_make_no_manager_calls() {
     ));
     let other = UserId(Uuid::new_v4());
     assert!(matches!(
-        service.list_backups(inst.id, other).await,
+        service
+            .list_backups(inst.id, other, BackupListOptions::default())
+            .await,
         Err(AgentBackupError::AccessDenied)
     ));
     assert!(matches!(
@@ -324,7 +328,10 @@ async fn invalid_metadata_fails_closed() {
     let inst = instance(owner, &server.uri());
     let service = service(&server, inst.clone());
 
-    assert!(service.list_backups(inst.id, owner).await.is_err());
+    assert!(service
+        .list_backups(inst.id, owner, BackupListOptions::default())
+        .await
+        .is_err());
     assert!(service
         .get_backup_download(inst.id, owner, "BACKUP")
         .await
@@ -361,9 +368,153 @@ async fn empty_history_is_a_successful_empty_list() {
     let inst = instance(owner, &server.uri());
 
     let result = service(&server, inst.clone())
-        .list_backups(inst.id, owner)
+        .list_backups(inst.id, owner, BackupListOptions::default())
         .await
         .unwrap();
 
     assert!(result.backups.is_empty());
+}
+
+#[tokio::test]
+async fn list_forwards_eligibility_filters_and_pagination_to_manager() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/instances/{INSTANCE_NAME}/backups")))
+        .and(wiremock::matchers::query_param(
+            "created_at_lt",
+            "2026-11-01T00:00:00.000Z",
+        ))
+        .and(wiremock::matchers::query_param("status", "ready"))
+        .and(wiremock::matchers::query_param("limit", "1"))
+        .and(wiremock::matchers::query_param("offset", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([row(
+            "SIXTH",
+            "2026-10-20T00:00:00Z",
+            "ready"
+        )])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+
+    let page = service(&server, inst.clone())
+        .list_backups(
+            inst.id,
+            owner,
+            BackupListOptions {
+                limit: 1,
+                offset: 5,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(page.backups.len(), 1);
+    assert_eq!(page.backups[0].id, "SIXTH");
+}
+
+#[tokio::test]
+async fn invalid_pagination_never_calls_manager() {
+    for options in [
+        BackupListOptions {
+            limit: 0,
+            offset: 0,
+        },
+        BackupListOptions {
+            limit: 1001,
+            offset: 0,
+        },
+        BackupListOptions {
+            limit: 1,
+            offset: 9_007_199_254_740_992,
+        },
+    ] {
+        let server = MockServer::start().await;
+        let owner = UserId(Uuid::new_v4());
+        let inst = instance(owner, &server.uri());
+
+        let result = service(&server, inst.clone())
+            .list_backups(inst.id, owner, options)
+            .await;
+
+        assert!(matches!(result, Err(AgentBackupError::InvalidRequest(_))));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn enabled_fresh_exports_allow_new_downloads_without_a_cutoff() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    mount_metadata(
+        &server,
+        "backups/NEW",
+        row("NEW", "2026-11-02T00:00:00Z", "ready"),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/instances/{INSTANCE_NAME}/backups/NEW/download"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "url": "https://storage.example/new", "expires_in": 3600
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+
+    for cutoff in [None, Some("2026-11-01T00:00:00Z")] {
+        let service = service(&server, inst.clone())
+            .with_backup_export_create_enabled(true)
+            .with_backup_export_before(cutoff)
+            .unwrap();
+
+        let link = service
+            .get_backup_download(inst.id, owner, "NEW")
+            .await
+            .unwrap();
+
+        assert_eq!(link.url, "https://storage.example/new");
+    }
+}
+
+#[tokio::test]
+async fn fresh_export_downloads_still_check_status_instance_and_owner() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+    let service = service(&server, inst.clone()).with_backup_export_create_enabled(true);
+    let result = service
+        .get_backup_download(inst.id, UserId(Uuid::new_v4()), "NEW")
+        .await;
+    assert!(matches!(result, Err(AgentBackupError::AccessDenied)));
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    for (name, status) in [(INSTANCE_NAME, "creating"), ("other-instance", "ready")] {
+        let mut metadata = row("NEW", "2026-11-02T00:00:00Z", status);
+        metadata["instance_name"] = json!(name);
+        let guard = Mock::given(method("GET"))
+            .and(path(format!("/instances/{INSTANCE_NAME}/backups/NEW")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(metadata))
+            .mount_as_scoped(&server)
+            .await;
+
+        assert!(service
+            .get_backup_download(inst.id, owner, "NEW")
+            .await
+            .is_err());
+        drop(guard);
+    }
+
+    assert!(server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.path().ends_with("/download")));
 }

@@ -32,6 +32,7 @@ pub struct TestServerConfig {
     pub stripe_config: Option<config::StripeConfig>,
     pub agent_managers: Option<Vec<config::AgentManager>>,
     pub backup_export_before: Option<String>,
+    pub backup_export_create_enabled: bool,
     pub database_name: Option<String>,
     pub field_encryption: Option<services::db_pool::FieldEncryptionConfig>,
     pub cloud_api_api_key: Option<String>,
@@ -217,6 +218,7 @@ pub async fn create_test_server_with_state(
         config.stripe = stripe.clone();
     }
     config.agent.backup_export_before = test_config.backup_export_before.clone();
+    config.agent.backup_export_create_enabled = test_config.backup_export_create_enabled;
     if let Some(managers) = &test_config.agent_managers {
         config.agent.managers = managers.clone();
     }
@@ -382,6 +384,7 @@ pub async fn create_test_server_with_state(
                 as Arc<dyn services::system_configs::ports::SystemConfigsService>,
             config.agent.channel_relay_url.clone(),
         )
+        .with_backup_export_create_enabled(config.agent.backup_export_create_enabled)
         .with_backup_export_before(config.agent.backup_export_before.as_deref())
         .expect("Invalid backup export configuration"),
     );

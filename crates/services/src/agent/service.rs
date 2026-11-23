@@ -241,6 +241,7 @@ struct SaveInstanceParams {
 
 pub struct AgentServiceImpl {
     backup_export_before: Option<chrono::DateTime<chrono::Utc>>,
+    backup_export_create_enabled: bool,
     repository: Arc<dyn AgentRepository>,
     http_client: Client,
     /// Agent manager endpoints (URL + token pairs)
@@ -332,6 +333,7 @@ impl AgentServiceImpl {
 
         Self {
             backup_export_before: None,
+            backup_export_create_enabled: false,
             repository,
             http_client,
             managers,
@@ -340,6 +342,12 @@ impl AgentServiceImpl {
             system_configs_service,
             channel_relay_url,
         }
+    }
+
+    /// Enable fresh backup creation and downloads independent of the historical cutoff.
+    pub fn with_backup_export_create_enabled(mut self, enabled: bool) -> Self {
+        self.backup_export_create_enabled = enabled;
+        self
     }
 
     /// Configure historical downloads; malformed or timezone-less cutoffs fail initialization.
@@ -2279,13 +2287,44 @@ impl AgentService for AgentServiceImpl {
             .await
     }
 
+    async fn export_backup_stream(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+        export_ssh_pubkey: Option<String>,
+    ) -> Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>, AgentBackupError> {
+        let instance =
+            backup::load_owned_instance(self.repository.as_ref(), instance_id, user_id).await?;
+        if !self.backup_export_create_enabled {
+            return Err(AgentBackupError::CreationDisabled);
+        }
+        let export_ssh_pubkey = backup::validate_export_ssh_pubkey(export_ssh_pubkey.as_deref())
+            .map_err(|message| AgentBackupError::InvalidRequest(message.to_string()))?;
+        let manager = self.resolve_manager(&instance)?;
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
+        tracing::info!(%instance_id, "Starting backup export");
+        let target = backup::ManagerTarget {
+            base_url: &manager.url,
+            bearer_token: &bearer_token,
+            instance_name: &instance.name,
+            instance_id,
+        };
+        backup::start_backup_export(&self.http_client, target, export_ssh_pubkey).await
+    }
+
     async fn list_backups(
         &self,
         instance_id: Uuid,
         user_id: UserId,
+        options: super::ports::BackupListOptions,
     ) -> Result<BackupList, AgentBackupError> {
         let instance =
             backup::load_owned_instance(self.repository.as_ref(), instance_id, user_id).await?;
+        if !(1..=1000).contains(&options.limit) || options.offset > 9_007_199_254_740_991 {
+            return Err(AgentBackupError::InvalidRequest(
+                "limit must be 1–1000 and offset must be a non-negative safe integer".to_string(),
+            ));
+        }
         let cutoff = self
             .backup_export_before
             .ok_or(AgentBackupError::ExportUnavailable)?;
@@ -2298,7 +2337,7 @@ impl AgentService for AgentServiceImpl {
             instance_id,
         };
 
-        backup::fetch_backup_list(&self.http_client, target, cutoff).await
+        backup::fetch_backup_list(&self.http_client, target, cutoff, options).await
     }
 
     async fn get_backup_download(
@@ -2312,9 +2351,14 @@ impl AgentService for AgentServiceImpl {
         if !backup::is_valid_backup_id(backup_id) {
             return Err(AgentBackupError::BackupNotFound);
         }
-        let cutoff = self
-            .backup_export_before
-            .ok_or(AgentBackupError::ExportUnavailable)?;
+        let cutoff = if self.backup_export_create_enabled {
+            None
+        } else {
+            Some(
+                self.backup_export_before
+                    .ok_or(AgentBackupError::ExportUnavailable)?,
+            )
+        };
         let manager = self.resolve_manager(&instance)?;
         let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
         let target = backup::ManagerTarget {

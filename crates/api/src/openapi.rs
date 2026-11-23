@@ -196,6 +196,7 @@ use utoipa::OpenApi;
         services::agent::ports::BackupList,
         services::agent::ports::BackupSummary,
         crate::routes::agent_backups::BackupDownloadResponse,
+        crate::routes::agent_backups::ExportBackupRequest,
         // BI metrics (admin)
         crate::routes::admin::BiDeploymentQuery,
         crate::routes::admin::BiSummaryQuery,
