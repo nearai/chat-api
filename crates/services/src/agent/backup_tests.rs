@@ -309,6 +309,71 @@ async fn invalid_cutoffs_fail_initialization() {
 }
 
 #[tokio::test]
+async fn cutoff_precision_is_limited_to_three_fractional_digits() {
+    let server = MockServer::start().await;
+    let inst = instance(UserId(Uuid::new_v4()), &server.uri());
+
+    for cutoff in [
+        "2026-11-01T00:00:00.000500Z",
+        "2026-11-01T08:00:00.1234+08:00",
+        "2026-11-01T00:00:00.1230Z",
+        "2026-11-01T00:00:00.0000000001Z",
+    ] {
+        let result = service(&server, inst.clone()).with_backup_export_before(Some(cutoff));
+
+        assert!(result.is_err(), "unsupported cutoff precision: {cutoff}");
+    }
+
+    for cutoff in [
+        "2026-11-01T00:00:00Z",
+        "2026-11-01T00:00:00.1Z",
+        "2026-11-01T00:00:00.12Z",
+        " 2026-11-01T08:00:00.123+08:00 ",
+    ] {
+        let result = service(&server, inst.clone()).with_backup_export_before(Some(cutoff));
+
+        assert!(result.is_ok(), "supported cutoff precision: {cutoff}");
+    }
+}
+
+#[tokio::test]
+async fn millisecond_cutoff_preserves_the_previous_millisecond_backup() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/instances/{INSTANCE_NAME}/backups")))
+        .and(wiremock::matchers::query_param(
+            "created_at_lt",
+            "2026-11-01T00:00:00.001Z",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([row(
+            "ELIGIBLE",
+            "2026-11-01T00:00:00.000Z",
+            "ready"
+        )])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+    let service = service(&server, inst.clone())
+        .with_backup_export_before(Some("2026-11-01T08:00:00.001+08:00"))
+        .unwrap();
+
+    let page = service
+        .list_backups(inst.id, owner, BackupListOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(page.backups.len(), 1);
+    assert_eq!(page.backups[0].id, "ELIGIBLE");
+    assert_eq!(
+        serde_json::to_value(page).unwrap()["export_before"],
+        "2026-11-01T00:00:00.001Z"
+    );
+}
+
+#[tokio::test]
 async fn invalid_metadata_fails_closed() {
     let server = MockServer::start().await;
     mount_login(&server).await;

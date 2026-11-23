@@ -1,6 +1,9 @@
 # Historical agent backup downloads
 
-Set `AGENT_BACKUP_EXPORT_BEFORE` to an RFC 3339 timestamp with an explicit timezone.
+Set `AGENT_BACKUP_EXPORT_BEFORE` to an RFC 3339 timestamp with an explicit timezone
+and at most three fractional-second digits. More precise cutoffs fail initialization
+instead of being truncated, so filtering and browser comparisons use the same
+millisecond precision.
 Only ready backups whose `created_at` is strictly earlier than this instant are
 eligible. Equivalent timezone offsets are compared as instants. An unset value
 disables historical listing and downloads with HTTP 503 (unless fresh exports are enabled); an empty or invalid value fails

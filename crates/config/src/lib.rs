@@ -683,6 +683,7 @@ impl std::fmt::Debug for AgentManager {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AgentConfig {
     /// Historical listings and downloads use this strict RFC 3339 cutoff unless fresh exports are enabled.
+    /// Requires an explicit timezone and at most three fractional-second digits.
     /// Unset disables historical backup downloads.
     #[serde(default)]
     pub backup_export_before: Option<String>,

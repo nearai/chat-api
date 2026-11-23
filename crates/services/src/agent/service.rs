@@ -350,15 +350,28 @@ impl AgentServiceImpl {
         self
     }
 
-    /// Configure historical downloads; malformed or timezone-less cutoffs fail initialization.
+    /// Configure historical downloads with timezone-bearing, millisecond-precision cutoffs.
     pub fn with_backup_export_before(mut self, value: Option<&str>) -> anyhow::Result<Self> {
         self.backup_export_before = value
-            .map(|value| chrono::DateTime::parse_from_rfc3339(value.trim()))
-            .transpose()
-            .map_err(|_| {
-                anyhow!("AGENT_BACKUP_EXPORT_BEFORE must be an RFC 3339 timestamp with a timezone")
-            })?
-            .map(|value| value.with_timezone(&chrono::Utc));
+            .map(|value| {
+                let value = value.trim();
+                if value.split_once('.').is_some_and(|(_, fraction)| {
+                    fraction.bytes().take_while(u8::is_ascii_digit).count() > 3
+                }) {
+                    return Err(anyhow!(
+                        "AGENT_BACKUP_EXPORT_BEFORE must have at most 3 fractional-second digits"
+                    ));
+                }
+
+                chrono::DateTime::parse_from_rfc3339(value)
+                    .map(|value| value.with_timezone(&chrono::Utc))
+                    .map_err(|_| {
+                        anyhow!(
+                            "AGENT_BACKUP_EXPORT_BEFORE must be an RFC 3339 timestamp with a timezone"
+                        )
+                    })
+            })
+            .transpose()?;
         Ok(self)
     }
 
