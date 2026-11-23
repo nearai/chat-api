@@ -14,8 +14,8 @@ use super::backup;
 use super::ports::{
     is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentApiKeyAuthError,
     AgentApiKeyCreationError, AgentBackupError, AgentInstance, AgentRepository, AgentService,
-    AgentServiceError, BackupDownload, CreateInstanceParams, InstanceBalance, UpgradeAvailability,
-    UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE, VALID_SERVICE_TYPES,
+    AgentServiceError, BackupDownload, BackupList, CreateInstanceParams, InstanceBalance,
+    UpgradeAvailability, UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE, VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
@@ -240,6 +240,7 @@ struct SaveInstanceParams {
 }
 
 pub struct AgentServiceImpl {
+    backup_export_before: Option<chrono::DateTime<chrono::Utc>>,
     repository: Arc<dyn AgentRepository>,
     http_client: Client,
     /// Agent manager endpoints (URL + token pairs)
@@ -330,6 +331,7 @@ impl AgentServiceImpl {
             .unwrap_or_else(|_| Client::new());
 
         Self {
+            backup_export_before: None,
             repository,
             http_client,
             managers,
@@ -338,6 +340,18 @@ impl AgentServiceImpl {
             system_configs_service,
             channel_relay_url,
         }
+    }
+
+    /// Configure historical downloads; malformed or timezone-less cutoffs fail initialization.
+    pub fn with_backup_export_before(mut self, value: Option<&str>) -> anyhow::Result<Self> {
+        self.backup_export_before = value
+            .map(|value| chrono::DateTime::parse_from_rfc3339(value.trim()))
+            .transpose()
+            .map_err(|_| {
+                anyhow!("AGENT_BACKUP_EXPORT_BEFORE must be an RFC 3339 timestamp with a timezone")
+            })?
+            .map(|value| value.with_timezone(&chrono::Utc));
+        Ok(self)
     }
 
     /// Pick the next manager in round-robin order for new instance creation.
@@ -2265,24 +2279,26 @@ impl AgentService for AgentServiceImpl {
             .await
     }
 
-    async fn export_backup_stream(
+    async fn list_backups(
         &self,
         instance_id: Uuid,
         user_id: UserId,
-        export_ssh_pubkey: Option<String>,
-    ) -> Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>, AgentBackupError> {
+    ) -> Result<BackupList, AgentBackupError> {
         let instance =
             backup::load_owned_instance(self.repository.as_ref(), instance_id, user_id).await?;
+        let cutoff = self
+            .backup_export_before
+            .ok_or(AgentBackupError::ExportUnavailable)?;
         let manager = self.resolve_manager(&instance)?;
         let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
-        tracing::info!(%instance_id, "Starting backup export");
         let target = backup::ManagerTarget {
             base_url: &manager.url,
             bearer_token: &bearer_token,
             instance_name: &instance.name,
             instance_id,
         };
-        backup::start_backup_export(&self.http_client, target, export_ssh_pubkey).await
+
+        backup::fetch_backup_list(&self.http_client, target, cutoff).await
     }
 
     async fn get_backup_download(
@@ -2293,6 +2309,12 @@ impl AgentService for AgentServiceImpl {
     ) -> Result<BackupDownload, AgentBackupError> {
         let instance =
             backup::load_owned_instance(self.repository.as_ref(), instance_id, user_id).await?;
+        if !backup::is_valid_backup_id(backup_id) {
+            return Err(AgentBackupError::BackupNotFound);
+        }
+        let cutoff = self
+            .backup_export_before
+            .ok_or(AgentBackupError::ExportUnavailable)?;
         let manager = self.resolve_manager(&instance)?;
         let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
         let target = backup::ManagerTarget {
@@ -2301,7 +2323,7 @@ impl AgentService for AgentServiceImpl {
             instance_name: &instance.name,
             instance_id,
         };
-        backup::fetch_backup_download(&self.http_client, target, backup_id).await
+        backup::fetch_backup_download(&self.http_client, target, backup_id, cutoff).await
     }
 
     async fn check_upgrade_available(

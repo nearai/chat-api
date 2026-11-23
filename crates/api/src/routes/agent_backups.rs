@@ -1,25 +1,14 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState};
 use axum::{
     extract::{Extension, Path, State},
-    http::StatusCode,
-    response::Response,
     Json,
 };
 use serde::{Deserialize, Serialize};
-use services::agent::backup::{is_valid_backup_id, validate_export_ssh_pubkey};
-use services::agent::ports::AgentBackupError;
+use services::agent::backup::is_valid_backup_id;
+use services::agent::ports::{AgentBackupError, BackupList};
 use services::logging::error_type;
 use services::UserId;
-use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
-
-/// Request body for exporting a backup of the caller's instance.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub struct ExportBackupRequest {
-    /// One SSH public key line (ssh-ed25519 or ssh-rsa) that can also decrypt the backup
-    #[serde(default)]
-    pub export_ssh_pubkey: Option<String>,
-}
 
 /// Presigned download link for a finished backup.
 #[derive(Deserialize, Serialize, utoipa::ToSchema)]
@@ -57,7 +46,9 @@ fn backup_api_error(err: AgentBackupError, instance_id: Uuid, failure: &str) -> 
         AgentBackupError::AccessDenied => {
             ApiError::forbidden("This instance does not belong to you")
         }
-        AgentBackupError::InvalidRequest(message) => ApiError::bad_request(message),
+        AgentBackupError::ExportUnavailable => {
+            ApiError::service_unavailable("Historical backup downloads are not configured")
+        }
         AgentBackupError::BackupNotFound => ApiError::not_found("Backup not found"),
         AgentBackupError::BackupNotReady => ApiError::conflict("Backup is not ready yet"),
         AgentBackupError::Internal(e) => {
@@ -67,53 +58,55 @@ fn backup_api_error(err: AgentBackupError, instance_id: Uuid, failure: &str) -> 
     }
 }
 
-/// Export an encrypted backup of the caller's agent instance
-///
-/// Streams the agent manager's SSE events unchanged: `backup_started`, `status`,
-/// `backup_complete` or `error`. A backup can take several minutes.
+/// New backup creation is retired; owners can download eligible historical backups.
 #[utoipa::path(
     post,
     path = "/v1/agents/instances/{id}/backups/export",
     tag = "Agents",
     params(("id" = String, Path, description = "Instance ID")),
-    request_body = ExportBackupRequest,
-    responses(
-        (status = 200, description = "SSE stream of backup progress", content_type = "text/event-stream"),
-        (status = 400, description = "Invalid instance ID or SSH public key", body = crate::error::ApiErrorResponse),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
-        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
-    ),
+    responses((status = 410, description = "New backup exports are no longer available")),
     security(("session_token" = []))
 )]
 pub async fn export_backup(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
-    Json(request): Json<ExportBackupRequest>,
-) -> Result<Response, ApiError> {
+) -> Result<(), ApiError> {
+    ensure_instance_owner(&app_state, &instance_id, user.user_id).await?;
+    Err(ApiError::new(
+        axum::http::StatusCode::GONE,
+        "backup_creation_retired",
+        "New backup exports are no longer available. Choose an existing backup.",
+    ))
+}
+
+/// List ready historical backups created strictly before the configured cutoff.
+#[utoipa::path(
+    get,
+    path = "/v1/agents/instances/{id}/backups",
+    tag = "Agents",
+    params(("id" = String, Path, description = "Instance ID")),
+    responses(
+        (status = 200, description = "Eligible historical backups, newest first", body = BackupList),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not your instance"),
+        (status = 404, description = "Instance not found"),
+        (status = 503, description = "Historical downloads are not configured")
+    ),
+    security(("session_token" = []))
+)]
+pub async fn list_backups(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Json<BackupList>, ApiError> {
     let instance_uuid = ensure_instance_owner(&app_state, &instance_id, user.user_id).await?;
-    let export_ssh_pubkey = validate_export_ssh_pubkey(request.export_ssh_pubkey.as_deref())
-        .map_err(ApiError::bad_request)?;
-    tracing::info!(instance_id = %instance_uuid, user_id = %user.user_id, "Backup export requested");
-
-    let rx = app_state
+    app_state
         .agent_service
-        .export_backup_stream(instance_uuid, user.user_id, export_ssh_pubkey)
+        .list_backups(instance_uuid, user.user_id)
         .await
-        .map_err(|e| backup_api_error(e, instance_uuid, "Failed to start backup"))?;
-
-    // Propagate body errors: appending an SSE event could complete a truncated JSON frame.
-    let stream = ReceiverStream::new(rx);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-cache")
-        .header("connection", "keep-alive")
-        .header("x-accel-buffering", "no")
-        .body(axum::body::Body::from_stream(stream))
-        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
+        .map(Json)
+        .map_err(|e| backup_api_error(e, instance_uuid, "Failed to list backups"))
 }
 
 /// Get a presigned download link for a finished backup of the caller's instance
@@ -123,15 +116,16 @@ pub async fn export_backup(
     tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID"),
-        ("backup_id" = String, Path, description = "Backup ID from the backup_started event")
+        ("backup_id" = String, Path, description = "Backup ID from the eligible backup list")
     ),
     responses(
         (status = 200, description = "Presigned download link", body = BackupDownloadResponse),
         (status = 400, description = "Invalid instance or backup ID", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
-        (status = 404, description = "Instance or backup not found", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance or eligible backup not found", body = crate::error::ApiErrorResponse),
         (status = 409, description = "Backup is not ready yet", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Historical downloads are not configured"),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(("session_token" = []))

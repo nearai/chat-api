@@ -31,6 +31,7 @@ const TEST_DATABASE_ENCRYPTION_KEY: &str =
 pub struct TestServerConfig {
     pub stripe_config: Option<config::StripeConfig>,
     pub agent_managers: Option<Vec<config::AgentManager>>,
+    pub backup_export_before: Option<String>,
     pub database_name: Option<String>,
     pub field_encryption: Option<services::db_pool::FieldEncryptionConfig>,
     pub cloud_api_api_key: Option<String>,
@@ -215,6 +216,7 @@ pub async fn create_test_server_with_state(
     if let Some(stripe) = &test_config.stripe_config {
         config.stripe = stripe.clone();
     }
+    config.agent.backup_export_before = test_config.backup_export_before.clone();
     if let Some(managers) = &test_config.agent_managers {
         config.agent.managers = managers.clone();
     }
@@ -371,14 +373,18 @@ pub async fn create_test_server_with_state(
     let agent_repo = db.agent_repository();
 
     // Create agent service (needed by subscription service for instance kill on cancel)
-    let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
-        agent_repo.clone(),
-        config.agent.managers.clone(),
-        config.agent.nearai_api_url.clone(),
-        system_configs_service.clone()
-            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
-        config.agent.channel_relay_url.clone(),
-    ));
+    let agent_service = Arc::new(
+        services::agent::AgentServiceImpl::new(
+            agent_repo.clone(),
+            config.agent.managers.clone(),
+            config.agent.nearai_api_url.clone(),
+            system_configs_service.clone()
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+            config.agent.channel_relay_url.clone(),
+        )
+        .with_backup_export_before(config.agent.backup_export_before.as_deref())
+        .expect("Invalid backup export configuration"),
+    );
 
     // Initialize subscription service for testing
     let stripe_client: Arc<dyn StripeClientPort> = test_config

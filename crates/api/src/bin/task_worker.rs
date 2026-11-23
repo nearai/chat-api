@@ -518,13 +518,18 @@ async fn run() -> anyhow::Result<()> {
         ),
     );
 
-    let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
-        db.agent_repository() as Arc<dyn services::agent::ports::AgentRepository>,
-        config.agent.managers.clone(),
-        config.agent.nearai_api_url.clone(),
-        system_configs_service as Arc<dyn services::system_configs::ports::SystemConfigsService>,
-        config.agent.channel_relay_url.clone(),
-    ));
+    let agent_service = Arc::new(
+        services::agent::AgentServiceImpl::new(
+            db.agent_repository() as Arc<dyn services::agent::ports::AgentRepository>,
+            config.agent.managers.clone(),
+            config.agent.nearai_api_url.clone(),
+            system_configs_service
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+            config.agent.channel_relay_url.clone(),
+        )
+        .with_backup_export_before(config.agent.backup_export_before.as_deref())
+        .expect("Invalid backup export configuration"),
+    );
 
     let conversation_service = Arc::new(
         services::conversation::service::ConversationServiceImpl::new(

@@ -867,6 +867,10 @@ pub fn create_agent_router() -> Router<AppState> {
             get(check_upgrade_available),
         )
         .route(
+            "/instances/{id}/backups",
+            get(super::agent_backups::list_backups),
+        )
+        .route(
             "/instances/{id}/backups/export",
             post(super::agent_backups::export_backup),
         )

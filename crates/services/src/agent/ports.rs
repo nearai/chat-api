@@ -142,15 +142,31 @@ pub enum AgentBackupError {
     InstanceNotFound,
     #[error("Access denied")]
     AccessDenied,
-    /// Agent manager rejected the request; the message is meant for the instance owner.
-    #[error("Invalid backup request")]
-    InvalidRequest(String),
+    #[error("Historical backup downloads are not configured")]
+    ExportUnavailable,
     #[error("Backup not found")]
     BackupNotFound,
     #[error("Backup is not ready")]
     BackupNotReady,
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
+}
+
+/// Owner-visible metadata for an eligible historical backup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct BackupSummary {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub size_bytes: u64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct BackupList {
+    pub export_before: DateTime<Utc>,
+    pub backups: Vec<BackupSummary>,
 }
 
 /// Presigned download link for a finished backup.
@@ -522,14 +538,12 @@ pub trait AgentService: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<UpgradeAvailability>;
 
-    /// Start a backup on the instance's manager and stream its SSE events unchanged.
-    /// `export_ssh_pubkey` adds an extra recipient the owner can decrypt the archive with.
-    async fn export_backup_stream(
+    /// List ready backups created strictly before the configured cutoff for the owner.
+    async fn list_backups(
         &self,
         instance_id: Uuid,
         user_id: UserId,
-        export_ssh_pubkey: Option<String>,
-    ) -> Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>, AgentBackupError>;
+    ) -> Result<BackupList, AgentBackupError>;
 
     /// Presigned download link for a finished backup of the instance.
     async fn get_backup_download(

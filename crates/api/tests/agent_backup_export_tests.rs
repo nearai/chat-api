@@ -10,12 +10,10 @@ use services::{
     user::ports::UserRepository,
 };
 use uuid::Uuid;
-use wiremock::matchers::{bearer_token, body_json, method, path};
+use wiremock::matchers::{bearer_token, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const SESSION_TOKEN: &str = "crabshack-user-session";
-const PUBKEY: &str =
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtestkeytestkeytestkeytestkeytestkey me@host";
 
 struct Fixture {
     server: TestServer,
@@ -23,7 +21,6 @@ struct Fixture {
     instance: AgentInstance,
     owner_token: String,
     other_token: String,
-    state: api::state::AppState,
 }
 
 impl Fixture {
@@ -49,8 +46,13 @@ impl Fixture {
 
 /// Owner with CrabShack passkey credentials and one instance on a mocked manager.
 async fn fixture() -> Fixture {
+    fixture_with_cutoff(Some("2026-11-01T00:00:00Z")).await
+}
+
+async fn fixture_with_cutoff(cutoff: Option<&str>) -> Fixture {
     let manager = MockServer::start().await;
-    let (server, db, state) = create_test_server_with_state(TestServerConfig {
+    let (server, db, _state) = create_test_server_with_state(TestServerConfig {
+        backup_export_before: cutoff.map(str::to_owned),
         agent_managers: Some(vec![config::AgentManager {
             url: manager.uri(),
             token: "test-manager-token".into(),
@@ -94,58 +96,7 @@ async fn fixture() -> Fixture {
         instance,
         owner_token,
         other_token,
-        state,
     }
-}
-
-#[tokio::test]
-async fn export_propagates_body_errors_without_completing_a_partial_sse_event() {
-    use axum::extract::{Extension, Path, State};
-    use services::agent::ports::MockAgentService;
-
-    let mut f = fixture().await;
-    let mut service = MockAgentService::new();
-    service
-        .expect_export_backup_stream()
-        .times(1)
-        .returning(|_, _, _| {
-            let (tx, rx) = tokio::sync::mpsc::channel(2);
-            tx.try_send(Ok(bytes::Bytes::from_static(
-                b"event: backup_complete\ndata: {\"backup_id\":\"01J",
-            )))
-            .unwrap();
-            tx.try_send(Err(anyhow::anyhow!("Backup stream error")))
-                .unwrap();
-            Ok(rx)
-        });
-    f.state.agent_service = std::sync::Arc::new(service);
-    let response = api::routes::agent_backups::export_backup(
-        State(f.state),
-        Extension(api::middleware::AuthenticatedUser {
-            user_id: f.instance.user_id,
-            session_id: services::SessionId(Uuid::new_v4()),
-        }),
-        Path(f.instance.id.to_string()),
-        axum::Json(api::routes::agent_backups::ExportBackupRequest {
-            export_ssh_pubkey: None,
-        }),
-    )
-    .await
-    .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(axum::body::to_bytes(response.into_body(), 4096)
-        .await
-        .is_err());
-}
-
-async fn mount_login(manager: &MockServer) {
-    Mock::given(method("POST"))
-        .and(path("/auth/login"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "session_token": SESSION_TOKEN })),
-        )
-        .mount(manager)
-        .await;
 }
 
 fn bearer(token: &str) -> String {
@@ -153,135 +104,114 @@ fn bearer(token: &str) -> String {
 }
 
 #[tokio::test]
-async fn backup_routes_reject_non_owner_before_manager_call() {
+async fn owner_export_creation_is_retired_without_calling_manager() {
     let f = fixture().await;
+
     f.server
         .post(&f.export_url())
-        .add_header(AUTHORIZATION, bearer(&f.other_token))
-        .json(&json!({ "export_ssh_pubkey": PUBKEY }))
+        .add_header(AUTHORIZATION, bearer(&f.owner_token))
+        .json(&json!({}))
         .await
-        .assert_status(StatusCode::FORBIDDEN);
-    f.server
-        .get(&f.download_url("01JBACKUP"))
-        .add_header(AUTHORIZATION, bearer(&f.other_token))
-        .await
-        .assert_status(StatusCode::FORBIDDEN);
+        .assert_status(StatusCode::GONE);
+
     f.assert_manager_untouched().await;
 }
 
 #[tokio::test]
-async fn export_rejects_private_key_text() {
+async fn all_backup_routes_require_owner() {
     let f = fixture().await;
-    let response = f
-        .server
+
+    f.server
         .post(&f.export_url())
-        .add_header(AUTHORIZATION, bearer(&f.owner_token))
-        .json(&json!({
-            "export_ssh_pubkey": "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----"
-        }))
-        .await;
-    response.assert_status(StatusCode::BAD_REQUEST);
-    assert_eq!(
-        response.json::<Value>()["message"],
-        "paste the public key (.pub)"
-    );
+        .add_header(AUTHORIZATION, bearer(&f.other_token))
+        .json(&json!({}))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    for url in [
+        format!("/v1/agents/instances/{}/backups", f.instance.id),
+        f.download_url("BACKUP"),
+    ] {
+        f.server
+            .get(&url)
+            .add_header(AUTHORIZATION, bearer(&f.other_token))
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
+    }
+
     f.assert_manager_untouched().await;
 }
 
 #[tokio::test]
-async fn export_streams_manager_events_unchanged() {
+async fn list_and_download_apply_cutoff_and_hide_storage_metadata() {
     let f = fixture().await;
-    mount_login(&f.manager).await;
-    let sse = "event: backup_started\ndata: {\"backup_id\":\"01JBACKUP\"}\n\n\
-               event: status\ndata: {\"step\":\"encrypting_uploading\"}\n\n\
-               event: backup_complete\ndata: {\"backup_id\":\"01JBACKUP\",\"encrypted\":true}\n\n";
     Mock::given(method("POST"))
-        .and(path(f.manager_path("backup")))
-        .and(bearer_token(SESSION_TOKEN))
-        .and(body_json(json!({ "export_ssh_pubkey": PUBKEY })))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
-        .expect(1)
-        .mount(&f.manager)
-        .await;
-    let response = f
-        .server
-        .post(&f.export_url())
-        .add_header(AUTHORIZATION, bearer(&f.owner_token))
-        .json(&json!({ "export_ssh_pubkey": format!("{PUBKEY}\n") }))
-        .await;
-    response.assert_status_ok();
-    assert_eq!(response.header("content-type"), "text/event-stream");
-    assert_eq!(response.text(), sse);
-    f.manager.verify().await;
-}
-
-#[tokio::test]
-async fn export_forwards_manager_400() {
-    let f = fixture().await;
-    mount_login(&f.manager).await;
-    Mock::given(method("POST"))
-        .and(path(f.manager_path("backup")))
+        .and(path("/auth/login"))
         .respond_with(
-            ResponseTemplate::new(400).set_body_json(json!({ "error": "unsupported key type" })),
+            ResponseTemplate::new(200).set_body_json(json!({ "session_token": SESSION_TOKEN })),
         )
         .mount(&f.manager)
         .await;
-    let response = f
-        .server
-        .post(&f.export_url())
-        .add_header(AUTHORIZATION, bearer(&f.owner_token))
-        .json(&json!({ "export_ssh_pubkey": PUBKEY }))
-        .await;
-    response.assert_status(StatusCode::BAD_REQUEST);
-    assert_eq!(response.json::<Value>()["message"], "unsupported key type");
-}
-
-async fn mount_download(f: &Fixture, status: u16) {
-    mount_login(&f.manager).await;
+    let old = json!({ "id": "OLD", "instance_name": f.instance.name,
+        "created_at": "2026-10-31T23:59:59Z", "status": "ready", "size_bytes": 123,
+        "s3_key": "private-metadata" });
+    let exact = json!({ "id": "EXACT", "instance_name": f.instance.name,
+        "created_at": "2026-11-01T00:00:00Z", "status": "ready", "size_bytes": 123 });
+    for (suffix, data) in [
+        ("backups", json!([old, exact])),
+        ("backups/OLD", old),
+        ("backups/EXACT", exact),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(f.manager_path(suffix)))
+            .and(bearer_token(SESSION_TOKEN))
+            .respond_with(ResponseTemplate::new(200).set_body_json(data))
+            .mount(&f.manager)
+            .await;
+    }
     Mock::given(method("GET"))
-        .and(path(f.manager_path("backups/01JBACKUP/download")))
-        .and(bearer_token(SESSION_TOKEN))
-        .respond_with(
-            ResponseTemplate::new(status).set_body_json(
-                json!({ "url": "https://s3.test/presigned?sig=x", "expires_in": 3600 }),
-            ),
-        )
+        .and(path(f.manager_path("backups/OLD/download")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "url": "https://storage.example/download", "expires_in": 3600
+        })))
         .expect(1)
         .mount(&f.manager)
         .await;
-}
 
-#[tokio::test]
-async fn download_returns_manager_link() {
-    let f = fixture().await;
-    mount_download(&f, 200).await;
-    let response = f
+    let list = f
         .server
-        .get(&f.download_url("01JBACKUP"))
+        .get(&format!("/v1/agents/instances/{}/backups", f.instance.id))
         .add_header(AUTHORIZATION, bearer(&f.owner_token))
         .await;
-    response.assert_status_ok();
-    assert_eq!(
-        response.json::<Value>(),
-        json!({ "url": "https://s3.test/presigned?sig=x", "expires_in": 3600 })
-    );
-    f.manager.verify().await;
-}
+    list.assert_status_ok();
+    let body = list.json::<Value>();
+    assert_eq!(body["backups"].as_array().unwrap().len(), 1);
+    assert_eq!(body["backups"][0]["id"], "OLD");
+    assert!(body["backups"][0].get("s3_key").is_none());
 
-#[tokio::test]
-async fn download_not_ready_is_409() {
-    let f = fixture().await;
-    mount_download(&f, 409).await;
     f.server
-        .get(&f.download_url("01JBACKUP"))
+        .get(&f.download_url("OLD"))
         .add_header(AUTHORIZATION, bearer(&f.owner_token))
         .await
-        .assert_status(StatusCode::CONFLICT);
+        .assert_status_ok();
+    f.server
+        .get(&f.download_url("EXACT"))
+        .add_header(AUTHORIZATION, bearer(&f.owner_token))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+
+    assert!(f
+        .manager
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| !r.url.path().ends_with("/EXACT/download")));
 }
 
 #[tokio::test]
-async fn download_rejects_invalid_backup_id() {
+async fn download_rejects_invalid_backup_id_without_manager_call() {
     let f = fixture().await;
+
     for backup_id in ["bad-id", "bad.id", &"a".repeat(65)] {
         f.server
             .get(&f.download_url(backup_id))
@@ -289,5 +219,44 @@ async fn download_rejects_invalid_backup_id() {
             .await
             .assert_status(StatusCode::BAD_REQUEST);
     }
+
+    f.assert_manager_untouched().await;
+}
+
+#[tokio::test]
+async fn unset_cutoff_disables_listing_and_downloads() {
+    let f = fixture_with_cutoff(None).await;
+
+    for url in [
+        format!("/v1/agents/instances/{}/backups", f.instance.id),
+        f.download_url("OLD"),
+    ] {
+        f.server
+            .get(&url)
+            .add_header(AUTHORIZATION, bearer(&f.owner_token))
+            .await
+            .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    f.assert_manager_untouched().await;
+}
+
+#[tokio::test]
+async fn backup_routes_require_authentication() {
+    let f = fixture().await;
+
+    f.server
+        .get(&format!("/v1/agents/instances/{}/backups", f.instance.id))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    f.server
+        .get(&f.download_url("OLD"))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    f.server
+        .post(&f.export_url())
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+
     f.assert_manager_untouched().await;
 }
