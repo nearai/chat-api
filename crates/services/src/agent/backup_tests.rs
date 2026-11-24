@@ -1,49 +1,18 @@
 use super::*;
-use crate::agent::ports::{AgentService, MockAgentRepository};
+use crate::agent::ports::{AgentService, BackupListOptions, MockAgentRepository};
 use crate::agent::service::AgentServiceImpl;
 use crate::system_configs::ports::{PartialSystemConfigs, SystemConfigs, SystemConfigsService};
 use async_trait::async_trait;
 use config::AgentManager;
 use jiff::Timestamp;
+use serde_json::{json, Value};
 use std::sync::Arc;
-use wiremock::matchers::{bearer_token, body_json, method, path};
+use wiremock::matchers::{bearer_token, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const INSTANCE_NAME: &str = "backup-inst";
 const MANAGER_TOKEN: &str = "manager-token";
 const SESSION_TOKEN: &str = "user-session-token";
-const PUBKEY: &str =
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGtestkeytestkeytestkeytestkeytestkeytest me@host";
-
-#[tokio::test]
-async fn client_disconnect_closes_idle_upstream_body() {
-    let (upstream_tx, upstream_rx) = tokio::sync::mpsc::channel::<anyhow::Result<bytes::Bytes>>(1);
-    let body = reqwest::Body::wrap_stream(tokio_stream::wrappers::ReceiverStream::new(upstream_rx));
-    let response = reqwest::Response::from(http::Response::new(body));
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
-    let task = tokio::spawn(forward_stream(response, tx, Uuid::new_v4()));
-    // The upstream stays open without producing even a keepalive.
-    drop(rx);
-    tokio::time::timeout(Duration::from_secs(1), upstream_tx.closed())
-        .await
-        .expect("disconnect must drop the idle upstream body");
-    task.await.unwrap();
-}
-
-#[tokio::test]
-async fn upstream_body_failure_is_forwarded_after_partial_frame() {
-    let partial = bytes::Bytes::from_static(b"event: status\ndata: {\"step\":\"arch");
-    let body = reqwest::Body::wrap_stream(futures::stream::iter(vec![
-        Ok(partial.clone()),
-        Err(std::io::Error::other("upstream disconnected")),
-    ]));
-    let response = reqwest::Response::from(http::Response::new(body));
-    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-    forward_stream(response, tx, Uuid::new_v4()).await;
-    assert_eq!(rx.recv().await.unwrap().unwrap(), partial);
-    assert!(rx.recv().await.unwrap().is_err());
-    assert!(rx.recv().await.is_none());
-}
 
 struct NoSystemConfigs;
 
@@ -95,6 +64,8 @@ fn service(server: &MockServer, inst: AgentInstance) -> AgentServiceImpl {
         Arc::new(NoSystemConfigs),
         None,
     )
+    .with_backup_export_before(Some("2026-11-01T00:00:00Z"))
+    .unwrap()
 }
 
 async fn mount_login(server: &MockServer) {
@@ -108,57 +79,340 @@ async fn mount_login(server: &MockServer) {
         .await;
 }
 
-async fn collect(mut rx: tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>) -> String {
-    let mut out = Vec::new();
-    while let Some(chunk) = rx.recv().await {
-        out.extend_from_slice(&chunk.expect("stream chunk"));
+fn row(id: &str, timestamp: &str, status: &str) -> Value {
+    json!({
+        "id": id,
+        "instance_name": INSTANCE_NAME,
+        "created_at": timestamp,
+        "size_bytes": 123,
+        "status": status,
+        "s3_key": "not-public-metadata",
+        "created_by": "not-public-metadata",
+    })
+}
+
+async fn mount_metadata(server: &MockServer, suffix: &str, body: Value) {
+    Mock::given(method("GET"))
+        .and(path(format!("/instances/{INSTANCE_NAME}/{suffix}")))
+        .and(bearer_token(SESSION_TOKEN))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn list_filters_by_instant_status_and_instance_and_sorts_newest_first() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    let mut foreign = row("FOREIGN", "2026-10-01T00:00:00Z", "ready");
+    foreign["instance_name"] = json!("another-instance");
+    mount_metadata(
+        &server,
+        "backups",
+        json!([
+            row("OLD", "2026-10-01T00:00:00Z", "ready"),
+            row("EXACT", "2026-11-01T00:00:00Z", "ready"),
+            row("OFFSET", "2026-11-01T08:00:00+08:00", "ready"),
+            row("NEW", "2026-12-01T00:00:00Z", "ready"),
+            row("FAILED", "2026-10-01T00:00:00Z", "failed"),
+            row("CREATING", "2026-10-01T00:00:00Z", "creating"),
+            row("LATEST", "2026-11-01T07:59:59.999+08:00", "ready"),
+            row("bad/id", "2026-10-01T00:00:00Z", "ready"),
+            foreign,
+        ]),
+    )
+    .await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+
+    let result = service(&server, inst.clone())
+        .list_backups(inst.id, owner, BackupListOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result
+            .backups
+            .iter()
+            .map(|b| b.id.as_str())
+            .collect::<Vec<_>>(),
+        ["LATEST", "OLD"]
+    );
+    let json = serde_json::to_value(result).unwrap();
+    assert_eq!(json["export_before"], "2026-11-01T00:00:00Z");
+    assert!(json["backups"][0].get("s3_key").is_none());
+    assert!(json["backups"][0].get("created_by").is_none());
+}
+
+#[tokio::test]
+async fn download_rechecks_cutoff_and_instance_before_requesting_link() {
+    for (timestamp, status, instance_name, id, expected) in [
+        (
+            "2026-11-01T00:00:00Z",
+            "ready",
+            INSTANCE_NAME,
+            "BACKUP",
+            "not_found",
+        ),
+        (
+            "2026-11-02T00:00:00Z",
+            "ready",
+            INSTANCE_NAME,
+            "BACKUP",
+            "not_found",
+        ),
+        (
+            "2026-10-31T23:59:59Z",
+            "creating",
+            INSTANCE_NAME,
+            "BACKUP",
+            "not_ready",
+        ),
+        (
+            "2026-10-31T23:59:59Z",
+            "failed",
+            INSTANCE_NAME,
+            "BACKUP",
+            "not_ready",
+        ),
+        (
+            "2026-10-31T23:59:59Z",
+            "ready",
+            "other",
+            "BACKUP",
+            "not_found",
+        ),
+        (
+            "2026-10-31T23:59:59Z",
+            "ready",
+            INSTANCE_NAME,
+            "OTHER",
+            "not_found",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        mount_login(&server).await;
+        let mut metadata = row(id, timestamp, status);
+        metadata["instance_name"] = json!(instance_name);
+        mount_metadata(&server, "backups/BACKUP", metadata).await;
+        let owner = UserId(Uuid::new_v4());
+        let inst = instance(owner, &server.uri());
+
+        let result = service(&server, inst.clone())
+            .get_backup_download(inst.id, owner, "BACKUP")
+            .await;
+
+        match expected {
+            "not_ready" => assert!(matches!(result, Err(AgentBackupError::BackupNotReady))),
+            _ => assert!(matches!(result, Err(AgentBackupError::BackupNotFound))),
+        }
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| !r.url.path().ends_with("/download")));
     }
-    String::from_utf8(out).expect("utf8 stream")
 }
 
-#[test]
-fn export_key_blank_or_missing_is_omitted() {
-    assert_eq!(validate_export_ssh_pubkey(None), Ok(None));
-    assert_eq!(validate_export_ssh_pubkey(Some("  \n ")), Ok(None));
-}
+#[tokio::test]
+async fn download_refresh_reads_metadata_each_time() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    mount_metadata(
+        &server,
+        "backups/BACKUP",
+        row("BACKUP", "2026-10-31T23:59:59Z", "ready"),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/instances/{INSTANCE_NAME}/backups/BACKUP/download"
+        )))
+        .and(bearer_token(SESSION_TOKEN))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "url": "https://storage.example/download", "expires_in": 3600
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+    let service = service(&server, inst.clone());
 
-#[test]
-fn export_key_is_trimmed() {
-    let padded = format!("  {PUBKEY}\n");
+    for _ in 0..2 {
+        let link = service
+            .get_backup_download(inst.id, owner, "BACKUP")
+            .await
+            .unwrap();
+        assert_eq!(link.expires_in, 3600);
+        assert!(!format!("{link:?}").contains("storage.example"));
+    }
+
     assert_eq!(
-        validate_export_ssh_pubkey(Some(&padded)),
-        Ok(Some(PUBKEY.to_string()))
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with("/backups/BACKUP"))
+            .count(),
+        2
     );
 }
 
-#[test]
-fn export_key_rejects_private_key_text() {
-    let private =
-        "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----";
+#[tokio::test]
+async fn missing_cutoff_and_non_owner_make_no_manager_calls() {
+    let server = MockServer::start().await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+    let service = service(&server, inst.clone())
+        .with_backup_export_before(None)
+        .unwrap();
+
+    assert!(matches!(
+        service
+            .list_backups(inst.id, owner, BackupListOptions::default())
+            .await,
+        Err(AgentBackupError::ExportUnavailable)
+    ));
+    assert!(matches!(
+        service.get_backup_download(inst.id, owner, "BACKUP").await,
+        Err(AgentBackupError::ExportUnavailable)
+    ));
+    let other = UserId(Uuid::new_v4());
+    assert!(matches!(
+        service
+            .list_backups(inst.id, other, BackupListOptions::default())
+            .await,
+        Err(AgentBackupError::AccessDenied)
+    ));
+    assert!(matches!(
+        service.get_backup_download(inst.id, other, "BACKUP").await,
+        Err(AgentBackupError::AccessDenied)
+    ));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn invalid_cutoffs_fail_initialization() {
+    let server = MockServer::start().await;
+    let inst = instance(UserId(Uuid::new_v4()), &server.uri());
+
+    for cutoff in ["", "not-a-date", "2026-11-01T00:00:00"] {
+        assert!(service(&server, inst.clone())
+            .with_backup_export_before(Some(cutoff))
+            .is_err());
+    }
+    assert!(service(&server, inst)
+        .with_backup_export_before(Some("2026-11-01T08:00:00+08:00"))
+        .is_ok());
+}
+
+#[tokio::test]
+async fn cutoff_precision_is_limited_to_three_fractional_digits() {
+    let server = MockServer::start().await;
+    let inst = instance(UserId(Uuid::new_v4()), &server.uri());
+
+    for cutoff in [
+        "2026-11-01T00:00:00.000500Z",
+        "2026-11-01T08:00:00.1234+08:00",
+        "2026-11-01T00:00:00.1230Z",
+        "2026-11-01T00:00:00.0000000001Z",
+    ] {
+        let result = service(&server, inst.clone()).with_backup_export_before(Some(cutoff));
+
+        assert!(result.is_err(), "unsupported cutoff precision: {cutoff}");
+    }
+
+    for cutoff in [
+        "2026-11-01T00:00:00Z",
+        "2026-11-01T00:00:00.1Z",
+        "2026-11-01T00:00:00.12Z",
+        " 2026-11-01T08:00:00.123+08:00 ",
+    ] {
+        let result = service(&server, inst.clone()).with_backup_export_before(Some(cutoff));
+
+        assert!(result.is_ok(), "supported cutoff precision: {cutoff}");
+    }
+}
+
+#[tokio::test]
+async fn millisecond_cutoff_preserves_the_previous_millisecond_backup() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/instances/{INSTANCE_NAME}/backups")))
+        .and(wiremock::matchers::query_param(
+            "created_at_lt",
+            "2026-11-01T00:00:00.001Z",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([row(
+            "ELIGIBLE",
+            "2026-11-01T00:00:00.000Z",
+            "ready"
+        )])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+    let service = service(&server, inst.clone())
+        .with_backup_export_before(Some("2026-11-01T08:00:00.001+08:00"))
+        .unwrap();
+
+    let page = service
+        .list_backups(inst.id, owner, BackupListOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(page.backups.len(), 1);
+    assert_eq!(page.backups[0].id, "ELIGIBLE");
     assert_eq!(
-        validate_export_ssh_pubkey(Some(private)),
-        Err("paste the public key (.pub)")
+        serde_json::to_value(page).unwrap()["export_before"],
+        "2026-11-01T00:00:00.001Z"
     );
 }
 
-#[test]
-fn export_key_rejects_oversized_and_multi_line_input() {
-    let long = format!("ssh-rsa {}", "A".repeat(MAX_EXPORT_SSH_PUBKEY_BYTES));
-    assert_eq!(
-        validate_export_ssh_pubkey(Some(&long)),
-        Err("SSH public key is too long")
-    );
-    let two_keys = format!("{PUBKEY}\n{PUBKEY}");
-    assert_eq!(
-        validate_export_ssh_pubkey(Some(&two_keys)),
-        Err("SSH public key must be a single line")
-    );
+#[tokio::test]
+async fn invalid_metadata_fails_closed() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    mount_metadata(
+        &server,
+        "backups",
+        json!([row("BACKUP", "not-a-date", "ready")]),
+    )
+    .await;
+    mount_metadata(
+        &server,
+        "backups/BACKUP",
+        row("BACKUP", "not-a-date", "ready"),
+    )
+    .await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+    let service = service(&server, inst.clone());
+
+    assert!(service
+        .list_backups(inst.id, owner, BackupListOptions::default())
+        .await
+        .is_err());
+    assert!(service
+        .get_backup_download(inst.id, owner, "BACKUP")
+        .await
+        .is_err());
+    assert!(server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| !r.url.path().ends_with("/download")));
 }
 
 #[test]
 fn backup_id_must_be_short_alphanumeric() {
-    assert!(is_valid_backup_id("01JCX5Z8M3Q9V7K2N4P6R8T0WY"));
-    assert!(is_valid_backup_id(&"a".repeat(MAX_BACKUP_ID_LEN)));
+    assert!(is_valid_backup_id("BACKUP123"));
     for bad in [
         "",
         "../x",
@@ -167,127 +421,166 @@ fn backup_id_must_be_short_alphanumeric() {
         "a%2F",
         &"a".repeat(MAX_BACKUP_ID_LEN + 1),
     ] {
-        assert!(!is_valid_backup_id(bad), "accepted {bad:?}");
+        assert!(!is_valid_backup_id(bad));
     }
 }
 
 #[tokio::test]
-async fn export_streams_manager_events_unchanged_with_user_session() {
+async fn empty_history_is_a_successful_empty_list() {
     let server = MockServer::start().await;
     mount_login(&server).await;
-    let sse = "event: backup_started\ndata: {\"backup_id\":\"01J\"}\n\n\
-               event: backup_complete\ndata: {\"backup_id\":\"01J\",\"size_bytes\":7}\n\n";
-    Mock::given(method("POST"))
-        .and(path(format!("/instances/{INSTANCE_NAME}/backup")))
-        .and(bearer_token(SESSION_TOKEN))
-        .and(body_json(
-            serde_json::json!({ "export_ssh_pubkey": PUBKEY }),
+    mount_metadata(&server, "backups", json!([])).await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+
+    let result = service(&server, inst.clone())
+        .list_backups(inst.id, owner, BackupListOptions::default())
+        .await
+        .unwrap();
+
+    assert!(result.backups.is_empty());
+}
+
+#[tokio::test]
+async fn list_forwards_eligibility_filters_and_pagination_to_manager() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/instances/{INSTANCE_NAME}/backups")))
+        .and(wiremock::matchers::query_param(
+            "created_at_lt",
+            "2026-11-01T00:00:00.000Z",
         ))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+        .and(wiremock::matchers::query_param("status", "ready"))
+        .and(wiremock::matchers::query_param("limit", "1"))
+        .and(wiremock::matchers::query_param("offset", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([row(
+            "SIXTH",
+            "2026-10-20T00:00:00Z",
+            "ready"
+        )])))
         .expect(1)
         .mount(&server)
         .await;
     let owner = UserId(Uuid::new_v4());
     let inst = instance(owner, &server.uri());
-    let rx = service(&server, inst.clone())
-        .export_backup_stream(inst.id, owner, Some(PUBKEY.to_string()))
-        .await
-        .expect("stream starts");
-    assert_eq!(collect(rx).await, sse);
-}
 
-#[tokio::test]
-async fn export_without_key_sends_empty_body() {
-    let server = MockServer::start().await;
-    mount_login(&server).await;
-    Mock::given(method("POST"))
-        .and(path(format!("/instances/{INSTANCE_NAME}/backup")))
-        .and(body_json(serde_json::json!({})))
-        .respond_with(ResponseTemplate::new(200).set_body_raw("data: {}\n\n", "text/event-stream"))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let owner = UserId(Uuid::new_v4());
-    let inst = instance(owner, &server.uri());
-    let rx = service(&server, inst.clone())
-        .export_backup_stream(inst.id, owner, None)
-        .await
-        .expect("stream starts");
-    assert_eq!(collect(rx).await, "data: {}\n\n");
-}
-
-#[tokio::test]
-async fn export_forwards_manager_rejection_message() {
-    let server = MockServer::start().await;
-    mount_login(&server).await;
-    Mock::given(method("POST"))
-        .and(path(format!("/instances/{INSTANCE_NAME}/backup")))
-        .respond_with(
-            ResponseTemplate::new(400)
-                .set_body_json(serde_json::json!({ "error": "unsupported key type" })),
+    let page = service(&server, inst.clone())
+        .list_backups(
+            inst.id,
+            owner,
+            BackupListOptions {
+                limit: 1,
+                offset: 5,
+            },
         )
-        .mount(&server)
-        .await;
-    let owner = UserId(Uuid::new_v4());
-    let inst = instance(owner, &server.uri());
-    let err = service(&server, inst.clone())
-        .export_backup_stream(inst.id, owner, Some(PUBKEY.to_string()))
         .await
-        .expect_err("manager rejects");
-    assert!(matches!(err, AgentBackupError::InvalidRequest(m) if m == "unsupported key type"));
+        .unwrap();
+
+    assert_eq!(page.backups.len(), 1);
+    assert_eq!(page.backups[0].id, "SIXTH");
 }
 
 #[tokio::test]
-async fn export_by_non_owner_never_reaches_manager() {
-    let server = MockServer::start().await;
-    let inst = instance(UserId(Uuid::new_v4()), &server.uri());
-    let err = service(&server, inst.clone())
-        .export_backup_stream(inst.id, UserId(Uuid::new_v4()), None)
-        .await
-        .expect_err("not the owner");
-    assert!(matches!(err, AgentBackupError::AccessDenied));
-    assert!(server.received_requests().await.unwrap().is_empty());
+async fn invalid_pagination_never_calls_manager() {
+    for options in [
+        BackupListOptions {
+            limit: 0,
+            offset: 0,
+        },
+        BackupListOptions {
+            limit: 1001,
+            offset: 0,
+        },
+        BackupListOptions {
+            limit: 1,
+            offset: 9_007_199_254_740_992,
+        },
+    ] {
+        let server = MockServer::start().await;
+        let owner = UserId(Uuid::new_v4());
+        let inst = instance(owner, &server.uri());
+
+        let result = service(&server, inst.clone())
+            .list_backups(inst.id, owner, options)
+            .await;
+
+        assert!(matches!(result, Err(AgentBackupError::InvalidRequest(_))));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 }
 
-async fn download(server: &MockServer, status: u16) -> Result<BackupDownload, AgentBackupError> {
-    mount_login(server).await;
+#[tokio::test]
+async fn enabled_fresh_exports_allow_new_downloads_without_a_cutoff() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    mount_metadata(
+        &server,
+        "backups/NEW",
+        row("NEW", "2026-11-02T00:00:00Z", "ready"),
+    )
+    .await;
     Mock::given(method("GET"))
         .and(path(format!(
-            "/instances/{INSTANCE_NAME}/backups/01JBACKUP/download"
+            "/instances/{INSTANCE_NAME}/backups/NEW/download"
         )))
-        .and(bearer_token(SESSION_TOKEN))
-        .respond_with(ResponseTemplate::new(status).set_body_json(
-            serde_json::json!({ "url": "https://s3.test/presigned", "expires_in": 3600 }),
-        ))
-        .expect(1)
-        .mount(server)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "url": "https://storage.example/new", "expires_in": 3600
+        })))
+        .expect(2)
+        .mount(&server)
         .await;
     let owner = UserId(Uuid::new_v4());
     let inst = instance(owner, &server.uri());
-    service(server, inst.clone())
-        .get_backup_download(inst.id, owner, "01JBACKUP")
+
+    for cutoff in [None, Some("2026-11-01T00:00:00Z")] {
+        let service = service(&server, inst.clone())
+            .with_backup_export_create_enabled(true)
+            .with_backup_export_before(cutoff)
+            .unwrap();
+
+        let link = service
+            .get_backup_download(inst.id, owner, "NEW")
+            .await
+            .unwrap();
+
+        assert_eq!(link.url, "https://storage.example/new");
+    }
+}
+
+#[tokio::test]
+async fn fresh_export_downloads_still_check_status_instance_and_owner() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    let owner = UserId(Uuid::new_v4());
+    let inst = instance(owner, &server.uri());
+    let service = service(&server, inst.clone()).with_backup_export_create_enabled(true);
+    let result = service
+        .get_backup_download(inst.id, UserId(Uuid::new_v4()), "NEW")
+        .await;
+    assert!(matches!(result, Err(AgentBackupError::AccessDenied)));
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    for (name, status) in [(INSTANCE_NAME, "creating"), ("other-instance", "ready")] {
+        let mut metadata = row("NEW", "2026-11-02T00:00:00Z", status);
+        metadata["instance_name"] = json!(name);
+        let guard = Mock::given(method("GET"))
+            .and(path(format!("/instances/{INSTANCE_NAME}/backups/NEW")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(metadata))
+            .mount_as_scoped(&server)
+            .await;
+
+        assert!(service
+            .get_backup_download(inst.id, owner, "NEW")
+            .await
+            .is_err());
+        drop(guard);
+    }
+
+    assert!(server
+        .received_requests()
         .await
-}
-
-#[tokio::test]
-async fn download_returns_presigned_link() {
-    let server = MockServer::start().await;
-    let link = download(&server, 200).await.expect("download link");
-    assert_eq!(link.url, "https://s3.test/presigned");
-    assert_eq!(link.expires_in, 3600);
-    assert!(!format!("{link:?}").contains("s3.test"));
-}
-
-#[tokio::test]
-async fn download_maps_not_ready_and_unknown() {
-    let server = MockServer::start().await;
-    assert!(matches!(
-        download(&server, 409).await,
-        Err(AgentBackupError::BackupNotReady)
-    ));
-    let server = MockServer::start().await;
-    assert!(matches!(
-        download(&server, 404).await,
-        Err(AgentBackupError::BackupNotFound)
-    ));
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.path().ends_with("/download")));
 }

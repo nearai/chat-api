@@ -42,7 +42,7 @@ uuid = { version = "1.5", features = ["v4", "serde"] }
 jiff = { version = "0.2.46", default-features = false, features = ["std", "serde"] }
 tracing = "0.1"
 anyhow = "1.0"
-url = "2.5"
+url = "2.5.9"
 
 config = { path = "../config" }
 services = { path = "../services" }

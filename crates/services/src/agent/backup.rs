@@ -1,16 +1,18 @@
-use super::ports::{AgentBackupError, AgentInstance, AgentRepository, BackupDownload};
+use super::ports::{
+    AgentBackupError, AgentInstance, AgentRepository, BackupDownload, BackupList, BackupSummary,
+};
 use crate::logging::error_type;
 use crate::UserId;
 use anyhow::anyhow;
 use futures::stream::StreamExt;
+use jiff::Timestamp;
 use reqwest::StatusCode;
+use serde::{de::DeserializeOwned, Deserialize};
 use std::time::Duration;
 use uuid::Uuid;
 
-/// Upper bound for a whole backup export stream; CrabShack backups take several minutes.
 pub const BACKUP_EXPORT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 pub const MAX_EXPORT_SSH_PUBKEY_BYTES: usize = 16 * 1024;
-pub const MAX_BACKUP_ID_LEN: usize = 64;
 const MAX_MANAGER_ERROR_CHARS: usize = 512;
 const DEFAULT_MANAGER_ERROR: &str = "Invalid backup request";
 
@@ -31,7 +33,8 @@ pub fn validate_export_ssh_pubkey(key: Option<&str>) -> Result<Option<String>, &
     Ok(Some(key.to_string()))
 }
 
-/// Backup ids are CrabShack ULIDs; anything else never reaches the manager URL.
+pub const MAX_BACKUP_ID_LEN: usize = 64;
+
 pub fn is_valid_backup_id(backup_id: &str) -> bool {
     !backup_id.is_empty()
         && backup_id.len() <= MAX_BACKUP_ID_LEN
@@ -147,11 +150,110 @@ async fn manager_error_message(response: reqwest::Response) -> String {
         .unwrap_or_else(|| DEFAULT_MANAGER_ERROR.to_string())
 }
 
+#[derive(Deserialize)]
+struct ManagerBackup {
+    id: String,
+    instance_name: String,
+    created_at: Timestamp,
+    size_bytes: u64,
+    status: String,
+}
+
+async fn fetch_metadata<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    target: &ManagerTarget<'_>,
+    suffix: &str,
+) -> Result<T, AgentBackupError> {
+    let response = client
+        .get(target.instance_url(suffix))
+        .bearer_auth(target.bearer_token)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Failed to fetch backup metadata: {}", e.without_url()))?;
+
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err(AgentBackupError::BackupNotFound);
+    }
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "Backup metadata request failed with status {}",
+            response.status()
+        )
+        .into());
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|_| anyhow!("Invalid backup metadata response").into())
+}
+
+pub(super) async fn fetch_backup_list(
+    client: &reqwest::Client,
+    target: ManagerTarget<'_>,
+    cutoff: Timestamp,
+    options: super::ports::BackupListOptions,
+) -> Result<BackupList, AgentBackupError> {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("created_at_lt", &format!("{cutoff:.3}"))
+        .append_pair("status", "ready")
+        .append_pair("limit", &options.limit.to_string())
+        .append_pair("offset", &options.offset.to_string())
+        .finish();
+    let rows: Vec<ManagerBackup> =
+        fetch_metadata(client, &target, &format!("backups?{query}")).await?;
+    let mut backups: Vec<BackupSummary> = rows
+        .into_iter()
+        .filter(|row| {
+            row.instance_name == target.instance_name
+                && row.status == "ready"
+                && row.created_at < cutoff
+                && is_valid_backup_id(&row.id)
+        })
+        .map(|row| BackupSummary {
+            id: row.id,
+            created_at: row.created_at,
+            size_bytes: row.size_bytes,
+            status: row.status,
+        })
+        .collect();
+    backups.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+
+    backups.truncate(options.limit as usize);
+
+    Ok(BackupList {
+        export_before: cutoff,
+        backups,
+    })
+}
+
 pub(super) async fn fetch_backup_download(
     http_client: &reqwest::Client,
     target: ManagerTarget<'_>,
     backup_id: &str,
+    cutoff: Option<Timestamp>,
 ) -> Result<BackupDownload, AgentBackupError> {
+    // Re-read metadata on every request, including signed-link refreshes.
+    let metadata: ManagerBackup = fetch_metadata(
+        http_client,
+        &target,
+        &format!("backups/{}", urlencoding::encode(backup_id)),
+    )
+    .await?;
+    if metadata.id != backup_id || metadata.instance_name != target.instance_name {
+        return Err(AgentBackupError::BackupNotFound);
+    }
+    if cutoff.is_some_and(|cutoff| metadata.created_at >= cutoff) {
+        return Err(AgentBackupError::BackupNotFound);
+    }
+    if metadata.status != "ready" {
+        return Err(AgentBackupError::BackupNotReady);
+    }
+
     let suffix = format!("backups/{}/download", urlencoding::encode(backup_id));
     let instance_id = target.instance_id;
     let response = http_client
@@ -187,3 +289,7 @@ pub(super) async fn fetch_backup_download(
 #[cfg(test)]
 #[path = "backup_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "backup_export_tests.rs"]
+mod export_tests;
