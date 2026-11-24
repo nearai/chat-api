@@ -14,8 +14,9 @@ use super::backup;
 use super::ports::{
     is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentApiKeyAuthError,
     AgentApiKeyCreationError, AgentBackupError, AgentInstance, AgentRepository, AgentService,
-    AgentServiceError, BackupDownload, BackupList, CreateInstanceParams, InstanceBalance,
-    UpgradeAvailability, UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE, VALID_SERVICE_TYPES,
+    AgentServiceError, BackupDownload, BackupList, BackupSummary, CreateInstanceParams,
+    InstanceBalance, UpgradeAvailability, UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE,
+    VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
@@ -2351,6 +2352,55 @@ impl AgentService for AgentServiceImpl {
         };
 
         backup::fetch_backup_list(&self.http_client, target, cutoff, options).await
+    }
+
+    async fn admin_list_backups(
+        &self,
+        instance_id: Uuid,
+    ) -> Result<Vec<BackupSummary>, AgentBackupError> {
+        let instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
+            .ok_or(AgentBackupError::InstanceNotFound)?;
+        let manager = self.resolve_manager(&instance)?;
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
+        let target = backup::ManagerTarget {
+            base_url: &manager.url,
+            bearer_token: &bearer_token,
+            instance_name: &instance.name,
+            instance_id,
+        };
+
+        backup::fetch_admin_backup_list(&self.http_client, target).await
+    }
+
+    async fn admin_get_backup(
+        &self,
+        instance_id: Uuid,
+        backup_id: &str,
+    ) -> Result<BackupSummary, AgentBackupError> {
+        if backup_id.is_empty() || backup_id.contains("..") || backup_id.contains(['/', '\\']) {
+            return Err(AgentBackupError::InvalidRequest(
+                "Invalid backup ID format".to_string(),
+            ));
+        }
+
+        let instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
+            .ok_or(AgentBackupError::InstanceNotFound)?;
+        let manager = self.resolve_manager(&instance)?;
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
+        let target = backup::ManagerTarget {
+            base_url: &manager.url,
+            bearer_token: &bearer_token,
+            instance_name: &instance.name,
+            instance_id,
+        };
+
+        backup::fetch_admin_backup(&self.http_client, target, backup_id).await
     }
 
     async fn get_backup_download(

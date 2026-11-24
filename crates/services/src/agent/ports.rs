@@ -173,7 +173,7 @@ impl Default for BackupListOptions {
     }
 }
 
-/// Owner-visible metadata for an eligible historical backup.
+/// Backup metadata exposed by the query endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct BackupSummary {
@@ -575,6 +575,20 @@ pub trait AgentService: Send + Sync {
         user_id: UserId,
         options: BackupListOptions,
     ) -> Result<BackupList, AgentBackupError>;
+
+    /// List backup metadata for an administrator, without the owner download cutoff.
+    /// The caller must enforce administrator authorization.
+    async fn admin_list_backups(
+        &self,
+        instance_id: Uuid,
+    ) -> Result<Vec<BackupSummary>, AgentBackupError>;
+
+    /// Get backup metadata for an administrator. The caller must enforce authorization.
+    async fn admin_get_backup(
+        &self,
+        instance_id: Uuid,
+        backup_id: &str,
+    ) -> Result<BackupSummary, AgentBackupError>;
 
     /// Presigned download link for a finished backup of the instance.
     async fn get_backup_download(

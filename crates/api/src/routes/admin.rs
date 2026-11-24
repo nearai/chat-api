@@ -13,7 +13,7 @@ use axum::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use services::agent::ports::{AgentInstance, AgentServiceError};
+use services::agent::ports::{AgentBackupError, AgentInstance, AgentServiceError, BackupSummary};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::bi_metrics::{
     DeploymentFilter, DeploymentRecord, DeploymentSummary, DeploymentsSortBy, DeploymentsSortOrder,
@@ -2485,7 +2485,12 @@ pub async fn admin_create_backup(
         ("id" = String, Path, description = "Instance ID")
     ),
     responses(
-        (status = 200, description = "Backups retrieved"),
+        (
+            status = 200,
+            description = "Backups retrieved",
+            body = Vec<BackupSummary>
+        ),
+        (status = 400, description = "Invalid instance ID", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
         (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
@@ -2497,51 +2502,16 @@ pub async fn admin_list_backups(
     State(app_state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
-) -> Result<Response, ApiError> {
+) -> Result<Json<Vec<BackupSummary>>, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
-    tracing::info!("Admin: Listing backups: instance_id={}", instance_uuid);
-
-    let instance = app_state
-        .agent_repository
-        .get_instance(instance_uuid)
+    app_state
+        .agent_service
+        .admin_list_backups(instance_uuid)
         .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to fetch instance: instance_id={}, error={}",
-                instance_uuid,
-                error_type(&e)
-            );
-            ApiError::internal_server_error("Failed to fetch instance")
-        })?
-        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
-
-    let encoded_instance_id = encode(&instance.instance_id);
-    let (status, headers, body_stream) = app_state
-        .agent_proxy_service
-        .forward_request(
-            &instance,
-            &format!("/v1/instances/{}/backups", encoded_instance_id),
-            "GET",
-            axum::http::HeaderMap::new(),
-            Bytes::new(),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to forward request: instance_id={}, error={}",
-                instance_uuid,
-                error_type(&e)
-            );
-            ApiError::internal_server_error("Failed to list backups")
-        })?;
-
-    let response_body = axum::body::Body::from_stream(body_stream);
-    let mut response = Response::new(response_body);
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
-    Ok(response)
+        .map(Json)
+        .map_err(|error| admin_backup_query_error(error, instance_uuid))
 }
 
 /// Get backup details for an agent instance
@@ -2554,7 +2524,12 @@ pub async fn admin_list_backups(
         ("backup_id" = String, Path, description = "Backup ID")
     ),
     responses(
-        (status = 200, description = "Backup details retrieved"),
+        (
+            status = 200,
+            description = "Backup details retrieved",
+            body = BackupSummary
+        ),
+        (status = 400, description = "Invalid instance or backup ID", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
         (status = 404, description = "Instance or backup not found", body = crate::error::ApiErrorResponse),
@@ -2566,64 +2541,28 @@ pub async fn admin_get_backup(
     State(app_state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
     Path((instance_id, backup_id)): Path<(String, String)>,
-) -> Result<Response, ApiError> {
+) -> Result<Json<BackupSummary>, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
-    if backup_id.contains("..") || backup_id.contains("/") || backup_id.contains("\\") {
-        return Err(ApiError::bad_request("Invalid backup ID format"));
+    app_state
+        .agent_service
+        .admin_get_backup(instance_uuid, &backup_id)
+        .await
+        .map(Json)
+        .map_err(|error| admin_backup_query_error(error, instance_uuid))
+}
+
+fn admin_backup_query_error(error: AgentBackupError, instance_id: Uuid) -> ApiError {
+    match error {
+        AgentBackupError::InstanceNotFound => ApiError::not_found("Instance not found"),
+        AgentBackupError::BackupNotFound => ApiError::not_found("Backup not found"),
+        AgentBackupError::InvalidRequest(message) => ApiError::bad_request(message),
+        error => {
+            tracing::error!(%instance_id, error = error_type(&error), "Failed to query backups");
+            ApiError::internal_server_error("Failed to query backups")
+        }
     }
-
-    tracing::info!(
-        "Admin: Getting backup: instance_id={}, backup_id={}",
-        instance_uuid,
-        backup_id
-    );
-
-    let instance = app_state
-        .agent_repository
-        .get_instance(instance_uuid)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to fetch instance: instance_id={}, error={}",
-                instance_uuid,
-                error_type(&e)
-            );
-            ApiError::internal_server_error("Failed to fetch instance")
-        })?
-        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
-
-    let encoded_instance_id = encode(&instance.instance_id);
-    let encoded_backup_id = encode(&backup_id);
-    let (status, headers, body_stream) = app_state
-        .agent_proxy_service
-        .forward_request(
-            &instance,
-            &format!(
-                "/v1/instances/{}/backups/{}",
-                encoded_instance_id, encoded_backup_id
-            ),
-            "GET",
-            axum::http::HeaderMap::new(),
-            Bytes::new(),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to forward request: instance_id={}, backup_id={}, error={}",
-                instance_uuid,
-                backup_id,
-                error_type(&e)
-            );
-            ApiError::internal_server_error("Failed to get backup")
-        })?;
-
-    let response_body = axum::body::Body::from_stream(body_stream);
-    let mut response = Response::new(response_body);
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
-    Ok(response)
 }
 
 // =============================================================================
