@@ -355,7 +355,7 @@ impl AgentServiceImpl {
         self.backup_export_before = value
             .map(|value| {
                 let value = value.trim();
-                if value.split_once('.').is_some_and(|(_, fraction)| {
+                if value.split_once(['.', ',']).is_some_and(|(_, fraction)| {
                     fraction.bytes().take_while(u8::is_ascii_digit).count() > 3
                 }) {
                     return Err(anyhow!(

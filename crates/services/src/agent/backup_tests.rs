@@ -318,6 +318,7 @@ async fn cutoff_precision_is_limited_to_three_fractional_digits() {
         "2026-11-01T00:00:00.000500Z",
         "2026-11-01T08:00:00.1234+08:00",
         "2026-11-01T00:00:00.1230Z",
+        "2026-11-01T00:00:00,1230Z",
         "2026-11-01T00:00:00.0000000001Z",
     ] {
         let result = service(&server, inst.clone()).with_backup_export_before(Some(cutoff));
