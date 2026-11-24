@@ -234,6 +234,54 @@ pub(super) async fn fetch_backup_list(
     })
 }
 
+pub(super) async fn fetch_admin_backup_list(
+    client: &reqwest::Client,
+    target: ManagerTarget<'_>,
+) -> Result<Vec<BackupSummary>, AgentBackupError> {
+    let rows: Vec<ManagerBackup> = fetch_metadata(client, &target, "backups").await?;
+    let mut backups: Vec<BackupSummary> = rows
+        .into_iter()
+        .filter(|row| row.instance_name == target.instance_name)
+        .map(backup_summary)
+        .collect();
+
+    backups.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+
+    Ok(backups)
+}
+
+pub(super) async fn fetch_admin_backup(
+    client: &reqwest::Client,
+    target: ManagerTarget<'_>,
+    backup_id: &str,
+) -> Result<BackupSummary, AgentBackupError> {
+    let row: ManagerBackup = fetch_metadata(
+        client,
+        &target,
+        &format!("backups/{}", urlencoding::encode(backup_id)),
+    )
+    .await?;
+
+    if row.id != backup_id || row.instance_name != target.instance_name {
+        return Err(AgentBackupError::BackupNotFound);
+    }
+
+    Ok(backup_summary(row))
+}
+
+fn backup_summary(row: ManagerBackup) -> BackupSummary {
+    BackupSummary {
+        id: row.id,
+        created_at: row.created_at,
+        size_bytes: row.size_bytes,
+        status: row.status,
+    }
+}
+
 pub(super) async fn fetch_backup_download(
     http_client: &reqwest::Client,
     target: ManagerTarget<'_>,

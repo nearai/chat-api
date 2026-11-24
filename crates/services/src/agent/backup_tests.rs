@@ -583,3 +583,116 @@ async fn fresh_export_downloads_still_check_status_instance_and_owner() {
         .iter()
         .all(|request| !request.url.path().ends_with("/download")));
 }
+
+#[tokio::test]
+async fn admin_list_uses_manager_auth_without_runtime_credentials_or_download_cutoff() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    let mut foreign = row("OTHER", "2026-12-04T00:00:00Z", "ready");
+    foreign["instance_name"] = json!("another-instance");
+    mount_metadata(
+        &server,
+        "backups",
+        json!([
+            row("READY", "2026-12-01T00:00:00Z", "ready"),
+            row("FAILED", "2026-12-02T00:00:00Z", "failed"),
+            row("CREATING", "2026-12-03T00:00:00Z", "creating"),
+            foreign,
+        ]),
+    )
+    .await;
+    let inst = instance(UserId(Uuid::new_v4()), &server.uri());
+    let service = service(&server, inst.clone())
+        .with_backup_export_before(None)
+        .unwrap();
+
+    let backups = service.admin_list_backups(inst.id).await.unwrap();
+
+    assert_eq!(backups.len(), 3);
+    assert_eq!(backups[0].status, "creating");
+    assert_eq!(backups[1].status, "failed");
+    assert_eq!(backups[2].status, "ready");
+    assert!(serde_json::to_value(&backups).unwrap()[0]
+        .get("s3_key")
+        .is_none());
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests.iter().all(|request| request.url.query().is_none()));
+}
+
+#[tokio::test]
+async fn admin_detail_checks_backup_identity_and_allows_unready_metadata() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    mount_metadata(
+        &server,
+        "backups/FAILED",
+        row("FAILED", "2026-12-01T00:00:00Z", "failed"),
+    )
+    .await;
+    mount_metadata(
+        &server,
+        "backups/WRONG",
+        row("OTHER", "2026-12-01T00:00:00Z", "ready"),
+    )
+    .await;
+    let mut foreign = row("FOREIGN", "2026-12-01T00:00:00Z", "ready");
+    foreign["instance_name"] = json!("another-instance");
+    mount_metadata(&server, "backups/FOREIGN", foreign).await;
+    let inst = instance(UserId(Uuid::new_v4()), &server.uri());
+    let service = service(&server, inst.clone());
+
+    let backup = service.admin_get_backup(inst.id, "FAILED").await.unwrap();
+
+    assert_eq!(backup.id, "FAILED");
+    assert_eq!(backup.status, "failed");
+    for id in ["WRONG", "FOREIGN", "MISSING"] {
+        assert!(matches!(
+            service.admin_get_backup(inst.id, id).await,
+            Err(AgentBackupError::BackupNotFound)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn admin_queries_preserve_empty_lists_and_report_manager_failures() {
+    let server = MockServer::start().await;
+    mount_login(&server).await;
+    mount_metadata(&server, "backups", json!([])).await;
+    let inst = instance(UserId(Uuid::new_v4()), &server.uri());
+    let service = service(&server, inst.clone());
+
+    assert!(service
+        .admin_list_backups(inst.id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    server.reset().await;
+    mount_login(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/instances/{INSTANCE_NAME}/backups")))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    assert!(matches!(
+        service.admin_list_backups(inst.id).await,
+        Err(AgentBackupError::Internal(_))
+    ));
+}
+
+#[tokio::test]
+async fn admin_detail_rejects_invalid_ids_before_contacting_manager() {
+    let server = MockServer::start().await;
+    let inst = instance(UserId(Uuid::new_v4()), &server.uri());
+    let service = service(&server, inst.clone());
+
+    for id in ["", "..", "a/b", "a\\b"] {
+        assert!(matches!(
+            service.admin_get_backup(inst.id, id).await,
+            Err(AgentBackupError::InvalidRequest(_))
+        ));
+    }
+
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
