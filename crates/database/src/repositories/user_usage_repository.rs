@@ -2,7 +2,7 @@
 
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use services::user_usage::{
     InstanceUsageSummary, RecordUsageParams, UsageRankBy, UserUsageRepository, UserUsageSummary,
     METRIC_KEY_LLM_TOKENS,
@@ -131,7 +131,7 @@ impl UserUsageRepository for PostgresUserUsageRepository {
     async fn get_token_usage_sum(
         &self,
         user_id: UserId,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
         // Scalar subquery always returns one row; NULL when no matching rows -> COALESCE to 0
@@ -145,7 +145,7 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                       AND created_at >= NOW() - make_interval(secs => $2::bigint)
                 ), 0)::bigint as total
                 "#,
-                &[&user_id, &window_duration.num_seconds()],
+                &[&user_id, &window_duration.as_secs()],
             )
             .await?;
         Ok(row.get(0))
@@ -154,7 +154,7 @@ impl UserUsageRepository for PostgresUserUsageRepository {
     async fn get_cost_usage_sum(
         &self,
         user_id: UserId,
-        window_duration: Duration,
+        window_duration: SignedDuration,
     ) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
         // Scalar subquery always returns one row; NULL when no matching rows -> COALESCE to 0
@@ -168,7 +168,7 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                       AND created_at >= NOW() - make_interval(secs => $2::bigint)
                 ), 0)::bigint as total
                 "#,
-                &[&user_id, &window_duration.num_seconds()],
+                &[&user_id, &window_duration.as_secs()],
             )
             .await?;
         Ok(row.get(0))
@@ -177,8 +177,8 @@ impl UserUsageRepository for PostgresUserUsageRepository {
     async fn get_usage_by_user_id(
         &self,
         user_id: UserId,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<Option<UserUsageSummary>> {
         let client = self.pool.get().await?;
         // Time range: [start, end) — left-closed, right-open. NULL means no bound.
@@ -216,8 +216,8 @@ impl UserUsageRepository for PostgresUserUsageRepository {
     async fn get_instance_usage_summary(
         &self,
         instance_id: Uuid,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<InstanceUsageSummary> {
         let client = self.pool.get().await?;
         let row = client
@@ -247,8 +247,8 @@ impl UserUsageRepository for PostgresUserUsageRepository {
         &self,
         limit: i64,
         rank_by: UsageRankBy,
-        start: Option<DateTime<Utc>>,
-        end: Option<DateTime<Utc>>,
+        start: Option<Timestamp>,
+        end: Option<Timestamp>,
     ) -> anyhow::Result<Vec<UserUsageSummary>> {
         let client = self.pool.get().await?;
         let order = match rank_by {

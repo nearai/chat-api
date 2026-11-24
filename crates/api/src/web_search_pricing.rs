@@ -1,7 +1,7 @@
 //! In-memory cache for web_search pricing from cloud-api (GET /v1/services/web_search).
 //! Used to compute cost in nano-dollars for web_search usage recording.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use services::logging::error_type;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +29,7 @@ struct ServicePricingResponse {
 #[derive(Clone)]
 struct CacheEntry {
     pricing: WebSearchPricing,
-    fetched_at: DateTime<Utc>,
+    fetched_at: Timestamp,
 }
 
 /// Thread-safe in-memory cache for web_search pricing with TTL.
@@ -62,12 +62,12 @@ impl WebSearchPricingCache {
             return 0;
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         {
             let cache = self.cache.read().await;
             if let Some(ref entry) = *cache {
-                let age = now.signed_duration_since(entry.fetched_at);
-                if age.num_seconds() >= 0 && age.num_seconds() < self.ttl_secs {
+                let age = now.duration_since(entry.fetched_at);
+                if age.as_secs() >= 0 && age.as_secs() < self.ttl_secs {
                     debug!("Web search pricing cache hit");
                     return entry.pricing.cost_per_unit;
                 }

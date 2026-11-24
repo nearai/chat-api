@@ -202,7 +202,7 @@ impl AgentProxyService for AgentProxy {
 mod tests {
     use super::*;
     use crate::UserId;
-    use chrono::Utc;
+    use jiff::Timestamp;
     use uuid::Uuid;
     use wiremock::{matchers::any, Mock, MockServer, ResponseTemplate};
 
@@ -219,8 +219,8 @@ mod tests {
             agent_api_base_url: None,
             service_type: None,
             status: "active".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         }
     }
 

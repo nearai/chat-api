@@ -4,8 +4,8 @@ use super::ports::{
 use crate::logging::error_type;
 use crate::UserId;
 use anyhow::anyhow;
-use chrono::{DateTime, Utc};
 use futures::stream::StreamExt;
+use jiff::Timestamp;
 use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize};
 use std::time::Duration;
@@ -154,7 +154,7 @@ async fn manager_error_message(response: reqwest::Response) -> String {
 struct ManagerBackup {
     id: String,
     instance_name: String,
-    created_at: DateTime<Utc>,
+    created_at: Timestamp,
     size_bytes: u64,
     status: String,
 }
@@ -191,14 +191,11 @@ async fn fetch_metadata<T: DeserializeOwned>(
 pub(super) async fn fetch_backup_list(
     client: &reqwest::Client,
     target: ManagerTarget<'_>,
-    cutoff: DateTime<Utc>,
+    cutoff: Timestamp,
     options: super::ports::BackupListOptions,
 ) -> Result<BackupList, AgentBackupError> {
     let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair(
-            "created_at_lt",
-            &cutoff.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        )
+        .append_pair("created_at_lt", &format!("{cutoff:.3}"))
         .append_pair("status", "ready")
         .append_pair("limit", &options.limit.to_string())
         .append_pair("offset", &options.offset.to_string())
@@ -238,7 +235,7 @@ pub(super) async fn fetch_backup_download(
     http_client: &reqwest::Client,
     target: ManagerTarget<'_>,
     backup_id: &str,
-    cutoff: Option<DateTime<Utc>>,
+    cutoff: Option<Timestamp>,
 ) -> Result<BackupDownload, AgentBackupError> {
     // Re-read metadata on every request, including signed-link refreshes.
     let metadata: ManagerBackup = fetch_metadata(

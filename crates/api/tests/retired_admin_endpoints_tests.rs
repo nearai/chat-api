@@ -49,7 +49,7 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
     let user_id = UserId(Uuid::new_v4());
     let user_email = format!("{user_id}@example.com");
     let subscription_id = format!("sub_retired_admin_{user_id}");
-    let period_end = chrono::Utc::now() + chrono::Duration::days(30);
+    let period_end = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(30 * 24);
 
     let client = db.pool().get().await.unwrap();
     client
@@ -162,7 +162,7 @@ async fn retired_admin_writes_reject_admin_and_preserve_tenant_state() {
                 "status": "canceled",
                 "current_period_end": period_end,
                 "cancel_at_period_end": true,
-                "created_at": chrono::Utc::now(),
+                "created_at": jiff::Timestamp::now(),
             }),
             StatusCode::NOT_FOUND,
         ),

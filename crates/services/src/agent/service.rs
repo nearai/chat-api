@@ -3,8 +3,8 @@ use crate::system_configs::ports::{AgentHostingConfig, SystemConfigs, SystemConf
 use crate::UserId;
 use anyhow::anyhow;
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
 use config::AgentManager;
+use jiff::{SignedDuration, Timestamp};
 use reqwest::Client;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -240,7 +240,7 @@ struct SaveInstanceParams {
 }
 
 pub struct AgentServiceImpl {
-    backup_export_before: Option<chrono::DateTime<chrono::Utc>>,
+    backup_export_before: Option<Timestamp>,
     backup_export_create_enabled: bool,
     repository: Arc<dyn AgentRepository>,
     http_client: Client,
@@ -355,7 +355,7 @@ impl AgentServiceImpl {
         self.backup_export_before = value
             .map(|value| {
                 let value = value.trim();
-                if value.split_once('.').is_some_and(|(_, fraction)| {
+                if value.split_once(['.', ',']).is_some_and(|(_, fraction)| {
                     fraction.bytes().take_while(u8::is_ascii_digit).count() > 3
                 }) {
                     return Err(anyhow!(
@@ -363,13 +363,11 @@ impl AgentServiceImpl {
                     ));
                 }
 
-                chrono::DateTime::parse_from_rfc3339(value)
-                    .map(|value| value.with_timezone(&chrono::Utc))
-                    .map_err(|_| {
-                        anyhow!(
-                            "AGENT_BACKUP_EXPORT_BEFORE must be an RFC 3339 timestamp with a timezone"
-                        )
-                    })
+                value.parse::<Timestamp>().map_err(|_| {
+                    anyhow!(
+                        "AGENT_BACKUP_EXPORT_BEFORE must be an RFC 3339 timestamp with a timezone"
+                    )
+                })
             })
             .transpose()?;
         Ok(self)
@@ -784,7 +782,7 @@ impl AgentServiceImpl {
         }
 
         if let Some(expires_at) = api_key_info.expires_at {
-            if expires_at < Utc::now() {
+            if expires_at < Timestamp::now() {
                 tracing::warn!("API key has expired: api_key_id={}", api_key_info.id);
                 return Err(AgentApiKeyAuthError::Expired);
             }
@@ -1446,7 +1444,7 @@ impl AgentService for AgentServiceImpl {
             .as_deref()
             .map(|n| format!("instance-{}", n))
             .unwrap_or_else(|| "instance".to_string());
-        let default_expiry = Some(Utc::now() + Duration::days(90));
+        let default_expiry = Some(Timestamp::now() + SignedDuration::from_hours(90 * 24));
         let (api_key, plaintext_key) = self
             .create_unbound_api_key(user_id, key_name, None, default_expiry)
             .await?;
@@ -2807,7 +2805,7 @@ impl AgentService for AgentServiceImpl {
         user_id: UserId,
         name: String,
         spend_limit: Option<i64>,
-        expires_at: Option<chrono::DateTime<Utc>>,
+        expires_at: Option<jiff::Timestamp>,
     ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError> {
         tracing::info!(
             "Creating API key: instance_id={}, user_id={}",
@@ -2863,7 +2861,7 @@ impl AgentService for AgentServiceImpl {
         user_id: UserId,
         name: String,
         spend_limit: Option<i64>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError> {
         tracing::info!("Creating unbound API key: user_id={}", user_id);
 
@@ -3077,8 +3075,8 @@ impl AgentService for AgentServiceImpl {
         &self,
         instance_id: Uuid,
         user_id: UserId,
-        start_date: Option<chrono::DateTime<Utc>>,
-        end_date: Option<chrono::DateTime<Utc>>,
+        start_date: Option<jiff::Timestamp>,
+        end_date: Option<jiff::Timestamp>,
         limit: i64,
         offset: i64,
     ) -> anyhow::Result<(Vec<UsageLogEntry>, i64)> {
@@ -3905,8 +3903,8 @@ mod tests {
         AgentHostingConfig, AgentHostingCrabshackConfig, PartialSystemConfigs, SystemConfigs,
         SystemConfigsService,
     };
-    use chrono::Utc;
     use config::AgentManager;
+    use jiff::Timestamp;
 
     struct MockSystemConfigsService {
         configs: Option<SystemConfigs>,
@@ -4102,8 +4100,8 @@ mod tests {
             agent_api_base_url: Some("https://claws.example.com/api/crabshack/mgr2".to_string()),
             service_type: None,
             status: "active".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         };
 
         let mgr = svc.resolve_manager(&instance).unwrap();
@@ -4133,8 +4131,8 @@ mod tests {
             agent_api_base_url: Some("https://claws.different.com/api".to_string()),
             service_type: None,
             status: "active".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         };
 
         let err = svc.resolve_manager(&instance).unwrap_err();
@@ -4162,8 +4160,8 @@ mod tests {
             agent_api_base_url: None,
             service_type: None,
             status: "active".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         };
 
         let mgr = svc.resolve_manager(&instance).unwrap();
@@ -4330,8 +4328,8 @@ mod tests {
                 agent_api_base_url: manager_url.map(|s| s.to_string()),
                 service_type: None,
                 status: "active".to_string(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             }
         }
 
@@ -4768,8 +4766,8 @@ mod tests {
                 agent_api_base_url: Some(manager_url.to_string()),
                 service_type: None,
                 status: "stopped".to_string(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             }
         }
 
@@ -5473,8 +5471,8 @@ mod tests {
                 agent_api_base_url: Some(crabshack_uri.to_string()),
                 service_type: service_type.map(String::from),
                 status: "active".to_string(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
             }
         }
 

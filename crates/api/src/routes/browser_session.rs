@@ -167,8 +167,8 @@ async fn establish_for_context(
         &issued.refresh_token,
         issued
             .absolute_expires_at
-            .signed_duration_since(chrono::Utc::now())
-            .num_seconds(),
+            .duration_since(jiff::Timestamp::now())
+            .as_secs(),
     )))
 }
 
@@ -228,8 +228,8 @@ pub async fn refresh(
             &issued.refresh_token,
             issued
                 .absolute_expires_at
-                .signed_duration_since(chrono::Utc::now())
-                .num_seconds(),
+                .duration_since(jiff::Timestamp::now())
+                .as_secs(),
         )),
     );
 
@@ -238,7 +238,7 @@ pub async fn refresh(
         Json(AccessResponse {
             token: issued.token,
             session_id: issued.session_id.to_string(),
-            expires_at: issued.expires_at.to_rfc3339(),
+            expires_at: services::timestamps::format_utc(issued.expires_at),
         }),
     ))
 }

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ pub struct StripeSubscriptionSnapshot {
     pub customer_id: String,
     pub price_id: String,
     pub status: String,
-    pub current_period_end: DateTime<Utc>,
+    pub current_period_end: Timestamp,
     pub cancel_at_period_end: bool,
     pub first_item_id: String,
 }

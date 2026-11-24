@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -12,8 +12,8 @@ pub struct User {
     pub email: String,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// OAuth provider types
@@ -53,7 +53,7 @@ impl std::fmt::Display for BanType {
 pub struct LinkedOAuthAccount {
     pub provider: OAuthProvider,
     pub provider_user_id: String,
-    pub linked_at: DateTime<Utc>,
+    pub linked_at: Timestamp,
 }
 
 /// Detailed user profile with linked accounts
@@ -109,15 +109,15 @@ pub struct AccountDeletion {
     pub id: Uuid,
     pub user_id: UserId,
     pub status: AccountDeletionStatus,
-    pub requested_at: DateTime<Utc>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
+    pub requested_at: Timestamp,
+    pub started_at: Option<Timestamp>,
+    pub completed_at: Option<Timestamp>,
     pub attempt_count: i32,
-    pub lease_until: Option<DateTime<Utc>>,
+    pub lease_until: Option<Timestamp>,
     pub last_error: Option<String>,
     pub progress: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -298,7 +298,7 @@ pub trait UserRepository: Send + Sync {
         user_id: UserId,
         ban_type: BanType,
         reason: Option<String>,
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     ) -> anyhow::Result<()>;
 }
 
@@ -387,7 +387,7 @@ pub trait UserService: Send + Sync {
         user_id: UserId,
         ban_type: BanType,
         reason: Option<String>,
-        duration: chrono::Duration,
+        duration: jiff::SignedDuration,
     ) -> anyhow::Result<()>;
 }
 
@@ -448,8 +448,8 @@ pub struct UserSettings {
     pub id: uuid::Uuid,
     pub user_id: UserId,
     pub content: UserSettingsContent,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// Repository trait for user settings operations

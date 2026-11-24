@@ -1,6 +1,6 @@
 use crate::logging::error_type;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,7 +55,7 @@ pub struct AmlCheckResult {
     pub score: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_id: Option<String>,
-    pub checked_at: DateTime<Utc>,
+    pub checked_at: Timestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -75,7 +75,7 @@ impl AmlCheckResult {
             risk_level: AmlRiskLevel::Unknown,
             score: None,
             report_id: None,
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
             reason: Some(reason.into()),
         }
     }
@@ -146,7 +146,7 @@ fn high_risk_aml_slack_payload(
             threshold,
             result.report_id.as_deref().unwrap_or("n/a"),
             result.reason.as_deref().unwrap_or("n/a"),
-            result.checked_at.to_rfc3339()
+            crate::timestamps::format_utc(result.checked_at)
         ),
     })
 }
@@ -220,7 +220,7 @@ fn aml_provider_failure_slack_payload(
             score,
             result.report_id.as_deref().unwrap_or("n/a"),
             result.reason.as_deref().unwrap_or("unknown"),
-            result.checked_at.to_rfc3339()
+            crate::timestamps::format_utc(result.checked_at)
         ),
     })
 }
@@ -334,12 +334,12 @@ pub struct AmlReportRecord {
     pub risk_level: AmlRiskLevel,
     pub score: Option<i64>,
     pub report_id: Option<String>,
-    pub checked_at: DateTime<Utc>,
+    pub checked_at: Timestamp,
     pub reason: Option<String>,
     pub result: AmlCheckResult,
     pub active: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -347,7 +347,7 @@ pub struct AmlAccountAllowlistEntry {
     pub account_id: String,
     pub reason: Option<String>,
     pub created_by: Option<crate::UserId>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -413,7 +413,7 @@ pub struct NoopAmlReportRepository;
 #[async_trait]
 impl AmlReportRepository for NoopAmlReportRepository {
     async fn record_report(&self, event: AmlReportEvent) -> anyhow::Result<AmlReportRecord> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Ok(AmlReportRecord {
             id: Uuid::new_v4(),
             user_id: Some(event.user_id),
@@ -466,7 +466,7 @@ impl AmlReportRepository for NoopAmlReportRepository {
             account_id: normalize_account_id(account_id),
             reason,
             created_by,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         })
     }
 
@@ -826,9 +826,8 @@ fn normalize_lukka_response(
     let checked_at = report
         .as_ref()
         .and_then(|r| r.report_time.as_deref())
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(Utc::now);
+        .and_then(crate::timestamps::parse_timestamp)
+        .unwrap_or_else(Timestamp::now);
 
     AmlCheckResult {
         provider: PROVIDER_LUKKA.to_string(),
@@ -871,8 +870,7 @@ fn unknown_lukka_response(
         result.checked_at = report
             .report_time
             .as_deref()
-            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-            .map(|dt| dt.with_timezone(&Utc))
+            .and_then(crate::timestamps::parse_timestamp)
             .unwrap_or(result.checked_at);
     }
     result.score = cscore.and_then(|section| section.cscore);
@@ -1013,7 +1011,7 @@ mod tests {
             risk_level,
             score: Some(1),
             report_id: Some("report".to_string()),
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
             reason: None,
         }
     }

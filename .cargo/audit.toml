@@ -4,7 +4,4 @@
 # be selected from this workspace; remove when the parent crates drop pin-utils.
 ignore = [
     "RUSTSEC-2026-0441",
-    # Unmaintained notice only; this advisory reports no vulnerability.
-    # Remove this exception when chrono is replaced with a maintained alternative.
-    "RUSTSEC-2026-0543",
 ]

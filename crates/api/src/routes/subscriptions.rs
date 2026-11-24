@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use services::aml::{AmlCheckResult, AmlRiskLevel};
 use services::logging::error_type;
@@ -91,7 +91,7 @@ impl CreateSubscriptionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PublicAmlCheckResult {
     pub risk_level: AmlRiskLevel,
-    pub checked_at: DateTime<Utc>,
+    pub checked_at: Timestamp,
 }
 
 impl From<&AmlCheckResult> for PublicAmlCheckResult {
@@ -969,7 +969,7 @@ mod tests {
             risk_level,
             score: Some(42),
             report_id: Some("provider-report-id".to_string()),
-            checked_at: Utc::now(),
+            checked_at: Timestamp::now(),
             reason: Some("provider_reason".to_string()),
         }
     }

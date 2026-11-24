@@ -27,8 +27,8 @@ use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
 use crate::UserId;
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use futures::future::join_all;
+use jiff::{SignedDuration, Timestamp};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -62,8 +62,8 @@ pub struct SubscriptionServiceConfig {
 /// Cached credit limit for a user. Invalid after TTL_CACHE_SECS (10 mins) or when plan/credits change.
 struct CachedCreditLimit {
     plan_credits: u64,
-    period_start: chrono::DateTime<Utc>,
-    period_end: chrono::DateTime<Utc>,
+    period_start: jiff::Timestamp,
+    period_end: jiff::Timestamp,
     house_of_stake: Option<HouseOfStakeCreditSnapshot>,
     scope: CreditLimitCacheScope,
     cached_at: Instant,
@@ -74,7 +74,7 @@ struct CreditLimitCacheScope {
     provider: Option<String>,
     subscription_id: Option<String>,
     price_id: Option<String>,
-    current_period_end: Option<DateTime<Utc>>,
+    current_period_end: Option<Timestamp>,
 }
 
 impl CreditLimitCacheScope {
@@ -97,7 +97,7 @@ struct HouseOfStakeSnapshot {
     credited_stake_yocto: u128,
     last_observed_stake_yocto: u128,
     credit_limit_nano_usd: u64,
-    observed_at: DateTime<Utc>,
+    observed_at: Timestamp,
 }
 
 struct HouseOfStakeEntitlement {
@@ -106,8 +106,8 @@ struct HouseOfStakeEntitlement {
     is_fallback: bool,
 }
 
-fn ns_to_datetime(ns: u64) -> Option<DateTime<Utc>> {
-    DateTime::from_timestamp((ns / 1_000_000_000) as i64, (ns % 1_000_000_000) as u32)
+fn ns_to_datetime(ns: u64) -> Option<Timestamp> {
+    Timestamp::from_nanosecond(i128::from(ns)).ok()
 }
 
 fn persisted_house_of_stake_period(subscription: &Subscription) -> Option<BillingPeriod> {
@@ -169,17 +169,14 @@ fn stake_for_credit_floor(rate: u64, credit_floor_nano_usd: u64) -> Option<u128>
 
 fn prorated_credit_delta(
     full_period_delta: u64,
-    period_start: DateTime<Utc>,
-    period_end: DateTime<Utc>,
-    observed_at: DateTime<Utc>,
+    period_start: Timestamp,
+    period_end: Timestamp,
+    observed_at: Timestamp,
 ) -> u64 {
-    let total_seconds = period_end
-        .signed_duration_since(period_start)
-        .num_seconds()
-        .max(1) as u128;
+    let total_seconds = period_end.duration_since(period_start).as_secs().max(1) as u128;
     let remaining_seconds = period_end
-        .signed_duration_since(observed_at.max(period_start))
-        .num_seconds()
+        .duration_since(observed_at.max(period_start))
+        .as_secs()
         .clamp(0, total_seconds as i64) as u128;
     ((full_period_delta as u128).saturating_mul(remaining_seconds) / total_seconds)
         .min(u64::MAX as u128) as u64
@@ -191,7 +188,7 @@ fn next_house_of_stake_snapshot(
     observed_stake_yocto: u128,
     rate: u64,
     period: &BillingPeriod,
-    observed_at: DateTime<Utc>,
+    observed_at: Timestamp,
     credit_floor_nano_usd: Option<u64>,
 ) -> (HouseOfStakeSnapshot, u64) {
     if let Some(snapshot) = current {
@@ -266,7 +263,7 @@ fn next_house_of_stake_snapshot(
 
 fn credit_limit_cache_is_valid(
     cached: &CachedCreditLimit,
-    now: DateTime<Utc>,
+    now: Timestamp,
     active_subscription: Option<&Subscription>,
 ) -> bool {
     cached.cached_at.elapsed().as_secs() < TTL_CACHE_SECS
@@ -326,10 +323,7 @@ impl SubscriptionServiceImpl {
         status == SUBSCRIPTION_STATUS_ACTIVE || status == SUBSCRIPTION_STATUS_TRIALING
     }
 
-    fn canceled_house_of_stake_history_row(
-        mut sub: Subscription,
-        now: DateTime<Utc>,
-    ) -> Subscription {
+    fn canceled_house_of_stake_history_row(mut sub: Subscription, now: Timestamp) -> Subscription {
         sub.status = SUBSCRIPTION_STATUS_CANCELED.to_string();
         if sub.current_period_end > now {
             sub.current_period_end = now;
@@ -458,12 +452,12 @@ impl SubscriptionServiceImpl {
             }
         };
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         if let Some(report) = active_reports
             .iter()
             .find(|report| {
-                now.signed_duration_since(report.created_at)
-                    < Duration::days(self.aml_service.report_refresh_days())
+                now.duration_since(report.created_at)
+                    < SignedDuration::from_hours(24 * self.aml_service.report_refresh_days())
                     && self.aml_service.has_usable_policy_signal(&report.result)
             })
             .cloned()
@@ -597,7 +591,7 @@ impl SubscriptionServiceImpl {
                 "House-of-Stake purchase is missing created_ns".to_string(),
             )
         })?;
-        let now_ns = Utc::now().timestamp_nanos_opt().ok_or_else(|| {
+        let now_ns = i64::try_from(Timestamp::now().as_nanosecond()).map_err(|_| {
             SubscriptionError::InternalError("current time is out of range".to_string())
         })?;
         let now_ns = u64::try_from(now_ns).map_err(|_| {
@@ -978,7 +972,7 @@ impl SubscriptionServiceImpl {
             return Ok(None);
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         if active_subscriptions
             .iter()
             .any(|s| s.provider == "house-of-stake" && s.current_period_end <= now)
@@ -1048,7 +1042,7 @@ impl SubscriptionServiceImpl {
             }
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         Ok(active_subscriptions
             .into_iter()
             .filter(|s| !(s.provider == "house-of-stake" && s.current_period_end <= now))
@@ -1097,8 +1091,8 @@ impl SubscriptionServiceImpl {
             current_period_start: None,
             current_period_end: stripe_sub.current_period_end,
             cancel_at_period_end: stripe_sub.cancel_at_period_end,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
             pending_downgrade_target_price_id: None,
             pending_downgrade_from_price_id: None,
             pending_downgrade_expected_period_end: None,
@@ -1111,12 +1105,12 @@ impl SubscriptionServiceImpl {
     async fn resolve_plan_period_for_user(
         &self,
         user_id: UserId,
-    ) -> Result<(i64, chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
+    ) -> Result<(i64, jiff::Timestamp, jiff::Timestamp), SubscriptionError> {
         let active_subscription = self
             .get_active_subscription_for_entitlement(user_id)
             .await?;
         if let Some(cached) = self.credit_limit_cache.read().await.get(&user_id) {
-            if credit_limit_cache_is_valid(cached, Utc::now(), active_subscription.as_ref()) {
+            if credit_limit_cache_is_valid(cached, Timestamp::now(), active_subscription.as_ref()) {
                 return Ok((
                     cached.plan_credits.min(i64::MAX as u64) as i64,
                     cached.period_start,
@@ -1295,8 +1289,8 @@ impl SubscriptionServiceImpl {
             sub.provider == "house-of-stake"
                 && sub.subscription_id == chain_subscription.subscription_id
                 && sub.price_id != chain_subscription.price_id
-                && sub.current_period_end.timestamp()
-                    == chain_subscription.current_period_end.timestamp()
+                && crate::timestamps::unix_seconds(sub.current_period_end)
+                    == crate::timestamps::unix_seconds(chain_subscription.current_period_end)
                 && Self::is_active_or_trialing(&sub.status)
         })?;
         let local_plan_name =
@@ -1351,7 +1345,7 @@ impl SubscriptionServiceImpl {
         &self,
         subscription: &Subscription,
     ) -> Result<Option<HouseOfStakeEntitlement>, SubscriptionError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let client = self
             .db_pool
             .get()
@@ -1439,15 +1433,15 @@ impl SubscriptionServiceImpl {
     }
 
     fn is_valid_house_of_stake_chain_period(
-        period_start: DateTime<Utc>,
-        period_end: DateTime<Utc>,
-        now: DateTime<Utc>,
+        period_start: Timestamp,
+        period_end: Timestamp,
+        now: Timestamp,
     ) -> bool {
         period_start <= now
             && now < period_end
-            && period_end.signed_duration_since(period_start) > Duration::zero()
-            && period_end.signed_duration_since(period_start)
-                <= Duration::days(HOUSE_OF_STAKE_MAX_CHAIN_PERIOD_DAYS)
+            && period_end.duration_since(period_start) > SignedDuration::ZERO
+            && period_end.duration_since(period_start)
+                <= SignedDuration::from_hours(HOUSE_OF_STAKE_MAX_CHAIN_PERIOD_DAYS * 24)
     }
 
     async fn fixed_house_of_stake_period_fallback(
@@ -1466,7 +1460,11 @@ impl SubscriptionServiceImpl {
                 "HoS billing period is temporarily unavailable".to_string(),
             )
         })?;
-        if !Self::is_valid_house_of_stake_chain_period(period.start_at, period.end_at, Utc::now()) {
+        if !Self::is_valid_house_of_stake_chain_period(
+            period.start_at,
+            period.end_at,
+            Timestamp::now(),
+        ) {
             return Err(SubscriptionError::InternalError(
                 "HoS billing period is temporarily unavailable".to_string(),
             ));
@@ -1532,7 +1530,7 @@ impl SubscriptionServiceImpl {
             ));
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let period = chain_sub
             .start_ns
             .and_then(ns_to_datetime)
@@ -1582,7 +1580,7 @@ impl SubscriptionServiceImpl {
     ) -> Result<u64, SubscriptionError> {
         let period_start = period.start_at;
         let period_end = period.end_at;
-        let observed_at = Utc::now();
+        let observed_at = Timestamp::now();
         let mut client = self
             .db_pool
             .get()
@@ -1773,16 +1771,13 @@ impl SubscriptionServiceImpl {
             ));
         }
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let status_lower = chain_sub
             .status
             .as_deref()
             .unwrap_or("Active")
             .to_ascii_lowercase();
-        let now_ns = now
-            .timestamp_nanos_opt()
-            .and_then(|ns| u64::try_from(ns).ok())
-            .unwrap_or(u64::MAX);
+        let now_ns = u64::try_from(now.as_nanosecond()).unwrap_or(u64::MAX);
         if status_lower != "active" || chain_sub.end_ns <= now_ns {
             return self
                 .confirmed_zero_house_of_stake_entitlement(user_id, subscription)
@@ -1867,15 +1862,15 @@ impl SubscriptionServiceImpl {
             return false;
         };
 
-        let check_from = expected_end - Duration::hours(DOWNGRADE_CHECK_WINDOW_HOURS);
-        Utc::now() >= check_from
+        let check_from = expected_end - SignedDuration::from_hours(DOWNGRADE_CHECK_WINDOW_HOURS);
+        Timestamp::now() >= check_from
     }
 
     /// True when Stripe reports an earlier period end than we stored at downgrade scheduling time.
     /// In that case the pending downgrade intent is considered stale and marked `missed`.
     fn is_backward_period_drift(
-        current_period_end: chrono::DateTime<Utc>,
-        expected_period_end: chrono::DateTime<Utc>,
+        current_period_end: jiff::Timestamp,
+        expected_period_end: jiff::Timestamp,
     ) -> bool {
         current_period_end < expected_period_end
     }
@@ -1885,8 +1880,8 @@ impl SubscriptionServiceImpl {
     fn should_attempt_pending_downgrade_apply(
         current_price_id: &str,
         from_price_id: &str,
-        current_period_end: chrono::DateTime<Utc>,
-        expected_period_end: chrono::DateTime<Utc>,
+        current_period_end: jiff::Timestamp,
+        expected_period_end: jiff::Timestamp,
     ) -> bool {
         current_price_id == from_price_id && current_period_end >= expected_period_end
     }
@@ -2074,13 +2069,13 @@ impl SubscriptionServiceImpl {
     async fn resolve_free_plan_period_for_user(
         &self,
         user_id: UserId,
-    ) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
+    ) -> Result<(jiff::Timestamp, jiff::Timestamp), SubscriptionError> {
         let anchor = self
             .subscription_repo
             .last_cancelled_subscription_period_end_for_user(user_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-        Ok(free_plan_period_for_user(anchor, Utc::now()))
+        Ok(free_plan_period_for_user(anchor, Timestamp::now()))
     }
 
     fn near_rpc_err(e: String) -> SubscriptionError {
@@ -2310,7 +2305,7 @@ impl SubscriptionServiceImpl {
             if local_hos_subscriptions.is_empty() {
                 return Ok(Self::hos_reconcile_summary(false, 0, 0, false, None));
             }
-            let now = Utc::now();
+            let now = Timestamp::now();
             let canceled = local_hos_subscriptions.len() as u32;
             let mut db_client = self
                 .db_pool
@@ -2359,7 +2354,7 @@ impl SubscriptionServiceImpl {
                 .collect();
             let canceled = active_hos_subscriptions.len() as u32;
             if !active_hos_subscriptions.is_empty() {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 let mut db_client = self
                     .db_pool
                     .get()
@@ -2468,7 +2463,7 @@ impl SubscriptionServiceImpl {
             .cloned()
             .collect();
         let canceled = stale_hos_subscriptions.len() as u32;
-        let now = Utc::now();
+        let now = Timestamp::now();
         for sub in stale_hos_subscriptions {
             self.subscription_repo
                 .upsert_subscription_authoritative(
@@ -2490,25 +2485,11 @@ impl SubscriptionServiceImpl {
 
 /// Subtract one calendar month from a datetime, keeping the same day when possible.
 /// E.g. March 15 00:00 → Feb 15 00:00. March 31 → Feb 28/29 (last day of month).
-fn sub_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
-    use chrono::NaiveDate;
-    let d = dt.date_naive();
-    let (y, m, day) = (d.year(), d.month(), d.day());
-    let (new_y, new_m) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
-    let new_d = NaiveDate::from_ymd_opt(new_y, new_m, day).unwrap_or_else(|| {
-        // Day overflow (e.g. March 31 -> Feb 31 doesn't exist): use last day of month
-        let (next_y, next_m) = if new_m == 12 {
-            (new_y + 1, 1)
-        } else {
-            (new_y, new_m + 1)
-        };
-        NaiveDate::from_ymd_opt(next_y, next_m, 1)
-            .and_then(|first_of_next| first_of_next.pred_opt())
-            .unwrap_or_else(|| {
-                NaiveDate::from_ymd_opt(new_y, new_m, 28).expect("28th day of month exists")
-            })
-    });
-    chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
+fn sub_one_month_same_day(dt: jiff::Timestamp) -> jiff::Timestamp {
+    dt.to_zoned(jiff::tz::TimeZone::UTC)
+        .checked_sub(jiff::Span::new().months(1))
+        .expect("previous month is representable")
+        .timestamp()
 }
 
 fn parse_required_hos_target_amount_yocto(
@@ -2538,40 +2519,27 @@ fn parse_required_hos_target_amount_yocto(
 /// Add `months_to_add` whole calendar months to `anchor` in **one step** (same rules as
 /// `sub_one_month_same_day` for day overflow). This matches Stripe-style billing: e.g. anchor Jan 31
 /// → +1 month Feb 28/29, → +2 months **Mar 31** (not Mar 28 from chaining one-month steps).
-fn add_months_same_day_from_anchor(
-    anchor: chrono::DateTime<Utc>,
-    months_to_add: u32,
-) -> chrono::DateTime<Utc> {
-    use chrono::NaiveDate;
-    let d = anchor.date_naive();
-    let (y, m, day) = (d.year(), d.month(), d.day());
-    let total = (i64::from(y)) * 12 + (i64::from(m) - 1) + i64::from(months_to_add);
-    let new_y = (total / 12) as i32;
-    let new_m = ((total % 12) + 1) as u32;
-    let new_d = NaiveDate::from_ymd_opt(new_y, new_m, day).unwrap_or_else(|| {
-        let (next_y, next_m) = if new_m == 12 {
-            (new_y + 1, 1)
-        } else {
-            (new_y, new_m + 1)
-        };
-        NaiveDate::from_ymd_opt(next_y, next_m, 1)
-            .and_then(|first_of_next| first_of_next.pred_opt())
-            .expect("last day of target month after month arithmetic")
-    });
-    chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(anchor.time()), Utc)
+fn add_months_same_day_from_anchor(anchor: jiff::Timestamp, months_to_add: u32) -> jiff::Timestamp {
+    anchor
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .checked_add(jiff::Span::new().months(i64::from(months_to_add)))
+        .expect("billing month is representable")
+        .timestamp()
 }
 
 /// Free-plan month starting when the paid period ended (`cancellation_period_end`), same length as Stripe monthly cycles.
 /// Period boundaries are **indexed from the anchor** (`anchor + k months`), not by chaining one-month hops (which
 /// drifts for end-of-month anchors).
 fn free_plan_monthly_period_from_cancellation_anchor(
-    cancellation_period_end: chrono::DateTime<Utc>,
-    now: chrono::DateTime<Utc>,
-) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    cancellation_period_end: jiff::Timestamp,
+    now: jiff::Timestamp,
+) -> (jiff::Timestamp, jiff::Timestamp) {
     let anchor = cancellation_period_end;
     // Fast estimate by calendar month index, then adjust to exact boundary.
-    let month_delta = (i64::from(now.year()) - i64::from(anchor.year())) * 12
-        + (i64::from(now.month()) - i64::from(anchor.month()));
+    let current = now.to_zoned(jiff::tz::TimeZone::UTC);
+    let first = anchor.to_zoned(jiff::tz::TimeZone::UTC);
+    let month_delta = (i64::from(current.year()) - i64::from(first.year())) * 12
+        + (i64::from(current.month()) - i64::from(first.month()));
     let mut k: i64 = month_delta.max(0);
 
     let mut period_start = add_months_same_day_from_anchor(anchor, k as u32);
@@ -2592,9 +2560,9 @@ fn free_plan_monthly_period_from_cancellation_anchor(
 }
 
 fn free_plan_period_for_user(
-    latest_subscription_period_end: Option<chrono::DateTime<Utc>>,
-    now: chrono::DateTime<Utc>,
-) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    latest_subscription_period_end: Option<jiff::Timestamp>,
+    now: jiff::Timestamp,
+) -> (jiff::Timestamp, jiff::Timestamp) {
     match latest_subscription_period_end {
         Some(anchor) if now >= anchor => {
             free_plan_monthly_period_from_cancellation_anchor(anchor, now)
@@ -2605,20 +2573,16 @@ fn free_plan_period_for_user(
 
 /// Returns (period_start, period_end) for the current calendar month.
 /// period_start = 00:00 on the 1st, period_end = 00:00 on the 1st of next month (24:00 on last day).
-fn current_calendar_month_period(
-    now: chrono::DateTime<Utc>,
-) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
-    use chrono::NaiveDate;
-    let (y, m, _) = (now.year(), now.month(), now.day());
-    let midnight = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is valid");
-    let period_start = NaiveDate::from_ymd_opt(y, m, 1)
-        .map(|d| chrono::DateTime::from_naive_utc_and_offset(d.and_time(midnight), Utc))
+fn current_calendar_month_period(now: jiff::Timestamp) -> (jiff::Timestamp, jiff::Timestamp) {
+    let start = now
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .first_of_month()
+        .and_then(|z| z.start_of_day())
         .expect("first of month is valid");
-    let (next_y, next_m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-    let period_end = NaiveDate::from_ymd_opt(next_y, next_m, 1)
-        .map(|d| chrono::DateTime::from_naive_utc_and_offset(d.and_time(midnight), Utc))
-        .expect("first of next month is valid");
-    (period_start, period_end)
+    let end = start
+        .checked_add(jiff::Span::new().months(1))
+        .expect("next month is valid");
+    (start.timestamp(), end.timestamp())
 }
 
 /// Resolve plan name from provider, price_id and subscription_plans config
@@ -2709,7 +2673,7 @@ fn generate_checkout_idempotency_key(user_id: &UserId, price_id: &str) -> String
     use sha2::{Digest, Sha256};
 
     // Use 1-hour time window: same key within 1 hour, new key after
-    let time_window = chrono::Utc::now().timestamp() / 3600;
+    let time_window = jiff::Timestamp::now().as_second() / 3600;
 
     let mut hasher = Sha256::new();
     hasher.update(format!("{}:{}:{}", user_id.0, price_id, time_window).as_bytes());
@@ -2725,7 +2689,7 @@ fn generate_credit_checkout_idempotency_key(
 ) -> String {
     use sha2::{Digest, Sha256};
 
-    let time_window = chrono::Utc::now().timestamp() / 3600;
+    let time_window = jiff::Timestamp::now().as_second() / 3600;
 
     let mut hasher = Sha256::new();
     hasher.update(
@@ -4710,7 +4674,7 @@ mod tests {
         PaymentProviderConfig, StakeBasedMonthlyCreditsConfig, SubscriptionPlanConfig,
     };
     use crate::UserId;
-    use chrono::TimeZone;
+
     use std::collections::HashMap;
 
     fn plan_config(price_id: &str, tokens: u64, instances: u64) -> SubscriptionPlanConfig {
@@ -4787,9 +4751,9 @@ mod tests {
 
     #[test]
     fn test_house_of_stake_snapshot_prorates_only_increases() {
-        let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
-        let end = start + Duration::days(30);
-        let halfway = start + Duration::days(15);
+        let start = "2026-08-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let end = start + SignedDuration::from_hours(30 * 24);
+        let halfway = start + SignedDuration::from_hours(15 * 24);
         let period = BillingPeriod {
             start_at: start,
             end_at: end,
@@ -4828,9 +4792,9 @@ mod tests {
 
     #[test]
     fn test_house_of_stake_snapshot_carries_baseline_and_records_zero() {
-        let start = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
-        let end = start + Duration::days(30);
-        let halfway = start + Duration::days(15);
+        let start = "2026-09-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let end = start + SignedDuration::from_hours(30 * 24);
+        let halfway = start + SignedDuration::from_hours(15 * 24);
         let period = BillingPeriod {
             start_at: start,
             end_at: end,
@@ -4863,9 +4827,9 @@ mod tests {
 
     #[test]
     fn test_house_of_stake_snapshot_uses_authoritative_month_end_period() {
-        let start = Utc.with_ymd_and_hms(2026, 1, 31, 0, 0, 0).unwrap();
-        let end = Utc.with_ymd_and_hms(2026, 2, 28, 0, 0, 0).unwrap();
-        let observed_at = Utc.with_ymd_and_hms(2026, 2, 14, 0, 0, 0).unwrap();
+        let start = "2026-01-31T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let end = "2026-02-28T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let observed_at = "2026-02-14T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         let period = BillingPeriod {
             start_at: start,
             end_at: end,
@@ -4886,32 +4850,32 @@ mod tests {
 
     #[test]
     fn test_house_of_stake_chain_period_must_be_current_and_bounded() {
-        let now = Utc.with_ymd_and_hms(2026, 8, 24, 0, 0, 0).unwrap();
+        let now = "2026-08-24T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         assert!(
             SubscriptionServiceImpl::is_valid_house_of_stake_chain_period(
-                now - Duration::days(23),
-                now + Duration::days(8),
+                now - SignedDuration::from_hours(23 * 24),
+                now + SignedDuration::from_hours(8 * 24),
                 now,
             )
         );
         assert!(
             !SubscriptionServiceImpl::is_valid_house_of_stake_chain_period(
-                now + Duration::days(1),
-                now + Duration::days(31),
+                now + SignedDuration::from_hours(24),
+                now + SignedDuration::from_hours(31 * 24),
                 now,
             )
         );
         assert!(
             !SubscriptionServiceImpl::is_valid_house_of_stake_chain_period(
-                now - Duration::days(30),
+                now - SignedDuration::from_hours(30 * 24),
                 now,
                 now,
             )
         );
         assert!(
             !SubscriptionServiceImpl::is_valid_house_of_stake_chain_period(
-                now - Duration::days(18),
-                now + Duration::days(18),
+                now - SignedDuration::from_hours(18 * 24),
+                now + SignedDuration::from_hours(18 * 24),
                 now,
             )
         );
@@ -4922,20 +4886,21 @@ mod tests {
         let mut subscription = base_subscription();
         subscription.provider = "house-of-stake".to_string();
         subscription.current_period_start =
-            Some(Utc.with_ymd_and_hms(2026, 1, 31, 0, 0, 0).unwrap());
-        subscription.current_period_end = Utc.with_ymd_and_hms(2026, 2, 28, 0, 0, 0).unwrap();
+            Some("2026-01-31T00:00:00Z".parse::<jiff::Timestamp>().unwrap());
+        subscription.current_period_end =
+            "2026-02-28T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
 
         let period = persisted_house_of_stake_period(&subscription).unwrap();
 
-        assert_eq!(period.start_at.day(), 31);
-        assert_eq!(period.end_at.day(), 28);
+        assert_eq!(period.start_at.to_zoned(jiff::tz::TimeZone::UTC).day(), 31);
+        assert_eq!(period.end_at.to_zoned(jiff::tz::TimeZone::UTC).day(), 28);
     }
 
     #[test]
     fn test_house_of_stake_snapshot_applies_fixed_plan_floor() {
-        let start = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
-        let end = start + Duration::days(30);
-        let halfway = start + Duration::days(15);
+        let start = "2026-10-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let end = start + SignedDuration::from_hours(30 * 24);
+        let halfway = start + SignedDuration::from_hours(15 * 24);
         let period = BillingPeriod {
             start_at: start,
             end_at: end,
@@ -4974,9 +4939,9 @@ mod tests {
 
     #[test]
     fn test_house_of_stake_snapshot_ignores_out_of_order_observation() {
-        let start = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
-        let end = start + Duration::days(30);
-        let newer_observed_at = start + Duration::days(15);
+        let start = "2026-11-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let end = start + SignedDuration::from_hours(30 * 24);
+        let newer_observed_at = start + SignedDuration::from_hours(15 * 24);
         let period = BillingPeriod {
             start_at: start,
             end_at: end,
@@ -4994,7 +4959,7 @@ mod tests {
             0,
             1_000_000_000,
             &period,
-            newer_observed_at - Duration::seconds(1),
+            newer_observed_at - SignedDuration::from_secs(1),
             None,
         );
 
@@ -5004,11 +4969,11 @@ mod tests {
 
     #[test]
     fn test_credit_limit_cache_expires_at_period_boundary() {
-        let now = Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap();
+        let now = "2026-12-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         let mut cached = CachedCreditLimit {
             plan_credits: 1,
-            period_start: now - Duration::days(1),
-            period_end: now + Duration::days(1),
+            period_start: now - SignedDuration::from_hours(24),
+            period_end: now + SignedDuration::from_hours(24),
             house_of_stake: None,
             scope: CreditLimitCacheScope::from_active_subscription(None),
             cached_at: Instant::now(),
@@ -5027,7 +4992,7 @@ mod tests {
     }
 
     fn base_subscription() -> Subscription {
-        let period_end = Utc::now() + Duration::days(7);
+        let period_end = Timestamp::now() + SignedDuration::from_hours(7 * 24);
         Subscription {
             subscription_id: "sub_test".to_string(),
             user_id: UserId::new(),
@@ -5038,8 +5003,8 @@ mod tests {
             current_period_start: None,
             current_period_end: period_end,
             cancel_at_period_end: false,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             pending_downgrade_target_price_id: None,
             pending_downgrade_from_price_id: None,
             pending_downgrade_expected_period_end: None,
@@ -5114,21 +5079,24 @@ mod tests {
     fn test_should_check_pending_downgrade_window() {
         let mut sub = base_subscription();
         sub.pending_downgrade_status = Some(DowngradeIntentStatus::Pending);
-        sub.pending_downgrade_expected_period_end = Some(Utc::now() + Duration::hours(12));
+        sub.pending_downgrade_expected_period_end =
+            Some(Timestamp::now() + SignedDuration::from_hours(12));
 
         assert!(
             SubscriptionServiceImpl::should_check_pending_downgrade(&sub),
             "Within 24h window should be eligible"
         );
 
-        sub.pending_downgrade_expected_period_end = Some(Utc::now() + Duration::hours(36));
+        sub.pending_downgrade_expected_period_end =
+            Some(Timestamp::now() + SignedDuration::from_hours(36));
         assert!(
             !SubscriptionServiceImpl::should_check_pending_downgrade(&sub),
             "Outside 24h window should not be eligible"
         );
 
         sub.pending_downgrade_status = Some(DowngradeIntentStatus::Applied);
-        sub.pending_downgrade_expected_period_end = Some(Utc::now() + Duration::hours(12));
+        sub.pending_downgrade_expected_period_end =
+            Some(Timestamp::now() + SignedDuration::from_hours(12));
         assert!(
             !SubscriptionServiceImpl::should_check_pending_downgrade(&sub),
             "Non-pending status should not be eligible"
@@ -5178,28 +5146,28 @@ mod tests {
 
     #[test]
     fn test_pending_downgrade_backward_period_drift_marks_missed_predicate() {
-        let expected = Utc::now();
+        let expected = Timestamp::now();
         assert!(SubscriptionServiceImpl::is_backward_period_drift(
-            expected - Duration::seconds(1),
+            expected - SignedDuration::from_secs(1),
             expected
         ));
         assert!(!SubscriptionServiceImpl::is_backward_period_drift(
             expected, expected
         ));
         assert!(!SubscriptionServiceImpl::is_backward_period_drift(
-            expected + Duration::seconds(1),
+            expected + SignedDuration::from_secs(1),
             expected
         ));
     }
 
     #[test]
     fn test_pending_downgrade_apply_predicate_allows_forward_period_end_drift() {
-        let expected = Utc::now();
+        let expected = Timestamp::now();
         assert!(
             SubscriptionServiceImpl::should_attempt_pending_downgrade_apply(
                 "price_pro",
                 "price_pro",
-                expected + Duration::seconds(1),
+                expected + SignedDuration::from_secs(1),
                 expected
             )
         );
@@ -5215,7 +5183,7 @@ mod tests {
             !SubscriptionServiceImpl::should_attempt_pending_downgrade_apply(
                 "price_basic",
                 "price_pro",
-                expected + Duration::seconds(1),
+                expected + SignedDuration::from_secs(1),
                 expected
             )
         );
@@ -5223,7 +5191,7 @@ mod tests {
             !SubscriptionServiceImpl::should_attempt_pending_downgrade_apply(
                 "price_pro",
                 "price_pro",
-                expected - Duration::seconds(1),
+                expected - SignedDuration::from_secs(1),
                 expected
             )
         );
@@ -5267,8 +5235,8 @@ mod tests {
 
     #[test]
     fn test_free_plan_first_month_starts_at_cancellation_boundary() {
-        let anchor = Utc.with_ymd_and_hms(2026, 3, 19, 8, 22, 16).unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 3, 25, 12, 0, 0).unwrap();
+        let anchor = "2026-03-19T08:22:16Z".parse::<jiff::Timestamp>().unwrap();
+        let now = "2026-03-25T12:00:00Z".parse::<jiff::Timestamp>().unwrap();
         let (start, end) = free_plan_monthly_period_from_cancellation_anchor(anchor, now);
         assert_eq!(start, anchor);
         assert_eq!(end, add_months_same_day_from_anchor(anchor, 1));
@@ -5276,9 +5244,9 @@ mod tests {
 
     #[test]
     fn test_free_plan_advances_monthly_after_anchor() {
-        let anchor = Utc.with_ymd_and_hms(2026, 3, 19, 0, 0, 0).unwrap();
+        let anchor = "2026-03-19T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         let first_end = add_months_same_day_from_anchor(anchor, 1);
-        let now = first_end + Duration::hours(2);
+        let now = first_end + SignedDuration::from_hours(2);
         let (start, end) = free_plan_monthly_period_from_cancellation_anchor(anchor, now);
         assert_eq!(start, first_end);
         assert_eq!(end, add_months_same_day_from_anchor(anchor, 2));
@@ -5286,7 +5254,7 @@ mod tests {
 
     #[test]
     fn test_add_then_sub_one_month_mid_month_roundtrip() {
-        let t = Utc.with_ymd_and_hms(2026, 3, 15, 14, 30, 0).unwrap();
+        let t = "2026-03-15T14:30:00Z".parse::<jiff::Timestamp>().unwrap();
         assert_eq!(
             sub_one_month_same_day(add_months_same_day_from_anchor(t, 1)),
             t
@@ -5295,7 +5263,7 @@ mod tests {
 
     #[test]
     fn test_free_plan_period_no_subscription_row_uses_calendar_month() {
-        let now = Utc.with_ymd_and_hms(2026, 3, 25, 0, 0, 0).unwrap();
+        let now = "2026-03-25T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         let (s, e) = free_plan_period_for_user(None, now);
         let (cs, ce) = current_calendar_month_period(now);
         assert_eq!((s, e), (cs, ce));
@@ -5303,26 +5271,23 @@ mod tests {
 
     #[test]
     fn test_free_plan_period_anchor_in_future_uses_calendar_month() {
-        let anchor = Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 3, 25, 0, 0, 0).unwrap();
+        let anchor = "2026-04-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let now = "2026-03-25T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         let (s, e) = free_plan_period_for_user(Some(anchor), now);
         let (cs, ce) = current_calendar_month_period(now);
         assert_eq!((s, e), (cs, ce));
     }
 
     /// Test oracle: same as production (`add_months_same_day_from_anchor` indexed from anchor).
-    fn add_months_same_day_iter(
-        anchor: chrono::DateTime<Utc>,
-        months: u32,
-    ) -> chrono::DateTime<Utc> {
+    fn add_months_same_day_iter(anchor: jiff::Timestamp, months: u32) -> jiff::Timestamp {
         add_months_same_day_from_anchor(anchor, months)
     }
 
     /// Brute-force construction of the current period by scanning month index `k`.
     fn free_plan_period_via_month_index_from_anchor(
-        anchor: chrono::DateTime<Utc>,
-        now: chrono::DateTime<Utc>,
-    ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+        anchor: jiff::Timestamp,
+        now: jiff::Timestamp,
+    ) -> (jiff::Timestamp, jiff::Timestamp) {
         let first_end = add_months_same_day_from_anchor(anchor, 1);
         if now < first_end {
             return (anchor, first_end);
@@ -5339,17 +5304,17 @@ mod tests {
 
     #[test]
     fn test_add_months_from_anchor_matches_stripe_end_of_month_pattern() {
-        let anchor = Utc.with_ymd_and_hms(2026, 1, 31, 12, 0, 0).unwrap();
+        let anchor = "2026-01-31T12:00:00Z".parse::<jiff::Timestamp>().unwrap();
         assert_eq!(
             add_months_same_day_from_anchor(anchor, 1),
-            Utc.with_ymd_and_hms(2026, 2, 28, 12, 0, 0).unwrap()
+            "2026-02-28T12:00:00Z".parse::<jiff::Timestamp>().unwrap()
         );
         assert_eq!(
             add_months_same_day_from_anchor(anchor, 2),
-            Utc.with_ymd_and_hms(2026, 3, 31, 12, 0, 0).unwrap()
+            "2026-03-31T12:00:00Z".parse::<jiff::Timestamp>().unwrap()
         );
         assert_ne!(
-            Utc.with_ymd_and_hms(2026, 3, 28, 12, 0, 0).unwrap(),
+            "2026-03-28T12:00:00Z".parse::<jiff::Timestamp>().unwrap(),
             add_months_same_day_from_anchor(anchor, 2),
             "chained +1 month drifts to Mar 28; anchor indexing keeps Mar 31"
         );
@@ -5357,7 +5322,7 @@ mod tests {
 
     #[test]
     fn test_add_months_same_day_iter_mid_month_matches_chained_one_month() {
-        let anchor = Utc.with_ymd_and_hms(2021, 3, 15, 9, 30, 0).unwrap();
+        let anchor = "2021-03-15T09:30:00Z".parse::<jiff::Timestamp>().unwrap();
         for k in [0u32, 1, 2, 12, 24, 48, 120] {
             assert_eq!(
                 add_months_same_day_iter(anchor, k),
@@ -5369,20 +5334,20 @@ mod tests {
 
     #[test]
     fn test_free_plan_months_after_cancel_matches_month_index_oracle() {
-        let anchor = Utc.with_ymd_and_hms(2025, 3, 19, 0, 0, 0).unwrap();
+        let anchor = "2025-03-19T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         // ~14 months later: still same cycle day 19
-        let now = Utc.with_ymd_and_hms(2026, 5, 10, 0, 0, 0).unwrap();
+        let now = "2026-05-10T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         let fast = free_plan_monthly_period_from_cancellation_anchor(anchor, now);
         let slow = free_plan_period_via_month_index_from_anchor(anchor, now);
         assert_eq!(fast, slow);
-        let expected_start = Utc.with_ymd_and_hms(2026, 4, 19, 0, 0, 0).unwrap();
+        let expected_start = "2026-04-19T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         assert_eq!(fast.0, expected_start);
     }
 
     #[test]
     fn test_free_plan_many_years_after_cancel_matches_month_index_oracle() {
-        let anchor = Utc.with_ymd_and_hms(2019, 11, 7, 11, 30, 0).unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 3, 24, 18, 0, 0).unwrap();
+        let anchor = "2019-11-07T11:30:00Z".parse::<jiff::Timestamp>().unwrap();
+        let now = "2026-03-24T18:00:00Z".parse::<jiff::Timestamp>().unwrap();
         assert_eq!(
             free_plan_monthly_period_from_cancellation_anchor(anchor, now),
             free_plan_period_via_month_index_from_anchor(anchor, now),
@@ -5391,10 +5356,10 @@ mod tests {
 
     #[test]
     fn test_free_plan_decade_span_random_now_points_match_month_index_oracle() {
-        let anchor = Utc.with_ymd_and_hms(2015, 3, 19, 8, 22, 16).unwrap();
-        let mut probe = anchor + Duration::days(1);
+        let anchor = "2015-03-19T08:22:16Z".parse::<jiff::Timestamp>().unwrap();
+        let mut probe = anchor + SignedDuration::from_hours(24);
         for _ in 0..150 {
-            probe += Duration::days(19);
+            probe += SignedDuration::from_hours(19 * 24);
             let fast = free_plan_monthly_period_from_cancellation_anchor(anchor, probe);
             let slow = free_plan_period_via_month_index_from_anchor(anchor, probe);
             assert_eq!(fast, slow, "probe={probe:?}");
@@ -5403,8 +5368,8 @@ mod tests {
 
     #[test]
     fn test_free_plan_jan_31_anchor_many_months_matches_month_index_oracle() {
-        let anchor = Utc.with_ymd_and_hms(2018, 1, 31, 9, 0, 0).unwrap();
-        let now = Utc.with_ymd_and_hms(2025, 8, 2, 0, 0, 0).unwrap();
+        let anchor = "2018-01-31T09:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let now = "2025-08-02T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         assert_eq!(
             free_plan_monthly_period_from_cancellation_anchor(anchor, now),
             free_plan_period_via_month_index_from_anchor(anchor, now),
@@ -5413,8 +5378,8 @@ mod tests {
 
     #[test]
     fn test_free_plan_matches_oracle_after_many_years_same_anniversary() {
-        let anchor = Utc.with_ymd_and_hms(2000, 6, 10, 12, 0, 0).unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+        let anchor = "2000-06-10T12:00:00Z".parse::<jiff::Timestamp>().unwrap();
+        let now = "2026-06-10T12:00:00Z".parse::<jiff::Timestamp>().unwrap();
         assert_eq!(
             free_plan_monthly_period_from_cancellation_anchor(anchor, now),
             free_plan_period_via_month_index_from_anchor(anchor, now),

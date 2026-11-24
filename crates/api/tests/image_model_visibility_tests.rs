@@ -40,7 +40,7 @@ async fn model_visibility_preserves_long_ids_without_caching_them() {
         .update_config(services::system_configs::ports::RateLimitConfig {
             max_concurrent: 10,
             max_requests_per_window: 100,
-            window_duration: chrono::Duration::seconds(1),
+            window_duration: jiff::SignedDuration::from_secs(1),
             window_limits: vec![],
             token_window_limits: vec![],
             cost_window_limits: vec![],

@@ -42,7 +42,7 @@ async fn rewrap_preserves_oauth_agent_and_passkey_secrets_after_old_key_removal(
         frontend_code_challenge: "rotation-challenge".into(),
         frontend_state: "rotation-state".into(),
         provider_code_verifier: Some(PkceCodeVerifier::new("rotation-provider-verifier".into())),
-        created_at: chrono::Utc::now(),
+        created_at: jiff::Timestamp::now(),
     };
     f.db.oauth_repository()
         .store_oauth_state(&oauth_state)

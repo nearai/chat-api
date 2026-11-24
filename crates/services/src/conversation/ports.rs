@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use uuid::Uuid;
 
 #[cfg(feature = "utoipa")]
@@ -93,8 +93,8 @@ pub struct ShareGroup {
     pub owner_user_id: UserId,
     pub name: String,
     pub members: Vec<ShareRecipient>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -107,8 +107,8 @@ pub struct ConversationShare {
     pub recipient: Option<ShareRecipient>,
     pub group_id: Option<Uuid>,
     pub org_email_pattern: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone)]

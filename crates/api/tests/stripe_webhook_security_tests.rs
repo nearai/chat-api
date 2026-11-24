@@ -20,7 +20,7 @@ async fn webhook_rejects_incomplete_configuration_without_storing_event() {
         .await;
         let event_id = format!("evt_{}", Uuid::new_v4());
         let body = json!({"id": event_id, "type": "test.unhandled"}).to_string();
-        let ts = chrono::Utc::now().timestamp();
+        let ts = jiff::Timestamp::now().as_second();
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(format!("{ts}.{body}").as_bytes());
         let signature = format!("t={ts},v1={}", hex::encode(mac.finalize().into_bytes()));

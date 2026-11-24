@@ -119,8 +119,8 @@ impl RateLimitState {
         // Load config snapshot at the start (read lock is released immediately)
         let config = self.config.read().await.clone();
 
-        // Convert chrono::Duration to std::time::Duration for in-memory tracking
-        let window_duration = config.window_duration.to_std().map_err(|e| {
+        // Convert jiff::SignedDuration to std::time::Duration for in-memory tracking
+        let window_duration = Duration::try_from(config.window_duration).map_err(|e| {
             tracing::error!(
                 "Invalid window_duration in rate limit config: {}. Duration: {:?}",
                 error_type(&e),
@@ -242,7 +242,7 @@ impl RateLimitState {
                 Err(e) => {
                     tracing::warn!(
                         user_id = %user_id.0,
-                        window_seconds = window_limit.window_duration.num_seconds(),
+                        window_seconds = window_limit.window_duration.as_secs(),
                         "Failed to check usage limit: {}",
                         error_type(&e)
                     );
@@ -259,7 +259,7 @@ impl RateLimitState {
 
                 // Calculate retry_after: when the oldest activity in the window expires
                 // For sliding window, we estimate based on window size
-                let window_seconds = window_limit.window_duration.num_seconds();
+                let window_seconds = window_limit.window_duration.as_secs();
                 let retry_after_ms = u64::try_from(window_seconds * 1000).unwrap_or(u64::MAX); // Conservative estimate
 
                 tracing::warn!(
@@ -347,7 +347,7 @@ impl RateLimitState {
                         self.rollback_acquire(user_id, added_timestamp).await;
 
                         // Calculate retry_after based on window size
-                        let window_seconds = most_restrictive_window.window_duration.num_seconds();
+                        let window_seconds = most_restrictive_window.window_duration.as_secs();
                         let retry_after_ms =
                             u64::try_from(window_seconds * 1000).unwrap_or(u64::MAX);
 
@@ -417,7 +417,7 @@ impl RateLimitState {
 
             if sum >= limit_value {
                 self.rollback_acquire(user_id, added_timestamp).await;
-                let window_seconds = window_limit.window_duration.num_seconds();
+                let window_seconds = window_limit.window_duration.as_secs();
                 let retry_after_ms = u64::try_from(window_seconds * 1000).unwrap_or(u64::MAX);
 
                 match usage_type {
@@ -617,7 +617,7 @@ pub async fn rate_limit_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration as ChronoDuration, Utc};
+    use jiff::{SignedDuration, Timestamp};
     use services::system_configs::ports::WindowLimit;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -668,7 +668,7 @@ mod tests {
             async fn get_token_usage_sum(
                 &self,
                 _user_id: UserId,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> anyhow::Result<i64> {
                 Ok(0)
             }
@@ -676,7 +676,7 @@ mod tests {
             async fn get_cost_usage_sum(
                 &self,
                 _user_id: UserId,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> anyhow::Result<i64> {
                 Ok(0)
             }
@@ -684,8 +684,8 @@ mod tests {
             async fn get_usage_by_user_id(
                 &self,
                 user_id: UserId,
-                _start: Option<chrono::DateTime<chrono::Utc>>,
-                _end: Option<chrono::DateTime<chrono::Utc>>,
+                _start: Option<jiff::Timestamp>,
+                _end: Option<jiff::Timestamp>,
             ) -> anyhow::Result<Option<UserUsageSummary>> {
                 Ok(Some(UserUsageSummary {
                     user_id,
@@ -698,8 +698,8 @@ mod tests {
             async fn get_instance_usage_summary(
                 &self,
                 _instance_id: uuid::Uuid,
-                _start: Option<chrono::DateTime<chrono::Utc>>,
-                _end: Option<chrono::DateTime<chrono::Utc>>,
+                _start: Option<jiff::Timestamp>,
+                _end: Option<jiff::Timestamp>,
             ) -> anyhow::Result<InstanceUsageSummary> {
                 Ok(InstanceUsageSummary {
                     request_count: 0,
@@ -712,8 +712,8 @@ mod tests {
                 &self,
                 _limit: i64,
                 _rank_by: UsageRankBy,
-                _start: Option<chrono::DateTime<chrono::Utc>>,
-                _end: Option<chrono::DateTime<chrono::Utc>>,
+                _start: Option<jiff::Timestamp>,
+                _end: Option<jiff::Timestamp>,
             ) -> anyhow::Result<Vec<UserUsageSummary>> {
                 Ok(vec![])
             }
@@ -755,7 +755,7 @@ mod tests {
             async fn get_token_usage_sum(
                 &self,
                 _user_id: UserId,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> anyhow::Result<i64> {
                 Ok(self.token_sum)
             }
@@ -763,7 +763,7 @@ mod tests {
             async fn get_cost_usage_sum(
                 &self,
                 _user_id: UserId,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> anyhow::Result<i64> {
                 Ok(self.cost_sum)
             }
@@ -771,8 +771,8 @@ mod tests {
             async fn get_usage_by_user_id(
                 &self,
                 user_id: UserId,
-                _start: Option<chrono::DateTime<chrono::Utc>>,
-                _end: Option<chrono::DateTime<chrono::Utc>>,
+                _start: Option<jiff::Timestamp>,
+                _end: Option<jiff::Timestamp>,
             ) -> anyhow::Result<Option<UserUsageSummary>> {
                 Ok(Some(UserUsageSummary {
                     user_id,
@@ -785,8 +785,8 @@ mod tests {
             async fn get_instance_usage_summary(
                 &self,
                 _instance_id: uuid::Uuid,
-                _start: Option<chrono::DateTime<chrono::Utc>>,
-                _end: Option<chrono::DateTime<chrono::Utc>>,
+                _start: Option<jiff::Timestamp>,
+                _end: Option<jiff::Timestamp>,
             ) -> anyhow::Result<InstanceUsageSummary> {
                 Ok(InstanceUsageSummary {
                     request_count: 0,
@@ -799,8 +799,8 @@ mod tests {
                 &self,
                 _limit: i64,
                 _rank_by: UsageRankBy,
-                _start: Option<chrono::DateTime<chrono::Utc>>,
-                _end: Option<chrono::DateTime<chrono::Utc>>,
+                _start: Option<jiff::Timestamp>,
+                _end: Option<jiff::Timestamp>,
             ) -> anyhow::Result<Vec<UserUsageSummary>> {
                 Ok(vec![])
             }
@@ -833,7 +833,7 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> Result<i64, AnalyticsError> {
                 // Always return 0 in tests (unless we want to test limit behavior)
                 Ok(0)
@@ -841,29 +841,29 @@ mod tests {
 
             async fn get_analytics_summary(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
             ) -> Result<AnalyticsSummary, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_daily_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_weekly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_monthly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
@@ -879,8 +879,8 @@ mod tests {
 
             async fn get_top_active_users(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
@@ -914,7 +914,7 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> Result<i64, AnalyticsError> {
                 // Always return 100 to test limit exceeded
                 Ok(100)
@@ -922,29 +922,29 @@ mod tests {
 
             async fn get_analytics_summary(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
             ) -> Result<AnalyticsSummary, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_daily_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_weekly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_monthly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
@@ -960,8 +960,8 @@ mod tests {
 
             async fn get_top_active_users(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
@@ -1007,36 +1007,36 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> Result<i64, AnalyticsError> {
                 Ok(*self.count.lock().await)
             }
 
             async fn get_analytics_summary(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
             ) -> Result<AnalyticsSummary, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_daily_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_weekly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_monthly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
@@ -1052,8 +1052,8 @@ mod tests {
 
             async fn get_top_active_users(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
@@ -1104,36 +1104,36 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> Result<i64, AnalyticsError> {
                 Ok(0)
             }
 
             async fn get_analytics_summary(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
             ) -> Result<AnalyticsSummary, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_daily_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_weekly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_monthly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
@@ -1149,8 +1149,8 @@ mod tests {
 
             async fn get_top_active_users(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
@@ -1177,7 +1177,7 @@ mod tests {
                 request: CheckAndRecordActivityRequest,
             ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
                 // Use the first window for recording
-                let count = if request.window_duration.num_seconds() == 86400 {
+                let count = if request.window_duration.as_secs() == 86400 {
                     self.day_count
                 } else {
                     self.week_count
@@ -1192,9 +1192,9 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                window_duration: ChronoDuration,
+                window_duration: SignedDuration,
             ) -> Result<i64, AnalyticsError> {
-                Ok(if window_duration.num_seconds() == 86400 {
+                Ok(if window_duration.as_secs() == 86400 {
                     self.day_count
                 } else {
                     self.week_count
@@ -1203,29 +1203,29 @@ mod tests {
 
             async fn get_analytics_summary(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
             ) -> Result<AnalyticsSummary, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_daily_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_weekly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_monthly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
@@ -1241,8 +1241,8 @@ mod tests {
 
             async fn get_top_active_users(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
@@ -1276,7 +1276,7 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> Result<i64, AnalyticsError> {
                 // Return count just under limit (so check passes)
                 Ok(9)
@@ -1284,29 +1284,29 @@ mod tests {
 
             async fn get_analytics_summary(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
             ) -> Result<AnalyticsSummary, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_daily_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_weekly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_monthly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
@@ -1322,8 +1322,8 @@ mod tests {
 
             async fn get_top_active_users(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
@@ -1358,7 +1358,7 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> Result<i64, AnalyticsError> {
                 // Return count based on window size for testing
                 Ok(self.count)
@@ -1366,29 +1366,29 @@ mod tests {
 
             async fn get_analytics_summary(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
             ) -> Result<AnalyticsSummary, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_daily_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_weekly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_monthly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
@@ -1404,8 +1404,8 @@ mod tests {
 
             async fn get_top_active_users(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
@@ -1415,7 +1415,7 @@ mod tests {
         /// Simulates sliding window behavior with time-based expiration
         /// Stores activity timestamps and only counts activities within the window
         pub struct SlidingWindowAnalyticsService {
-            pub activities: Arc<Mutex<Vec<chrono::DateTime<chrono::Utc>>>>,
+            pub activities: Arc<Mutex<Vec<jiff::Timestamp>>>,
         }
 
         #[async_trait]
@@ -1431,7 +1431,7 @@ mod tests {
                 &self,
                 request: CheckAndRecordActivityRequest,
             ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 let window_start = now - request.window_duration;
 
                 let mut activities = self.activities.lock().await;
@@ -1463,9 +1463,9 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                window_duration: ChronoDuration,
+                window_duration: SignedDuration,
             ) -> Result<i64, AnalyticsError> {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 let window_start = now - window_duration;
 
                 let activities = self.activities.lock().await;
@@ -1478,29 +1478,29 @@ mod tests {
 
             async fn get_analytics_summary(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
             ) -> Result<AnalyticsSummary, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_daily_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_weekly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_monthly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
@@ -1516,8 +1516,8 @@ mod tests {
 
             async fn get_top_active_users(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
@@ -1547,36 +1547,36 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window_duration: ChronoDuration,
+                _window_duration: SignedDuration,
             ) -> Result<i64, AnalyticsError> {
                 Err(AnalyticsError::InternalError("Database error".to_string()))
             }
 
             async fn get_analytics_summary(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
             ) -> Result<AnalyticsSummary, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_daily_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_weekly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
 
             async fn get_monthly_active_users(
                 &self,
-                _date: chrono::DateTime<Utc>,
+                _date: jiff::Timestamp,
             ) -> Result<i64, AnalyticsError> {
                 unreachable!()
             }
@@ -1592,8 +1592,8 @@ mod tests {
 
             async fn get_top_active_users(
                 &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
+                _start: jiff::Timestamp,
+                _end: jiff::Timestamp,
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
@@ -1633,7 +1633,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 10,
             max_requests_per_window: 1,
-            window_duration: ChronoDuration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![],
             token_window_limits: vec![],
             cost_window_limits: vec![],
@@ -1660,7 +1660,7 @@ mod tests {
             let state = configured_state(RateLimitConfig {
                 max_concurrent: 1,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![],
                 token_window_limits: vec![],
                 cost_window_limits: vec![],
@@ -1750,7 +1750,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 100, // High limit to avoid rate limiting
-            window_duration: ChronoDuration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![], // No window limits for this test
             token_window_limits: vec![],
             cost_window_limits: vec![],
@@ -1772,7 +1772,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 1,
             max_requests_per_window: 100, // High to test concurrency, not rate
-            window_duration: ChronoDuration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![], // No window limits for this test
             token_window_limits: vec![],
             cost_window_limits: vec![],
@@ -1801,7 +1801,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 1,
             max_requests_per_window: 100,
-            window_duration: ChronoDuration::seconds(1),
+            window_duration: SignedDuration::from_secs(1),
             window_limits: vec![], // No window limits for this test
             token_window_limits: vec![],
             cost_window_limits: vec![],
@@ -1829,7 +1829,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 1,
-            window_duration: ChronoDuration::milliseconds(50),
+            window_duration: SignedDuration::from_millis(50),
             window_limits: vec![], // No window limits for this test
             token_window_limits: vec![],
             cost_window_limits: vec![],
@@ -1849,24 +1849,14 @@ mod tests {
         );
 
         // Wait for rate limit window to fully expire
-        tokio::time::sleep(
-            ChronoDuration::milliseconds(100)
-                .to_std()
-                .unwrap_or_else(|_| std::time::Duration::from_millis(100)),
-        )
-        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Now we should be able to make max_concurrent requests simultaneously
         // proving no permits were leaked when rate limit rejected the request
         let guard_a = state.try_acquire(user).await.unwrap();
 
         // Wait for rate limit window again before second concurrent request
-        tokio::time::sleep(
-            ChronoDuration::milliseconds(100)
-                .to_std()
-                .unwrap_or_else(|_| std::time::Duration::from_millis(100)),
-        )
-        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let guard_b = state.try_acquire(user).await.unwrap();
 
@@ -1880,7 +1870,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 10,
-            window_duration: ChronoDuration::milliseconds(10),
+            window_duration: SignedDuration::from_millis(10),
             window_limits: vec![], // No window limits for this test
             token_window_limits: vec![],
             cost_window_limits: vec![],
@@ -1906,9 +1896,9 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 2,
                 max_requests_per_window: 10, // High limit
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::days(1),
+                    window_duration: SignedDuration::from_hours(24),
                     limit: 100,
                 }],
                 token_window_limits: vec![],
@@ -1967,9 +1957,9 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100, // High limit to avoid short-term rate limiting
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::days(1),
+                    window_duration: SignedDuration::from_hours(24),
                     limit: 10,
                 }],
                 token_window_limits: vec![],
@@ -2005,9 +1995,9 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::days(1),
+                    window_duration: SignedDuration::from_hours(24),
                     limit,
                 }],
                 token_window_limits: vec![],
@@ -2047,9 +2037,9 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::days(1),
+                    window_duration: SignedDuration::from_hours(24),
                     limit,
                 }],
                 token_window_limits: vec![],
@@ -2079,14 +2069,14 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![
                     WindowLimit {
-                        window_duration: ChronoDuration::days(1),
+                        window_duration: SignedDuration::from_hours(24),
                         limit: day_limit,
                     },
                     WindowLimit {
-                        window_duration: ChronoDuration::weeks(1),
+                        window_duration: SignedDuration::from_hours(7 * 24),
                         limit: week_limit,
                     },
                 ],
@@ -2112,14 +2102,14 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![
                     WindowLimit {
-                        window_duration: ChronoDuration::days(1),
+                        window_duration: SignedDuration::from_hours(24),
                         limit: day_limit,
                     },
                     WindowLimit {
-                        window_duration: ChronoDuration::weeks(1),
+                        window_duration: SignedDuration::from_hours(7 * 24),
                         limit: week_limit,
                     },
                 ],
@@ -2150,14 +2140,14 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![
                     WindowLimit {
-                        window_duration: ChronoDuration::days(1),
+                        window_duration: SignedDuration::from_hours(24),
                         limit: day_limit,
                     },
                     WindowLimit {
-                        window_duration: ChronoDuration::weeks(1),
+                        window_duration: SignedDuration::from_hours(7 * 24),
                         limit: week_limit,
                     },
                 ],
@@ -2190,9 +2180,9 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::days(1),
+                    window_duration: SignedDuration::from_hours(24),
                     limit: 10,
                 }],
                 token_window_limits: vec![],
@@ -2221,9 +2211,9 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::days(1),
+                    window_duration: SignedDuration::from_hours(24),
                     limit: 10,
                 }],
                 token_window_limits: vec![],
@@ -2251,9 +2241,9 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::weeks(1),
+                    window_duration: SignedDuration::from_hours(7 * 24),
                     limit: 10,
                 }],
                 token_window_limits: vec![],
@@ -2281,9 +2271,9 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::days(30),
+                    window_duration: SignedDuration::from_hours(30 * 24),
                     limit: 10,
                 }],
                 token_window_limits: vec![],
@@ -2313,9 +2303,9 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::days(1),
+                    window_duration: SignedDuration::from_hours(24),
                     limit: 10,
                 }],
                 token_window_limits: vec![],
@@ -2339,7 +2329,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![], // No window limits
                 token_window_limits: vec![],
                 cost_window_limits: vec![],
@@ -2361,10 +2351,10 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100, // avoid request-count limiting
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![],
                 token_window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::seconds(60),
+                    window_duration: SignedDuration::from_secs(60),
                     limit: 100,
                 }],
                 cost_window_limits: vec![],
@@ -2391,11 +2381,11 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100, // avoid request-count limiting
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![],
                 token_window_limits: vec![],
                 cost_window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::seconds(60),
+                    window_duration: SignedDuration::from_secs(60),
                     // nano-USD (same unit stored in user_usage_event)
                     limit: 1_000,
                 }],
@@ -2430,9 +2420,9 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100, // High limit to avoid short-term rate limiting
-                window_duration: ChronoDuration::seconds(1),
+                window_duration: SignedDuration::from_secs(1),
                 window_limits: vec![WindowLimit {
-                    window_duration: ChronoDuration::seconds(
+                    window_duration: SignedDuration::from_secs(
                         i64::try_from(window_seconds)
                             .expect("test window_seconds should fit in i64"),
                     ),
@@ -2467,12 +2457,7 @@ mod tests {
         );
 
         // Wait for the window to expire (window_seconds + small buffer)
-        tokio::time::sleep(
-            ChronoDuration::seconds(window_seconds as i64 + 1)
-                .to_std()
-                .unwrap_or_else(|_| std::time::Duration::from_secs(window_seconds + 1)),
-        )
-        .await;
+        tokio::time::sleep(Duration::from_secs(window_seconds + 1)).await;
 
         // Now the old activities should have expired, so we should be able to make new requests
         let result = state.try_acquire(user).await;
@@ -2509,7 +2494,7 @@ mod tests {
         let initial_config = RateLimitConfig {
             max_concurrent: 1,
             max_requests_per_window: 100,
-            window_duration: ChronoDuration::seconds(60),
+            window_duration: SignedDuration::from_secs(60),
             window_limits: vec![],
             token_window_limits: vec![],
             cost_window_limits: vec![],
@@ -2543,7 +2528,7 @@ mod tests {
         let new_config = RateLimitConfig {
             max_concurrent: 5,
             max_requests_per_window: 100,
-            window_duration: ChronoDuration::seconds(60),
+            window_duration: SignedDuration::from_secs(60),
             window_limits: vec![],
             token_window_limits: vec![],
             cost_window_limits: vec![],

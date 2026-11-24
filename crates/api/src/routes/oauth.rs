@@ -910,7 +910,7 @@ pub async fn verify_email_code(
         Json(crate::models::EmailAuthResponse {
             token,
             session_id: result.session.session_id.to_string(),
-            expires_at: result.session.expires_at.to_rfc3339(),
+            expires_at: services::timestamps::format_utc(result.session.expires_at),
             is_new_user: result.is_new_user,
         }),
     ))
@@ -1296,7 +1296,7 @@ pub async fn exchange_oauth_callback_code(
         Json(NearAuthResponse {
             token,
             session_id: exchanged.session.session_id.to_string(),
-            expires_at: exchanged.session.expires_at.to_rfc3339(),
+            expires_at: services::timestamps::format_utc(exchanged.session.expires_at),
             is_new_user: exchanged.is_new_user,
         }),
     ))
@@ -1584,7 +1584,7 @@ pub async fn mock_login(
         response_headers,
         axum::Json(crate::models::AuthResponse {
             token,
-            expires_at: session.expires_at.to_rfc3339(),
+            expires_at: services::timestamps::format_utc(session.expires_at),
         }),
     ))
 }
@@ -1715,7 +1715,7 @@ pub async fn near_auth(
         Json(NearAuthResponse {
             token,
             session_id: session.session_id.to_string(),
-            expires_at: session.expires_at.to_rfc3339(),
+            expires_at: services::timestamps::format_utc(session.expires_at),
             is_new_user,
         }),
     ))

@@ -4,7 +4,7 @@ use api::middleware::RateLimitState;
 use api::stripe_client_adapter::StripeClientAdapter;
 use api::{create_router_with_cors, AppState};
 use axum_test::TestServer;
-use chrono::Duration;
+use jiff::SignedDuration;
 use serde_json::json;
 use services::analytics::AnalyticsServiceImpl;
 use services::conversation::share_service::ConversationShareServiceImpl;
@@ -174,7 +174,7 @@ pub fn restrictive_rate_limit_config() -> RateLimitConfig {
     RateLimitConfig {
         max_concurrent: 2,
         max_requests_per_window: 1,
-        window_duration: Duration::seconds(1),
+        window_duration: SignedDuration::from_secs(1),
         window_limits: vec![],
         token_window_limits: vec![],
         cost_window_limits: vec![],
@@ -508,7 +508,7 @@ pub async fn create_test_server_with_state(
     let default_rate_limit_config = RateLimitConfig {
         max_concurrent: 2,
         max_requests_per_window: 100,
-        window_duration: Duration::seconds(60),
+        window_duration: SignedDuration::from_secs(60),
         window_limits: vec![],
         token_window_limits: vec![],
         cost_window_limits: vec![],
@@ -714,7 +714,7 @@ pub async fn insert_test_subscription_with_provider_and_price(
         .expect("user created by mock_login");
 
     // Use now+1day so "now" falls within [period_start, period_end) for usage queries.
-    let period_end = chrono::Utc::now() + chrono::Duration::days(1);
+    let period_end = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24);
     let sub_id = format!("sub_test_{}", Uuid::new_v4());
 
     let client = db.pool().get().await.expect("get pool client");
@@ -764,7 +764,7 @@ pub async fn insert_test_subscription_with_status(
         .expect("get user")
         .expect("user created by mock_login");
 
-    let period_end = chrono::Utc::now() + chrono::Duration::days(1);
+    let period_end = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(24);
     let sub_id = format!("sub_test_{}", Uuid::new_v4());
 
     let client = db.pool().get().await.expect("get pool client");

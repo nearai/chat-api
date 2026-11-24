@@ -1,5 +1,5 @@
-use chrono::{Duration, Utc};
 use database::Database;
+use jiff::{SignedDuration, Timestamp};
 use services::user::ports::{BanType, UserRepository, UserService};
 use services::user::UserServiceImpl;
 use uuid::Uuid;
@@ -44,7 +44,7 @@ async fn test_create_ban_after_expired_ban() {
         .await
         .expect("Failed to get database client");
 
-    let expired_time = Utc::now() - Duration::hours(1); // 1 hour ago
+    let expired_time = Timestamp::now() - SignedDuration::from_hours(1); // 1 hour ago
 
     client
         .execute(
@@ -70,7 +70,7 @@ async fn test_create_ban_after_expired_ban() {
 
     // Step 3: Try to create a new ban - this should succeed because the expired ban
     // will be automatically revoked in the transaction
-    let new_expires_at = Utc::now() + Duration::hours(1);
+    let new_expires_at = Timestamp::now() + SignedDuration::from_hours(1);
 
     user_repo
         .create_user_ban(
@@ -156,7 +156,7 @@ async fn test_multiple_bans_after_expiration() {
     let ban_type = BanType::Manual;
 
     // Create first ban (will expire soon)
-    let first_expires_at = Utc::now() + Duration::seconds(1);
+    let first_expires_at = Timestamp::now() + SignedDuration::from_secs(1);
     user_repo
         .create_user_ban(
             user_id,
@@ -178,7 +178,7 @@ async fn test_multiple_bans_after_expiration() {
     assert!(!has_active, "Ban should be expired");
 
     // Create second ban - should succeed because expired ban will be auto-revoked
-    let second_expires_at = Utc::now() + Duration::hours(1);
+    let second_expires_at = Timestamp::now() + SignedDuration::from_hours(1);
     user_repo
         .create_user_ban(
             user_id,
@@ -232,7 +232,7 @@ async fn test_create_ban_with_active_ban_exists() {
     let ban_type = BanType::Manual;
 
     // Step 1: Create an active ban
-    let first_expires_at = Utc::now() + Duration::hours(1);
+    let first_expires_at = Timestamp::now() + SignedDuration::from_hours(1);
     user_repo
         .create_user_ban(
             user_id,
@@ -252,7 +252,7 @@ async fn test_create_ban_with_active_ban_exists() {
 
     // Step 3: Try to create another ban with the same user_id and ban_type
     // This should fail due to unique index constraint violation
-    let second_expires_at = Utc::now() + Duration::hours(2);
+    let second_expires_at = Timestamp::now() + SignedDuration::from_hours(2);
     let result = user_repo
         .create_user_ban(
             user_id,
@@ -341,7 +341,7 @@ async fn test_ban_user_for_duration_skips_when_active_ban_exists() {
             user_id,
             ban_type,
             Some("First ban".to_string()),
-            Duration::hours(1),
+            SignedDuration::from_hours(1),
         )
         .await
         .expect("Failed to create first ban");
@@ -360,7 +360,7 @@ async fn test_ban_user_for_duration_skips_when_active_ban_exists() {
             user_id,
             ban_type,
             Some("Second ban attempt".to_string()),
-            Duration::hours(2),
+            SignedDuration::from_hours(2),
         )
         .await
         .expect("ban_user_for_duration should succeed even when active ban exists");
@@ -405,7 +405,7 @@ async fn test_ban_user_for_duration_skips_when_active_ban_exists() {
         .await
         .expect("Failed to query ban");
 
-    let expires_at: Option<chrono::DateTime<Utc>> = ban_row.get(0);
+    let expires_at: Option<jiff::Timestamp> = ban_row.get(0);
     assert!(
         expires_at.is_some(),
         "Original ban should still exist with its expiration time"

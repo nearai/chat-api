@@ -4,6 +4,7 @@ use crate::agent::service::AgentServiceImpl;
 use crate::system_configs::ports::{PartialSystemConfigs, SystemConfigs, SystemConfigsService};
 use async_trait::async_trait;
 use config::AgentManager;
+use jiff::Timestamp;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use wiremock::matchers::{bearer_token, method, path};
@@ -41,8 +42,8 @@ fn instance(owner: UserId, manager_url: &str) -> AgentInstance {
         agent_api_base_url: Some(manager_url.to_string()),
         service_type: None,
         status: "active".to_string(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 
@@ -317,6 +318,7 @@ async fn cutoff_precision_is_limited_to_three_fractional_digits() {
         "2026-11-01T00:00:00.000500Z",
         "2026-11-01T08:00:00.1234+08:00",
         "2026-11-01T00:00:00.1230Z",
+        "2026-11-01T00:00:00,1230Z",
         "2026-11-01T00:00:00.0000000001Z",
     ] {
         let result = service(&server, inst.clone()).with_backup_export_before(Some(cutoff));

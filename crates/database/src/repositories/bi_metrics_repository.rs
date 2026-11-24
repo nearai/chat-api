@@ -1,6 +1,6 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use services::bi_metrics::{
     BiMetricsRepository, DeploymentFilter, DeploymentRecord, DeploymentStatusCount,
     DeploymentSummary, DeploymentsSortBy, DeploymentsSortOrder, ListUsersFilter, ListUsersSort,
@@ -222,8 +222,8 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
     async fn get_deployment_summary(
         &self,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
+        start_date: Option<Timestamp>,
+        end_date: Option<Timestamp>,
     ) -> anyhow::Result<DeploymentSummary> {
         let mut client = self.pool.get().await?;
 
@@ -850,8 +850,8 @@ WHERE 1=1
                 let email: String = r.get("email");
                 let name: Option<String> = r.get("name");
                 let avatar_url: Option<String> = r.get("avatar_url");
-                let created_at: DateTime<Utc> = r.get("created_at");
-                let updated_at: DateTime<Utc> = r.get("updated_at");
+                let created_at: Timestamp = r.get("created_at");
+                let updated_at: Timestamp = r.get("updated_at");
                 UserWithStats {
                     user: User {
                         id,

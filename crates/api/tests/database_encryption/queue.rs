@@ -1,6 +1,6 @@
 use super::fixture::Fixture;
-use chrono::{DateTime, Utc};
 use http::HeaderName;
+use jiff::Timestamp;
 use serde_json::{json, Value};
 use std::time::Duration;
 use uuid::Uuid;
@@ -43,7 +43,7 @@ async fn concurrently_created_jobs_execute_one_after_the_other() {
                 let running_id: Uuid = running.get(0);
                 let queued = rows.iter().find(|row| row.get::<_, Uuid>(0) != running_id).unwrap();
                 assert_eq!(queued.get::<_, String>(1), "queued");
-                assert_eq!(queued.get::<_, Option<DateTime<Utc>>>(2), None);
+                assert_eq!(queued.get::<_, Option<Timestamp>>(2), None);
                 break running_id;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

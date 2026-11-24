@@ -406,7 +406,7 @@ mod tests {
         LinkedOAuthAccount, OAuthProvider, User, UserRepository, UserService,
     };
     use async_trait::async_trait;
-    use chrono::Utc;
+    use jiff::Timestamp;
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
     use uuid::Uuid;
@@ -480,7 +480,7 @@ mod tests {
 
     impl InMemoryShareRepo {
         fn next_share(&self, share: NewConversationShare) -> ConversationShare {
-            let now = Utc::now();
+            let now = Timestamp::now();
             ConversationShare {
                 id: Uuid::new_v4(),
                 conversation_id: share.conversation_id,
@@ -529,7 +529,7 @@ mod tests {
             name: &str,
             members: &[ShareRecipient],
         ) -> Result<ShareGroup, ConversationError> {
-            let now = Utc::now();
+            let now = Timestamp::now();
             let group = ShareGroup {
                 id: Uuid::new_v4(),
                 owner_user_id,
@@ -615,7 +615,7 @@ mod tests {
             if let Some(members) = members {
                 group.members = members.to_vec();
             }
-            group.updated_at = Utc::now();
+            group.updated_at = Timestamp::now();
             Ok(group.clone())
         }
 
@@ -652,7 +652,7 @@ mod tests {
                 // Update existing share
                 let existing = &mut shares[existing_idx];
                 existing.permission = share.permission;
-                existing.updated_at = Utc::now();
+                existing.updated_at = Timestamp::now();
                 return Ok(existing.clone());
             }
 
@@ -678,7 +678,7 @@ mod tests {
                     // Update existing share
                     let existing = &mut shares_vec[existing_idx];
                     existing.permission = share.permission;
-                    existing.updated_at = Utc::now();
+                    existing.updated_at = Timestamp::now();
                     results.push(existing.clone());
                 } else {
                     // Create new share
@@ -1106,7 +1106,7 @@ mod tests {
             _user_id: UserId,
             _ban_type: crate::user::ports::BanType,
             _reason: Option<String>,
-            _expires_at: Option<chrono::DateTime<chrono::Utc>>,
+            _expires_at: Option<jiff::Timestamp>,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -1229,7 +1229,7 @@ mod tests {
             _user_id: UserId,
             _ban_type: crate::user::ports::BanType,
             _reason: Option<String>,
-            _duration: chrono::Duration,
+            _duration: jiff::SignedDuration,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -1241,8 +1241,8 @@ mod tests {
             email: email.to_string(),
             name: None,
             avatar_url: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         }
     }
 
@@ -1553,7 +1553,7 @@ mod tests {
             LinkedOAuthAccount {
                 provider: OAuthProvider::Near,
                 provider_user_id: "writer.near".to_string(),
-                linked_at: Utc::now(),
+                linked_at: Timestamp::now(),
             },
         );
 
@@ -1610,7 +1610,7 @@ mod tests {
             LinkedOAuthAccount {
                 provider: OAuthProvider::Near,
                 provider_user_id: "alice.near".to_string(),
-                linked_at: Utc::now(),
+                linked_at: Timestamp::now(),
             },
         );
 

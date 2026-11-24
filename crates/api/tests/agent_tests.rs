@@ -1,7 +1,7 @@
 mod common;
 
-use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Utc};
 use common::{create_test_server_and_db, mock_login};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 use serial_test::serial;
 use services::agent::ports::{AgentRepository, CreateInstanceParams};
@@ -253,24 +253,24 @@ async fn test_get_instance_balance_includes_current_period_usage() {
     let client = db.pool().get().await.expect("get pool client");
     let instance_id = Uuid::new_v4();
     let external_instance_id = format!("balance-test-{}", Uuid::new_v4());
-    // Note: billing period for free users is based on Utc::now() called at runtime,
+    // Note: billing period for free users is based on Timestamp::now() called at runtime,
     // so we must insert events relative to current time.
     // To ensure current event falls within current billing period:
     // - Calculate start of current month at midnight
     // - Insert current event at start of month + 1 day (guaranteed to be within period)
     // - Insert previous event at start of month - 35 days (guaranteed to be in previous period)
-    let now = Utc::now();
-    let today = now.date_naive();
-    let start_of_month = chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-        .expect("valid date")
-        .and_hms_opt(0, 0, 0)
-        .expect("valid time");
-    let start_of_month = chrono::DateTime::<Utc>::from_naive_utc_and_offset(start_of_month, Utc);
+    let now = Timestamp::now();
+    let today = now.to_zoned(jiff::tz::TimeZone::UTC).date();
+    let start_of_month = today
+        .first_of_month()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .unwrap()
+        .timestamp();
 
     // Current event: 1 day into the month (guaranteed to be in current period)
-    let current_created_at = start_of_month + Duration::days(1);
+    let current_created_at = start_of_month + SignedDuration::from_hours(24);
     // Previous event: 35 days before start of month (guaranteed to be in previous period)
-    let previous_created_at = start_of_month - Duration::days(35);
+    let previous_created_at = start_of_month - SignedDuration::from_hours(35 * 24);
 
     client
         .execute(
@@ -381,33 +381,25 @@ async fn test_get_instance_balance_includes_current_period_usage() {
     assert_eq!(body["period_requests"], 1);
     assert_eq!(body["period_tokens"], 200);
 
-    let period_start_at = chrono::DateTime::parse_from_rfc3339(
-        body["period_start_at"]
-            .as_str()
-            .expect("period_start_at should be present"),
-    )
-    .expect("valid period_start_at")
-    .with_timezone(&Utc);
-    let period_end_at = chrono::DateTime::parse_from_rfc3339(
-        body["period_end_at"]
-            .as_str()
-            .expect("period_end_at should be present"),
-    )
-    .expect("valid period_end_at")
-    .with_timezone(&Utc);
+    let period_start_at = body["period_start_at"]
+        .as_str()
+        .expect("period_start_at should be present")
+        .parse::<Timestamp>()
+        .expect("valid period_start_at");
+    let period_end_at = body["period_end_at"]
+        .as_str()
+        .expect("period_end_at should be present")
+        .parse::<Timestamp>()
+        .expect("valid period_end_at");
 
-    let midnight = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is valid");
-    let expected_start: chrono::DateTime<Utc> = NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
-        .map(|d| chrono::DateTime::from_naive_utc_and_offset(d.and_time(midnight), Utc))
-        .expect("first of month is valid");
-    let (next_year, next_month) = if now.month() == 12 {
-        (now.year() + 1, 1)
-    } else {
-        (now.year(), now.month() + 1)
-    };
-    let expected_end: chrono::DateTime<Utc> = NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .map(|d| chrono::DateTime::from_naive_utc_and_offset(d.and_time(midnight), Utc))
-        .expect("first of next month is valid");
+    let expected_start = start_of_month;
+    let expected_end = today
+        .first_of_month()
+        .checked_add(jiff::Span::new().months(1))
+        .unwrap()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .unwrap()
+        .timestamp();
 
     assert_eq!(period_start_at, expected_start);
     assert_eq!(period_end_at, expected_end);
