@@ -682,6 +682,14 @@ impl std::fmt::Debug for AgentManager {
 /// Configuration for agent API integration (supports various agent types)
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AgentConfig {
+    /// Historical listings and downloads use this strict RFC 3339 cutoff unless fresh exports are enabled.
+    /// Requires an explicit timezone and at most three fractional-second digits.
+    /// Unset disables historical backup downloads.
+    #[serde(default)]
+    pub backup_export_before: Option<String>,
+    /// Explicitly enable fresh backup creation and downloads without the historical cutoff.
+    #[serde(default)]
+    pub backup_export_create_enabled: bool,
     /// Agent API managers (URL + token pairs). Supports multiple managers for load balancing.
     /// Configured via comma-separated AGENT_MANAGER_URLS + AGENT_MANAGER_TOKENS,
     /// or legacy single-manager AGENT_API_BASE_URL + AGENT_API_TOKEN.
@@ -746,6 +754,9 @@ impl Default for AgentConfig {
         managers.sort_by(|a, b| a.url.cmp(&b.url));
 
         Self {
+            backup_export_before: std::env::var("AGENT_BACKUP_EXPORT_BEFORE").ok(),
+            backup_export_create_enabled: std::env::var("AGENT_BACKUP_EXPORT_CREATE_ENABLED")
+                .is_ok_and(|value| value == "true"),
             managers,
             nearai_api_url: std::env::var("BACKEND_URL")
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
@@ -1559,5 +1570,52 @@ mod tests {
         std::env::remove_var("TASKS_WORKER_VISIBILITY_TIMEOUT");
         std::env::remove_var("TASKS_WORKER_MAX_MESSAGES");
         std::env::remove_var("TASKS_WORKER_MAX_CONCURRENCY");
+    }
+}
+
+#[cfg(test)]
+mod backup_export_config_tests {
+    #[test]
+    #[serial_test::serial]
+    fn fresh_exports_require_explicit_true() {
+        let previous = std::env::var_os("AGENT_BACKUP_EXPORT_CREATE_ENABLED");
+        std::env::remove_var("AGENT_BACKUP_EXPORT_CREATE_ENABLED");
+        let unset = AgentConfig::default().backup_export_create_enabled;
+        let values = ["true", "false", "TRUE", "1", "yes", ""];
+        let actual: Vec<_> = values
+            .iter()
+            .map(|value| {
+                std::env::set_var("AGENT_BACKUP_EXPORT_CREATE_ENABLED", value);
+                AgentConfig::default().backup_export_create_enabled
+            })
+            .collect();
+
+        match previous {
+            Some(value) => std::env::set_var("AGENT_BACKUP_EXPORT_CREATE_ENABLED", value),
+            None => std::env::remove_var("AGENT_BACKUP_EXPORT_CREATE_ENABLED"),
+        }
+
+        assert!(!unset);
+        assert_eq!(actual, [true, false, false, false, false, false]);
+    }
+
+    use super::AgentConfig;
+
+    #[test]
+    #[serial_test::serial]
+    fn cutoff_is_loaded_without_an_implicit_default() {
+        let previous = std::env::var_os("AGENT_BACKUP_EXPORT_BEFORE");
+        std::env::remove_var("AGENT_BACKUP_EXPORT_BEFORE");
+        let unset = AgentConfig::default().backup_export_before;
+        std::env::set_var("AGENT_BACKUP_EXPORT_BEFORE", "2026-01-01T00:00:00Z");
+        let configured = AgentConfig::default().backup_export_before;
+
+        match previous {
+            Some(value) => std::env::set_var("AGENT_BACKUP_EXPORT_BEFORE", value),
+            None => std::env::remove_var("AGENT_BACKUP_EXPORT_BEFORE"),
+        }
+
+        assert_eq!(unset, None);
+        assert_eq!(configured.as_deref(), Some("2026-01-01T00:00:00Z"));
     }
 }
